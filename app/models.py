@@ -23,6 +23,10 @@ class Company(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
 
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    normalized_name: Mapped[str | None] = mapped_column(
+        String(200),
+        index=True,
+    )
     website: Mapped[str | None] = mapped_column(String(500))
     domain: Mapped[str | None] = mapped_column(
         String(255),
@@ -122,9 +126,5 @@ class LeadSource(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
-            "company_id",
-            "source_url",
-            name="uq_company_source_url",
-        ),
+        UniqueConstraint("source_url", name="uq_lead_source_url"),
     )

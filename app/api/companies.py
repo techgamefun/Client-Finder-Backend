@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.models import Company
 from app.schemas.company import CompanyCreate, CompanyResponse
+from app.services.normalization import (
+    normalize_company_name,
+    normalize_domain,
+)
 
 
 router = APIRouter(
@@ -30,10 +34,18 @@ def create_company(
 ) -> Company:
     company_data = payload.model_dump(mode="json")
 
-    # Normalize the domain to avoid case-based duplicates.
-    domain = company_data.get("domain")
-    if domain:
-        company_data["domain"] = domain.strip().lower()
+    company_data["normalized_name"] = normalize_company_name(
+        company_data["name"]
+    )
+
+    company_data["domain"] = normalize_domain(
+        company_data.get("domain")
+    )
+
+    if not company_data["domain"] and company_data.get("website"):
+        company_data["domain"] = normalize_domain(
+            str(company_data["website"])
+        )
 
     company = Company(**company_data)
     db.add(company)
