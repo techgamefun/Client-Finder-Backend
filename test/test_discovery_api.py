@@ -1,8 +1,28 @@
+from uuid import UUID
+
 from app.schemas.discovery import (
     DiscoveryResult,
     DiscoverySearchResponse,
 )
 from app.api import discovery
+from app.models import SearchKeyword
+from conftest import TestingSessionLocal
+
+
+def test_frontend_origin_is_allowed_for_api_requests(client):
+    response = client.options(
+        "/api/v1/companies",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert (
+        response.headers["access-control-allow-origin"]
+        == "http://localhost:3000"
+    )
 
 
 def test_search_endpoint_returns_validated_results(client, monkeypatch):
@@ -32,7 +52,8 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json() == {
+    data = response.json()
+    assert data == {
         "query": "manufacturing companies",
         "results": [
             {
@@ -42,8 +63,24 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
                 "score": 0.9,
             }
         ],
+        "search_id": data["search_id"],
     }
+    UUID(data["search_id"])
     assert received == {
         "query": "manufacturing companies",
         "max_results": 3,
     }
+
+    with TestingSessionLocal() as db:
+        search = db.get(SearchKeyword, UUID(data["search_id"]))
+        assert search is not None
+        assert search.keyword == "manufacturing companies"
+        assert search.searched_at is not None
+
+    suggestions = client.get(
+        "/api/v1/discovery/suggestions",
+        params={"query": "FACTURING"},
+    )
+    assert suggestions.status_code == 200
+    assert suggestions.json()[0]["id"] == data["search_id"]
+    assert suggestions.json()[0]["keyword"] == "manufacturing companies"
