@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from conftest import TestingSessionLocal
 from app.models import Company, Contact, LeadSource, WebsiteCrawl
+from app.services.pagespeed import PageSpeedScanData
 from app.services import research_source_crawler, website_crawler
 
 
@@ -237,6 +238,67 @@ def test_company_website_crawl_status_and_recrawl(client, monkeypatch):
     assert recrawl.status_code == 200
     assert recrawl.json()["id"] == first_crawl.json()["id"]
     assert recrawl.json()["about_content"] == "Crawl 2"
+
+
+def test_company_pagespeed_scan_and_rescan(client, monkeypatch):
+    created = client.post(
+        "/api/v1/companies",
+        json={"name": "Example Company", "website": "https://example.com"},
+    )
+    company_id = created.json()["id"]
+    strategies: list[str] = []
+
+    async def fake_scan_pagespeed(website_url: str, strategy: str):
+        strategies.append(strategy)
+        return PageSpeedScanData(
+            website_url=website_url,
+            strategy=strategy,
+            category_scores={
+                "performance": 90,
+                "accessibility": 91,
+                "best-practices": 92,
+                "seo": 93,
+            },
+            report={"lighthouseResult": {"audits": {}}},
+        )
+
+    monkeypatch.setattr(
+        "app.api.companies.scan_pagespeed",
+        fake_scan_pagespeed,
+    )
+
+    first_scan = client.post(
+        f"/api/v1/companies/{company_id}/pagespeed-scans",
+        json={"strategy": "mobile"},
+    )
+    second_scan = client.post(
+        f"/api/v1/companies/{company_id}/pagespeed-scans",
+        json={"strategy": "mobile"},
+    )
+
+    assert first_scan.status_code == 201
+    assert second_scan.status_code == 201
+    assert first_scan.json()["strategy"] == "mobile"
+    assert first_scan.json()["category_scores"]["performance"] == 90
+    assert first_scan.json()["id"] != second_scan.json()["id"]
+    assert strategies == ["mobile", "mobile"]
+
+    company = client.get(f"/api/v1/companies/{company_id}")
+    assert len(company.json()["pagespeed_scans"]) == 2
+
+
+def test_company_pagespeed_scan_requires_website(client):
+    created = client.post(
+        "/api/v1/companies",
+        json={"name": "Example Company"},
+    )
+
+    response = client.post(
+        f"/api/v1/companies/{created.json()['id']}/pagespeed-scans",
+        json={"strategy": "mobile"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_company_website_crawl_requires_website_or_domain(client):

@@ -16,13 +16,17 @@ from app.schemas.company import (
     LeadStatusUpdate,
     ResearchSourceCrawlRequest,
 )
-from app.schemas.pagespeed import PageSpeedScanResponse
+from app.schemas.pagespeed import (
+    PageSpeedScanRequest,
+    PageSpeedScanResponse,
+)
 from app.schemas.website_crawl import WebsiteCrawlResponse
 from app.services.normalization import (
     normalize_company_name,
     normalize_domain,
 )
 from app.services.research_source_crawler import crawl_research_source
+from app.services.pagespeed import PageSpeedError, scan_pagespeed
 from app.services.website_crawler import crawl_and_persist, get_website_crawl
 
 
@@ -234,6 +238,56 @@ def get_pagespeed_scan(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="PageSpeed scan not found.",
         )
+    return scan
+
+
+@router.post(
+    "/{company_id}/pagespeed-scans",
+    response_model=PageSpeedScanResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_pagespeed_scan(
+    company_id: UUID,
+    payload: PageSpeedScanRequest,
+    db: DatabaseSession,
+) -> PageSpeedScan:
+    company = db.get(Company, company_id)
+    if company is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found.",
+        )
+
+    website_url = _company_website_url(company)
+    if website_url is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Add a company website or domain before scanning.",
+        )
+
+    try:
+        result = await scan_pagespeed(website_url, payload.strategy)
+    except PageSpeedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    scan = PageSpeedScan(
+        company_id=company.id,
+        website_url=result.website_url,
+        strategy=result.strategy,
+        category_scores=result.category_scores,
+        report=result.report,
+    )
+    db.add(scan)
+    try:
+        db.commit()
+        db.refresh(scan)
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+
     return scan
 
 

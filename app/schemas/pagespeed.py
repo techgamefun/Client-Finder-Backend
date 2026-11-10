@@ -8,6 +8,10 @@ from pydantic import BaseModel, ConfigDict
 PageSpeedStrategy = Literal["mobile", "desktop"]
 
 
+class PageSpeedScanRequest(BaseModel):
+    strategy: PageSpeedStrategy
+
+
 class PageSpeedScanSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
