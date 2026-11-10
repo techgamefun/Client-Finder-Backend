@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,7 +11,7 @@ class Settings(BaseSettings):
 
     tavily_api_key: str | None = None
     google_pagespeed_api_key: str | None = None
-    frontend_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3002"
+    frontend_origins: str = Field(validation_alias="FRONTEND_URL")
 
     model_config = SettingsConfigDict(
         env_file=".env",
