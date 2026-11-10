@@ -1,4 +1,7 @@
 
+import sys
+from pathlib import Path
+
 import pytest
 
 from fastapi.testclient import TestClient
@@ -10,6 +13,10 @@ from app.database import Base
 from app.api.deps import get_db
 from app.main import app
 from app import models  # Ensure models are registered
+
+
+CRAWLER_SERVICE_PATH = Path(__file__).resolve().parents[2] / "crawler-service"
+sys.path.insert(0, str(CRAWLER_SERVICE_PATH))
 
 
 TEST_DATABASE_URL = "sqlite://"

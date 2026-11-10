@@ -1,11 +1,18 @@
 from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.schemas.website_crawl import WebsiteCrawlRequest, WebsiteCrawlResponse
-from app.services.website_crawler import crawl_and_persist
+from app.schemas.website_crawl import (
+    WebsiteCrawlJobResponse,
+    WebsiteCrawlRequest,
+)
+from app.services.crawl_jobs import (
+    create_website_crawl_job,
+    get_website_crawl_job,
+)
 
 
 router = APIRouter(
@@ -14,10 +21,22 @@ router = APIRouter(
 )
 
 
-@router.post("/crawl", response_model=WebsiteCrawlResponse)
+@router.post(
+    "/crawl",
+    response_model=WebsiteCrawlJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def crawl_website(
     payload: WebsiteCrawlRequest,
     db: Annotated[Session, Depends(get_db)],
-) -> WebsiteCrawlResponse:
-    crawl = await crawl_and_persist(str(payload.website_url), db)
-    return WebsiteCrawlResponse.model_validate(crawl)
+) -> WebsiteCrawlJobResponse:
+    job = await create_website_crawl_job(str(payload.website_url), db)
+    return get_website_crawl_job(job.id, db)
+
+
+@router.get("/jobs/{job_id}", response_model=WebsiteCrawlJobResponse)
+def get_crawl_job(
+    job_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> WebsiteCrawlJobResponse:
+    return get_website_crawl_job(job_id, db)

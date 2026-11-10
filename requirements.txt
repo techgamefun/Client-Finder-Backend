@@ -5,5 +5,4 @@ sqlalchemy
 psycopg[binary]
 pytest
 httpx
-playwright
 alembic

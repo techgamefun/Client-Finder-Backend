@@ -48,21 +48,23 @@ The discovery and ingestion workflow runs as follows:
    enrichment, along with any crawl failures.
 
 Website enrichment is also available as a separate workflow.
-`POST /api/v1/crawler/crawl`
-accepts a public website URL, fetches its homepage and up to three relevant
-same-site About, Contact, or mission/goal pages starting from the supplied URL,
-and stores the extracted page
-text, email addresses, and social links in its own `website_crawls` table. It
-does not modify company or lead-source records by itself. It uses headless
-Chromium to render JavaScript before extracting page content. The crawler
-retries temporary `429` and server errors at most twice, respecting a short
-`Retry-After` delay when provided. A `403` means the site denied the browser
-request; the crawler reports it without attempting to defeat the refusal.
+`POST /api/v1/crawler/crawl` accepts a public website URL and queues a job.
+Poll `GET /api/v1/crawler/jobs/{job_id}` until the job succeeds or fails; a
+successful response includes the saved crawl result. The worker fetches the
+homepage and up to three relevant same-site About, Contact, or mission/goal
+pages, then stores extracted page text, email addresses, and social links in
+the `website_crawls` table. It does not modify company or lead-source records
+by itself. It uses headless Chromium to render JavaScript before extracting
+page content. It retries temporary `429` and server errors at most twice,
+respecting a short `Retry-After` delay when provided. A `403` means the site
+denied the browser request; the crawler reports it without attempting to defeat the refusal.
 Confirm the backend host is authorized and allowlisted by the site owner.
 Company profiles show the latest successful crawl and its extracted details.
-Use `GET /api/v1/companies/{id}/website-crawl` to load that status and
-`POST /api/v1/companies/{id}/website-crawl` to start or repeat a crawl using
-the company's website (or domain when no website URL is set).
+Use `GET /api/v1/companies/{id}/website-crawl` to load that result and
+`POST /api/v1/companies/{id}/website-crawl` to queue a crawl using the
+company's website (or domain when no website URL is set). Discovery ingestion
+and research-source enrichment remain synchronous because they need crawl
+results before those workflows can finish.
 
 On a company profile, select **Crawl and enrich** on an existing Research
 source card to crawl its saved URL and find company website/domain details and
@@ -85,6 +87,7 @@ the lead from being saved. Configure `GOOGLE_PAGESPEED_API_KEY` in the backend
 
 - Python 3.10 or newer
 - PostgreSQL
+- Upstash Redis for queued website crawl jobs
 - A Tavily API key for the discovery endpoints
 - A Google PageSpeed API key for PageSpeed scans during discovery ingestion
 
@@ -112,6 +115,8 @@ Create a `.env` file in the repository root (do not commit it):
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
 TAVILY_API_KEY=your-tavily-api-key
 GOOGLE_PAGESPEED_API_KEY=your-google-pagespeed-api-key
+UPSTASH_REDIS_REST_URL=https://your-upstash-database.upstash.io
+UPSTASH_REDIS_REST_TOKEN=your-upstash-rest-token
 ENVIRONMENT=development
 FRONTEND_ORIGINS=http://localhost:3000
 ```
@@ -123,6 +128,9 @@ The website crawler uses Playwright Chromium; install the browser on every
 backend host with `python -m playwright install chromium`.
 `GOOGLE_PAGESPEED_API_KEY` is used by the backend when discovery results are
 saved to the pipeline; it is never sent to the frontend.
+`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are required for
+queued website crawl jobs. PostgreSQL stores durable job status and results;
+Upstash Redis dispatches queued job IDs.
 `FRONTEND_ORIGINS` is a comma-separated list of frontend origins allowed to
 call the API; it defaults to `http://localhost:3000,http://127.0.0.1:3000`.
 Keep real credentials in your local environment and out of source control.
@@ -138,8 +146,9 @@ alembic upgrade head
 The migration chain creates the company, contact, and lead-source tables, adds
 the normalized company-name column and index, enforces globally unique source
 URLs, adds timestamped search keywords and their company associations, and
-stores per-company PageSpeed reports. It then converts entity IDs and their
-foreign keys to UUIDs while preserving existing records and relationships.
+stores per-company PageSpeed reports, converts entity IDs and their foreign
+keys to UUIDs while preserving existing records and relationships, and adds
+durable website crawl jobs.
 If the unique source-URL migration detects duplicates in existing data, it
 stops with an error; resolve those duplicates before rerunning the migration.
 
@@ -160,6 +169,16 @@ By default, Uvicorn listens on `http://127.0.0.1:8000`.
 - Health check: `GET http://127.0.0.1:8000/health`
 - Interactive API documentation: `http://127.0.0.1:8000/docs`
 - Alternative API documentation: `http://127.0.0.1:8000/redoc`
+
+In another terminal, start a worker with the same environment configuration:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.worker
+```
+
+Run one or more workers to process queued crawls. The worker calls the
+separate crawler service, so `WEB_CRAWLER_SERVICE_URL` must point to a running
+crawler service.
 
 ## API usage
 
@@ -238,12 +257,13 @@ the source URL and reason; failed sources are still saved without enrichment.
 }
 ```
 
-The response contains the most recently stored About, Contact, and mission/
-goal page text, extracted email addresses and social-media URLs, and the crawl
-timestamp. Re-crawling the same website replaces its saved crawl result. The
-crawler starts at the supplied URL, follows only same-site links, limits page
-count and response size, and rejects private, local, non-standard-port, and
-cross-site redirect targets.
+The endpoint returns `202 Accepted` with a job ID and initial status. Poll
+`GET /api/v1/crawler/jobs/{job_id}`; successful responses include the saved
+About, Contact, and mission/goal page text, extracted email addresses and
+social-media URLs, and the crawl timestamp. Re-crawling the same website
+replaces its saved crawl result. The crawler starts at the supplied URL,
+follows only same-site links, limits page count and response size, and rejects
+private, local, non-standard-port, and cross-site redirect targets.
 
 ### Add a company manually
 

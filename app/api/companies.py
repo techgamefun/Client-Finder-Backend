@@ -20,14 +20,21 @@ from app.schemas.pagespeed import (
     PageSpeedScanRequest,
     PageSpeedScanResponse,
 )
-from app.schemas.website_crawl import WebsiteCrawlResponse
+from app.schemas.website_crawl import (
+    WebsiteCrawlJobResponse,
+    WebsiteCrawlResponse,
+)
+from app.services.crawl_jobs import (
+    create_website_crawl_job,
+    get_website_crawl_job,
+)
 from app.services.normalization import (
     normalize_company_name,
     normalize_domain,
 )
 from app.services.research_source_crawler import crawl_research_source
 from app.services.pagespeed import PageSpeedError, scan_pagespeed
-from app.services.website_crawler import crawl_and_persist, get_website_crawl
+from app.services.website_crawler import get_website_crawl
 
 
 router = APIRouter(
@@ -169,12 +176,13 @@ def get_company_website_crawl(
 
 @router.post(
     "/{company_id}/website-crawl",
-    response_model=WebsiteCrawlResponse,
+    response_model=WebsiteCrawlJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def crawl_company_website(
     company_id: UUID,
     db: DatabaseSession,
-) -> WebsiteCrawlResponse:
+) -> WebsiteCrawlJobResponse:
     company = db.get(Company, company_id)
     if company is None:
         raise HTTPException(
@@ -189,8 +197,8 @@ async def crawl_company_website(
             detail="Add a company website or domain before crawling.",
         )
 
-    crawl = await crawl_and_persist(website_url, db)
-    return WebsiteCrawlResponse.model_validate(crawl)
+    job = await create_website_crawl_job(website_url, db)
+    return get_website_crawl_job(job.id, db)
 
 
 @router.post(

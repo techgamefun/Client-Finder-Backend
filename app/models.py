@@ -231,6 +231,49 @@ class WebsiteCrawl(Base):
     )
 
 
+class WebsiteCrawlJob(Base):
+    __tablename__ = "website_crawl_jobs"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    website_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="queued",
+        server_default="queued",
+        index=True,
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+    crawl_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("website_crawls.id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    crawl: Mapped[WebsiteCrawl | None] = relationship()
+
+
 class PageSpeedScan(Base):
     __tablename__ = "pagespeed_scans"
 

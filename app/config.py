@@ -11,6 +11,12 @@ class Settings(BaseSettings):
 
     tavily_api_key: str | None = None
     google_pagespeed_api_key: str | None = None
+    crawler_service_url: str = Field(
+        default="http://localhost:8001",
+        validation_alias="WEB_CRAWLER_SERVICE_URL",
+    )
+    upstash_redis_rest_url: str | None = None
+    upstash_redis_rest_token: str | None = None
     frontend_origins: str = Field(validation_alias="FRONTEND_URL")
 
     model_config = SettingsConfigDict(

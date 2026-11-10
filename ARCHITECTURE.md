@@ -5,8 +5,10 @@
 The application is a synchronous-persistence, asynchronous-provider FastAPI
 service. It exposes versioned HTTP routes, validates their inputs and outputs
 with Pydantic, uses SQLAlchemy for relational storage, and calls Tavily for web
-search. PostgreSQL is the configured application database; tests use an
-in-memory SQLite database.
+search. Website crawl requests use Upstash Redis to dispatch jobs to a
+separately run worker; PostgreSQL stores durable job state and crawl results.
+PostgreSQL is the configured application database; tests use an in-memory
+SQLite database.
 
 ## Component boundaries
 
@@ -28,6 +30,12 @@ app/main.py                 FastAPI app, router registration, health check
     +-- app/services/website_crawler.py
     |       Bounded same-site page crawling and contact/social extraction
     |
+    +-- app/services/redis_queue.py
+    |       Upstash Redis REST queue transport
+    |
+    +-- app/worker.py
+    |       Separate worker process for queued website crawl jobs
+    |
     +-- migrations/          Alembic-managed database schema history
 ```
 
@@ -40,8 +48,8 @@ app/main.py                 FastAPI app, router registration, health check
   primary key made from UUID foreign keys.
 - `app/api/deps.py` provides a database session per request and closes it when
   the request is complete.
-- `app/models.py` defines `Company`, `Contact`, `LeadSource`, and
-  `PageSpeedScan` tables and their relationships.
+- `app/models.py` defines `Company`, `Contact`, `LeadSource`, `PageSpeedScan`,
+  `WebsiteCrawl`, and durable `WebsiteCrawlJob` tables and their relationships.
 - `app/schemas/` keeps API payload validation separate from ORM entities.
 - `app/services/discovery.py` handles Tavily requests, provider failures, and
   validation of returned results.
@@ -55,6 +63,11 @@ app/main.py                 FastAPI app, router registration, health check
   crawl for their website and trigger a new crawl or re-crawl. It retries
   temporary rate-limit and server failures a bounded number of times, but
   reports denied access without attempting to bypass it.
+- `app/services/crawl_jobs.py` creates durable PostgreSQL crawl jobs and
+  dispatches their IDs through Upstash Redis. `app/worker.py` consumes jobs,
+  persists crawl results, records failures, and recovers abandoned jobs after
+  a worker interruption. Discovery and research-source crawls remain
+  synchronous because their results are required by those workflows.
 - `app/services/research_source_crawler.py` crawls URLs entered on a company
   profile, saves source and crawl evidence, and fills only missing website,
   domain, and public contact details that can be inferred from the source.
@@ -124,14 +137,21 @@ because the SQLAlchemy session is synchronous:
 
 ### Website crawling
 
-`POST /api/v1/crawler/crawl` takes a public website URL and runs independently
-from discovery search and lead ingestion. The crawler starts at the supplied
+`POST /api/v1/crawler/crawl` takes a public website URL and creates a durable
+job in PostgreSQL, then dispatches its ID through Upstash Redis. It returns
+`202 Accepted`; clients poll `GET /api/v1/crawler/jobs/{job_id}` for `queued`,
+`running`, `succeeded`, or `failed` status and receive the crawl result when
+successful. Company profile crawls use the same job queue. A separately
+started `python -m app.worker` process consumes jobs and calls the existing
+crawler service. The worker can recover abandoned jobs after a restart. This
+workflow runs independently from discovery search and lead ingestion. The
+crawler starts at the supplied
 URL, then fetches at most one discovered same-site About, Contact, and
 mission/goal page. It limits response size, request duration, page count, and
 redirects; blocks non-public IP addresses; and does not follow cross-site links
 or redirects. Extracted page text, emails, and social URLs are upserted into
-the separate `website_crawls` table. Discovery ingestion also associates
-successful crawl data with lead records.
+the separate `website_crawls` table. Discovery ingestion and research-source
+enrichment continue using synchronous crawling.
 Company profiles can read their latest successful crawl at
 `GET /api/v1/companies/{id}/website-crawl` and start or repeat a crawl with
 `POST /api/v1/companies/{id}/website-crawl`. These routes use the company's
@@ -155,9 +175,9 @@ as a database constraint.
 Alembic migrations are the source of truth for schema changes. The initial
 revision creates the lead tables; subsequent revisions add normalized company
 names, update lead-source URL uniqueness, track discovery search keywords and
-their company associations, save website crawls, store PageSpeed reports, and
+their company associations, save website crawls, store PageSpeed reports,
 convert entity primary keys and their foreign keys to UUIDs while preserving
-existing relationships.
+existing relationships, and add durable website crawl jobs.
 A migration that backfills or constrains existing data must account for
 incompatible existing rows and fail clearly rather than silently discarding
 data.

@@ -1,16 +1,184 @@
 import asyncio
+import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from uuid import UUID
 
 import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from fastapi.testclient import TestClient
 
 from conftest import TestingSessionLocal
-from app.models import Company, LeadSource, WebsiteCrawl
-from app.services import website_crawler
+from app import worker as website_crawl_worker
+from app.models import Company, LeadSource, WebsiteCrawl, WebsiteCrawlJob
+from app.services import website_crawler as app_website_crawler
+from app.services import redis_queue
+from app.services.redis_queue import RedisQueueError
+from crawler_service import crawler as website_crawler
+import main as crawler_service_api
+
+
+def test_main_api_crawler_client_calls_standalone_service(monkeypatch):
+    received: list[httpx.Request] = []
+    service_response = {
+        "website_url": "https://example.com/",
+        "about_page_url": None,
+        "about_content": "Company overview.",
+        "contact_page_url": None,
+        "contact_content": None,
+        "goals_page_url": None,
+        "goals_content": None,
+        "emails": ["hello@example.com"],
+        "social_links": [],
+        "phones": [],
+        "company_links": [],
+    }
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        received.append(request)
+        return httpx.Response(200, json=service_response)
+
+    real_async_client = httpx.AsyncClient
+
+    def mock_async_client(**kwargs):
+        return real_async_client(
+            transport=httpx.MockTransport(handle_request),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        app_website_crawler.httpx,
+        "AsyncClient",
+        mock_async_client,
+    )
+    monkeypatch.setattr(
+        app_website_crawler.settings,
+        "crawler_service_url",
+        "http://crawler.internal:8001/",
+    )
+
+    result = asyncio.run(
+        app_website_crawler.crawl_website("https://example.com")
+    )
+
+    assert len(received) == 1
+    assert str(received[0].url) == "http://crawler.internal:8001/crawl"
+    assert json.loads(received[0].content) == {
+        "website_url": "https://example.com"
+    }
+    assert result.about_content == "Company overview."
+    assert result.emails == ["hello@example.com"]
+
+
+def test_main_api_crawler_client_preserves_service_errors(monkeypatch):
+    real_async_client = httpx.AsyncClient
+
+    def mock_async_client(**kwargs):
+        return real_async_client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    400,
+                    json={"detail": "A public website URL is required."},
+                )
+            ),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        app_website_crawler.httpx,
+        "AsyncClient",
+        mock_async_client,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            app_website_crawler.crawl_website("http://localhost/private")
+        )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "A public website URL is required."
+
+
+def test_upstash_queue_uses_rest_commands(monkeypatch):
+    received_commands: list[list[str]] = []
+
+    class MockAsyncClient:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, url, *, headers, json):
+            assert url == "https://redis.example"
+            assert headers == {"Authorization": "Bearer test-token"}
+            received_commands.append(json)
+            result = "job-123" if json[0] == "RPOP" else 1
+            return httpx.Response(
+                200,
+                json={"result": result},
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(
+        redis_queue.settings,
+        "upstash_redis_rest_url",
+        "https://redis.example/",
+    )
+    monkeypatch.setattr(
+        redis_queue.settings,
+        "upstash_redis_rest_token",
+        "test-token",
+    )
+    monkeypatch.setattr(redis_queue.httpx, "AsyncClient", MockAsyncClient)
+
+    async def exercise_queue():
+        await redis_queue.enqueue_job("job-123")
+        return await redis_queue.dequeue_job()
+
+    assert asyncio.run(exercise_queue()) == "job-123"
+    assert received_commands == [
+        ["LPUSH", "website-crawl:jobs", "job-123"],
+        ["RPOP", "website-crawl:jobs"],
+    ]
+
+
+def test_standalone_crawler_service_exposes_crawl_endpoint(monkeypatch):
+    async def fake_crawl_website(website_url: str):
+        return website_crawler.CrawlData(
+            website_url=website_url.rstrip("/") + "/",
+            about_page_url=None,
+            about_content="Company overview.",
+            contact_page_url=None,
+            contact_content=None,
+            goals_page_url=None,
+            goals_content=None,
+            emails=[],
+            social_links=[],
+        )
+
+    monkeypatch.setattr(
+        crawler_service_api,
+        "crawl_website",
+        fake_crawl_website,
+    )
+
+    with TestClient(crawler_service_api.app) as client:
+        response = client.post(
+            "/crawl",
+            json={"website_url": "https://example.com"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["website_url"] == "https://example.com/"
+    assert response.json()["about_content"] == "Company overview."
 
 
 class MockBrowserResponse:
@@ -308,24 +476,15 @@ def test_browser_crawler_extracts_javascript_rendered_content(monkeypatch):
     assert page.content == "Rendered by Chromium"
 
 
-def test_crawl_endpoint_persists_results_in_separate_table(client, monkeypatch):
-    async def fake_crawl_website(_website_url: str):
-        return website_crawler.CrawlData(
-            website_url=_website_url.rstrip("/") + "/",
-            about_page_url="https://example.com/about",
-            about_content="About the company.",
-            contact_page_url="https://example.com/contact",
-            contact_content="Contact support@example.com.",
-            goals_page_url=None,
-            goals_content=None,
-            emails=["support@example.com"],
-            social_links=["https://www.linkedin.com/company/example"],
-        )
+def test_crawl_endpoint_queues_job_and_exposes_status(client, monkeypatch):
+    enqueued_ids: list[str] = []
+
+    async def fake_enqueue(job_id: str) -> None:
+        enqueued_ids.append(job_id)
 
     monkeypatch.setattr(
-        website_crawler,
-        "crawl_website",
-        fake_crawl_website,
+        "app.services.crawl_jobs.enqueue_job",
+        fake_enqueue,
     )
 
     response = client.post(
@@ -333,34 +492,153 @@ def test_crawl_endpoint_persists_results_in_separate_table(client, monkeypatch):
         json={"website_url": "https://example.com"},
     )
 
-    assert response.status_code == 200
-    result = response.json()
-    assert result["website_url"] == "https://example.com/"
-    assert result["about_content"] == "About the company."
-    assert result["emails"] == ["support@example.com"]
-    assert result["social_links"] == [
+    assert response.status_code == 202
+    job = response.json()
+    assert job["status"] == "queued"
+    assert job["website_url"] == "https://example.com/"
+    assert job["result"] is None
+    assert enqueued_ids == [job["id"]]
+
+    status_response = client.get(f"/api/v1/crawler/jobs/{job['id']}")
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "queued"
+
+    with TestingSessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(WebsiteCrawl)) == 0
+        assert db.scalar(select(func.count()).select_from(Company)) == 0
+        assert db.scalar(select(func.count()).select_from(LeadSource)) == 0
+        assert db.get(WebsiteCrawlJob, UUID(job["id"])) is not None
+
+
+def test_worker_persists_results_and_updates_job_state(client, monkeypatch):
+    async def fake_enqueue(_job_id: str) -> None:
+        return None
+
+    async def fake_crawl_website(_website_url: str):
+        return app_website_crawler.CrawlData(
+            website_url="https://example.com/",
+            about_page_url="https://example.com/about",
+            about_content="About the company.",
+            contact_page_url=None,
+            contact_content=None,
+            goals_page_url=None,
+            goals_content=None,
+            emails=["support@example.com"],
+            social_links=["https://www.linkedin.com/company/example"],
+        )
+
+    monkeypatch.setattr(
+        "app.services.crawl_jobs.enqueue_job",
+        fake_enqueue,
+    )
+    monkeypatch.setattr(website_crawl_worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(
+        website_crawl_worker,
+        "crawl_website",
+        fake_crawl_website,
+    )
+
+    queued = client.post(
+        "/api/v1/crawler/crawl",
+        json={"website_url": "https://example.com"},
+    ).json()
+    asyncio.run(website_crawl_worker.process_job(UUID(queued["id"])))
+
+    completed = client.get(f"/api/v1/crawler/jobs/{queued['id']}")
+    assert completed.status_code == 200
+    result = completed.json()
+    assert result["status"] == "succeeded"
+    assert result["attempts"] == 1
+    assert result["result"]["website_url"] == "https://example.com/"
+    assert result["result"]["about_content"] == "About the company."
+    assert result["result"]["emails"] == ["support@example.com"]
+    assert result["result"]["social_links"] == [
         "https://www.linkedin.com/company/example"
     ]
 
     with TestingSessionLocal() as db:
-        crawls = db.scalars(select(WebsiteCrawl)).all()
-        assert db.scalar(select(func.count()).select_from(Company)) == 0
-        assert db.scalar(select(func.count()).select_from(LeadSource)) == 0
-    assert len(crawls) == 1
-    assert crawls[0].website_url == "https://example.com/"
-    assert crawls[0].emails == ["support@example.com"]
+        assert db.scalar(select(func.count()).select_from(WebsiteCrawl)) == 1
 
 
-def test_crawl_endpoint_updates_existing_site_instead_of_duplicating(
+def test_worker_records_crawl_failure(client, monkeypatch):
+    async def fake_enqueue(_job_id: str) -> None:
+        return None
+
+    async def fail_crawl(_website_url: str):
+        raise HTTPException(
+            status_code=502,
+            detail="The crawler service failed.",
+        )
+
+    monkeypatch.setattr(
+        "app.services.crawl_jobs.enqueue_job",
+        fake_enqueue,
+    )
+    monkeypatch.setattr(website_crawl_worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(website_crawl_worker, "crawl_website", fail_crawl)
+
+    queued = client.post(
+        "/api/v1/crawler/crawl",
+        json={"website_url": "https://example.com"},
+    ).json()
+    asyncio.run(website_crawl_worker.process_job(UUID(queued["id"])))
+
+    failed = client.get(f"/api/v1/crawler/jobs/{queued['id']}")
+    assert failed.status_code == 200
+    assert failed.json()["status"] == "failed"
+    assert failed.json()["error"] == "The crawler service failed."
+
+
+def test_worker_recovers_queued_job_without_redis_delivery(client, monkeypatch):
+    monkeypatch.setattr(website_crawl_worker, "SessionLocal", TestingSessionLocal)
+    job = WebsiteCrawlJob(
+        website_url="https://example.com/",
+        status="queued",
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=60),
+    )
+    with TestingSessionLocal() as db:
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    assert website_crawl_worker._find_recoverable_job() == job_id
+
+
+def test_worker_requeues_stale_running_job(client, monkeypatch):
+    monkeypatch.setattr(website_crawl_worker, "SessionLocal", TestingSessionLocal)
+    job = WebsiteCrawlJob(
+        website_url="https://example.com/",
+        status="running",
+        attempts=1,
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        updated_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+    )
+    with TestingSessionLocal() as db:
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    assert website_crawl_worker._find_recoverable_job() == job_id
+    with TestingSessionLocal() as db:
+        recovered = db.get(WebsiteCrawlJob, job_id)
+        assert recovered is not None
+        assert recovered.status == "queued"
+        assert recovered.error == "Retrying after the worker stopped unexpectedly."
+
+
+def test_crawl_jobs_update_existing_site_instead_of_duplicating(
     client,
     monkeypatch,
 ):
     call_count = 0
 
+    async def fake_enqueue(_job_id: str) -> None:
+        return None
+
     async def fake_crawl_website(_website_url: str):
         nonlocal call_count
         call_count += 1
-        return website_crawler.CrawlData(
+        return app_website_crawler.CrawlData(
             website_url=_website_url.rstrip("/") + "/",
             about_page_url=None,
             about_content=f"Crawl {call_count}",
@@ -373,7 +651,16 @@ def test_crawl_endpoint_updates_existing_site_instead_of_duplicating(
         )
 
     monkeypatch.setattr(
-        website_crawler,
+        "app.services.crawl_jobs.enqueue_job",
+        fake_enqueue,
+    )
+    monkeypatch.setattr(
+        website_crawl_worker,
+        "SessionLocal",
+        TestingSessionLocal,
+    )
+    monkeypatch.setattr(
+        website_crawl_worker,
         "crawl_website",
         fake_crawl_website,
     )
@@ -387,9 +674,42 @@ def test_crawl_endpoint_updates_existing_site_instead_of_duplicating(
         json={"website_url": "https://example.com"},
     )
 
-    assert first.status_code == second.status_code == 200
-    assert first.json()["id"] == second.json()["id"]
-    assert second.json()["about_content"] == "Crawl 2"
+    assert first.status_code == second.status_code == 202
+    asyncio.run(website_crawl_worker.process_job(UUID(first.json()["id"])))
+    asyncio.run(website_crawl_worker.process_job(UUID(second.json()["id"])))
+
+    first_result = client.get(
+        f"/api/v1/crawler/jobs/{first.json()['id']}"
+    ).json()
+    second_result = client.get(
+        f"/api/v1/crawler/jobs/{second.json()['id']}"
+    ).json()
+    assert first_result["result"]["id"] == second_result["result"]["id"]
+    assert second_result["result"]["about_content"] == "Crawl 2"
 
     with TestingSessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(WebsiteCrawl)) == 1
+
+
+def test_crawl_endpoint_reports_redis_queue_failure(client, monkeypatch):
+    async def fail_enqueue(_job_id: str) -> None:
+        raise RedisQueueError("queue unavailable")
+
+    monkeypatch.setattr(
+        "app.services.crawl_jobs.enqueue_job",
+        fail_enqueue,
+    )
+
+    response = client.post(
+        "/api/v1/crawler/crawl",
+        json={"website_url": "https://example.com"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "The crawl queue is unavailable. Please try again."
+    )
+    with TestingSessionLocal() as db:
+        job = db.scalar(select(WebsiteCrawlJob))
+        assert job is not None
+        assert job.status == "failed"

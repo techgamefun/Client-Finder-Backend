@@ -6,7 +6,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import settings
-from app.services.website_crawler import _validate_public_url
+from app.services.public_url import _validate_public_url
 
 
 PAGESPEED_API_URL = (
