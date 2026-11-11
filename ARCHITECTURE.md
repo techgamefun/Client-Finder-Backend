@@ -145,10 +145,10 @@ successful. Company profile crawls use the same job queue. A separately
 started `python -m app.worker` process consumes jobs and calls the existing
 crawler service. The worker can recover abandoned jobs after a restart. This
 workflow runs independently from discovery search and lead ingestion. The
-crawler starts at the supplied
-URL, then fetches at most one discovered same-site About, Contact, and
-mission/goal page. It limits response size, request duration, page count, and
-redirects; blocks non-public IP addresses; and does not follow cross-site links
+crawler starts at the supplied URL, then fetches up to five discovered
+same-site About, Blog, Services, Contact, and mission/goal pages. It limits
+response size, request duration, page count, and redirects; blocks non-public
+IP addresses; and does not follow cross-site links
 or redirects. Extracted page text, emails, and social URLs are upserted into
 the separate `website_crawls` table. Discovery ingestion and research-source
 enrichment continue using synchronous crawling.

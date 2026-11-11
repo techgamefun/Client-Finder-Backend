@@ -14,8 +14,14 @@ class WebsiteCrawlResponse(BaseModel):
 
     id: UUID
     website_url: str
+    home_page_url: str | None
+    home_content: str | None
     about_page_url: str | None
     about_content: str | None
+    blog_page_url: str | None
+    blog_content: str | None
+    service_page_url: str | None
+    service_content: str | None
     contact_page_url: str | None
     contact_content: str | None
     goals_page_url: str | None

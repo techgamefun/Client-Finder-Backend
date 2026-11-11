@@ -17,8 +17,14 @@ class CrawlData(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     website_url: str
+    home_page_url: str | None = None
+    home_content: str | None = None
     about_page_url: str | None
     about_content: str | None
+    blog_page_url: str | None = None
+    blog_content: str | None = None
+    service_page_url: str | None = None
+    service_content: str | None = None
     contact_page_url: str | None
     contact_content: str | None
     goals_page_url: str | None
@@ -85,8 +91,14 @@ def _persist_crawl(data: CrawlData, db: Session) -> WebsiteCrawl:
                 crawl = WebsiteCrawl(website_url=data.website_url)
                 db.add(crawl)
 
+            crawl.home_page_url = data.home_page_url
+            crawl.home_content = data.home_content
             crawl.about_page_url = data.about_page_url
             crawl.about_content = data.about_content
+            crawl.blog_page_url = data.blog_page_url
+            crawl.blog_content = data.blog_content
+            crawl.service_page_url = data.service_page_url
+            crawl.service_content = data.service_content
             crawl.contact_page_url = data.contact_page_url
             crawl.contact_content = data.contact_content
             crawl.goals_page_url = data.goals_page_url

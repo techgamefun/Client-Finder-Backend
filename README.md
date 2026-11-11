@@ -51,13 +51,14 @@ Website enrichment is also available as a separate workflow.
 `POST /api/v1/crawler/crawl` accepts a public website URL and queues a job.
 Poll `GET /api/v1/crawler/jobs/{job_id}` until the job succeeds or fails; a
 successful response includes the saved crawl result. The worker fetches the
-homepage and up to three relevant same-site About, Contact, or mission/goal
-pages, then stores extracted page text, email addresses, and social links in
-the `website_crawls` table. It does not modify company or lead-source records
-by itself. It uses headless Chromium to render JavaScript before extracting
-page content. It retries temporary `429` and server errors at most twice,
+homepage and up to five relevant same-site About, Blog, Services, Contact, or
+mission/goal pages, then stores their page URLs and text, email addresses, and
+social links in the `website_crawls` table. It does not modify company or
+lead-source records by itself. It uses bounded same-site HTTP requests;
+JavaScript-only pages fail explicitly because browser rendering is not enabled.
+It retries temporary `429` and server errors at most twice,
 respecting a short `Retry-After` delay when provided. A `403` means the site
-denied the browser request; the crawler reports it without attempting to defeat the refusal.
+denied the request; the crawler reports it without attempting to defeat the refusal.
 Confirm the backend host is authorized and allowlisted by the site owner.
 Company profiles show the latest successful crawl and its extracted details.
 Use `GET /api/v1/companies/{id}/website-crawl` to load that result and
@@ -259,8 +260,9 @@ the source URL and reason; failed sources are still saved without enrichment.
 
 The endpoint returns `202 Accepted` with a job ID and initial status. Poll
 `GET /api/v1/crawler/jobs/{job_id}`; successful responses include the saved
-About, Contact, and mission/goal page text, extracted email addresses and
-social-media URLs, and the crawl timestamp. Re-crawling the same website
+homepage, About, Blog, Services, Contact, and mission/goal page text,
+extracted email addresses and social-media URLs, and the crawl timestamp.
+Re-crawling the same website
 replaces its saved crawl result. The crawler starts at the supplied URL,
 follows only same-site links, limits page count and response size, and rejects
 private, local, non-standard-port, and cross-site redirect targets.
@@ -339,7 +341,8 @@ contains the updated company record, contacts, and lead sources.
   across companies.
 - **Contact** — optional company-linked contact details. Discovery currently
   does not create contacts.
-- **WebsiteCrawl** — standalone website page content, email addresses, social
+- **WebsiteCrawl** — standalone homepage and relevant About, Blog, Services,
+  Contact, and mission/goal page content, email addresses, social
   links, and crawl timestamp, stored independently of company and lead data.
 
 Company names are matched through `normalized_name`; this helps discovery

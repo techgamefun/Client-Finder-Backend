@@ -26,8 +26,14 @@ def test_main_api_crawler_client_calls_standalone_service(monkeypatch):
     received: list[httpx.Request] = []
     service_response = {
         "website_url": "https://example.com/",
+        "home_page_url": "https://example.com/",
+        "home_content": "Welcome to Example.",
         "about_page_url": None,
         "about_content": "Company overview.",
+        "blog_page_url": "https://example.com/blog",
+        "blog_content": "Company updates.",
+        "service_page_url": "https://example.com/services",
+        "service_content": "Our services.",
         "contact_page_url": None,
         "contact_content": None,
         "goals_page_url": None,
@@ -71,6 +77,9 @@ def test_main_api_crawler_client_calls_standalone_service(monkeypatch):
         "website_url": "https://example.com"
     }
     assert result.about_content == "Company overview."
+    assert result.home_content == "Welcome to Example."
+    assert result.blog_page_url == "https://example.com/blog"
+    assert result.service_content == "Our services."
     assert result.emails == ["hello@example.com"]
 
 
@@ -517,8 +526,14 @@ def test_worker_persists_results_and_updates_job_state(client, monkeypatch):
     async def fake_crawl_website(_website_url: str):
         return app_website_crawler.CrawlData(
             website_url="https://example.com/",
+            home_page_url="https://example.com/",
+            home_content="Welcome to Example.",
             about_page_url="https://example.com/about",
             about_content="About the company.",
+            blog_page_url="https://example.com/blog",
+            blog_content="Company updates.",
+            service_page_url="https://example.com/services",
+            service_content="Our services.",
             contact_page_url=None,
             contact_content=None,
             goals_page_url=None,
@@ -550,7 +565,11 @@ def test_worker_persists_results_and_updates_job_state(client, monkeypatch):
     assert result["status"] == "succeeded"
     assert result["attempts"] == 1
     assert result["result"]["website_url"] == "https://example.com/"
+    assert result["result"]["home_page_url"] == "https://example.com/"
+    assert result["result"]["home_content"] == "Welcome to Example."
     assert result["result"]["about_content"] == "About the company."
+    assert result["result"]["blog_content"] == "Company updates."
+    assert result["result"]["service_content"] == "Our services."
     assert result["result"]["emails"] == ["support@example.com"]
     assert result["result"]["social_links"] == [
         "https://www.linkedin.com/company/example"

@@ -212,8 +212,14 @@ class WebsiteCrawl(Base):
         nullable=False,
         unique=True,
     )
+    home_page_url: Mapped[str | None] = mapped_column(String(2000))
+    home_content: Mapped[str | None] = mapped_column(Text)
     about_page_url: Mapped[str | None] = mapped_column(String(2000))
     about_content: Mapped[str | None] = mapped_column(Text)
+    blog_page_url: Mapped[str | None] = mapped_column(String(2000))
+    blog_content: Mapped[str | None] = mapped_column(Text)
+    service_page_url: Mapped[str | None] = mapped_column(String(2000))
+    service_content: Mapped[str | None] = mapped_column(Text)
     contact_page_url: Mapped[str | None] = mapped_column(String(2000))
     contact_content: Mapped[str | None] = mapped_column(Text)
     goals_page_url: Mapped[str | None] = mapped_column(String(2000))
