@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from app.schemas.pagespeed import PageSpeedScanJobResponse
+
 
 class DiscoverySearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=300)
@@ -39,12 +41,6 @@ class DiscoveryCrawlFailure(BaseModel):
     detail: str
 
 
-class DiscoveryPageSpeedFailure(BaseModel):
-    website_url: str
-    strategy: str
-    detail: str
-
-
 class DiscoveryIngestResponse(BaseModel):
     query: str
     results_found: int
@@ -55,7 +51,5 @@ class DiscoveryIngestResponse(BaseModel):
     companies_enriched: int
     contacts_added: int
     crawl_failures: list[DiscoveryCrawlFailure] = Field(default_factory=list)
-    pagespeed_scans_saved: int
-    pagespeed_failures: list[DiscoveryPageSpeedFailure] = Field(
-        default_factory=list
-    )
+    pagespeed_scans_queued: int
+    pagespeed_jobs: list[PageSpeedScanJobResponse] = Field(default_factory=list)

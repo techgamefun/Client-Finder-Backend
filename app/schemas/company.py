@@ -59,6 +59,7 @@ class LeadSourceResponse(BaseModel):
 
     id: UUID
     source_url: str
+    source_domain: str
     source_type: str | None
     evidence: str | None
     verified_at: datetime | None

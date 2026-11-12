@@ -64,10 +64,11 @@ app/main.py                 FastAPI app, router registration, health check
   temporary rate-limit and server failures a bounded number of times, but
   reports denied access without attempting to bypass it.
 - `app/services/crawl_jobs.py` creates durable PostgreSQL crawl jobs and
-  dispatches their IDs through Upstash Redis. `app/worker.py` consumes jobs,
-  persists crawl results, records failures, and recovers abandoned jobs after
-  a worker interruption. Discovery and research-source crawls remain
-  synchronous because their results are required by those workflows.
+  dispatches their IDs through Upstash Redis when available. `app/worker.py`
+  consumes jobs, persists crawl results, records failures, and recovers queued
+  jobs from PostgreSQL when Redis dispatch is unavailable. Discovery and
+  research-source crawls remain synchronous because their results are required
+  by those workflows.
 - `app/services/research_source_crawler.py` crawls URLs entered on a company
   profile, saves source and crawl evidence, and fills only missing website,
   domain, and public contact details that can be inferred from the source.
@@ -89,7 +90,8 @@ normalized company-name key, normalizes an optional domain (falling back to the
 website hostname), and inserts the company. A domain uniqueness violation is
 rolled back and translated to `409 Conflict`. `GET /api/v1/companies` reads
 records in descending creation-time order with bounded pagination and includes related
-contacts and source evidence. `GET /api/v1/companies/{id}` reads one complete
+contacts and source evidence, including each source URL's normalized domain.
+`GET /api/v1/companies/{id}` reads one complete
 record; `PATCH /api/v1/companies/{id}` updates supplied company fields while
 maintaining normalized names/domains and domain uniqueness; the dedicated
 `PATCH /api/v1/companies/{id}/status` changes lead status. `DELETE
@@ -110,9 +112,9 @@ returns up to ten recent unique keywords matching the supplied query.
 
 `POST /api/v1/discovery/ingest` accepts the displayed search results (or runs
 Tavily search for older clients that omit them), crawls each distinct source
-URL with bounded concurrency, then hands the results and successful crawls to
-`ingest_search_results`. Persistence is moved to Starlette's thread pool
-because the SQLAlchemy session is synchronous:
+URL with a maximum of ten concurrent crawls, then hands the results and
+successful crawls to `ingest_search_results`. Persistence is moved to
+Starlette's thread pool because the SQLAlchemy session is synchronous:
 
 1. Skip repeated source URLs within the search batch and URLs already stored.
 2. Normalize each result title and find a company by `normalized_name`.
@@ -123,12 +125,13 @@ because the SQLAlchemy session is synchronous:
 5. Use successful crawls to fill missing website/domain fields, add publicly
    listed email addresses as contacts, and save crawled page text and extracted
    metadata. Existing company details are not overwritten.
-6. Scan each distinct company website with mobile and desktop PageSpeed
-   strategies. Save category scores and detailed Lighthouse report history
-   with the matching company; report scan failures without blocking lead
-   ingestion.
-7. Insert each `LeadSource` with `web_search` type, source URL, and combined
-   search/crawl evidence.
+6. Create durable mobile and desktop PageSpeed jobs for each distinct company
+   website and enqueue them for the worker. Return without waiting for Google;
+   the worker saves category scores and detailed Lighthouse report history or
+   records a failed job for status lookup. Jobs record queue, start, and finish
+   timestamps so the frontend can show elapsed time and failure details.
+7. Insert each `LeadSource` with `web_search` type, source URL, normalized
+   source domain, and combined search/crawl evidence.
 8. Commit the database changes as one batch. Roll back on failure. Retry once after an
    `IntegrityError` to handle concurrent uniqueness conflicts.
 9. Return result, candidate, source, enrichment, PageSpeed, and skipped counts,
@@ -141,7 +144,9 @@ because the SQLAlchemy session is synchronous:
 job in PostgreSQL, then dispatches its ID through Upstash Redis. It returns
 `202 Accepted`; clients poll `GET /api/v1/crawler/jobs/{job_id}` for `queued`,
 `running`, `succeeded`, or `failed` status and receive the crawl result when
-successful. Company profile crawls use the same job queue. A separately
+successful. `GET /api/v1/crawler/jobs` lists recent jobs for queue monitoring.
+Job responses include queued, started, and completed timestamps. Company profile
+crawls use the same job queue. A separately
 started `python -m app.worker` process consumes jobs and calls the existing
 crawler service. The worker can recover abandoned jobs after a restart. This
 workflow runs independently from discovery search and lead ingestion. The

@@ -106,6 +106,7 @@ def test_company_detail_update_status_and_delete(client):
             LeadSource(
                 company_id=company_id,
                 source_url="https://example.com/about",
+                source_domain="example.com",
                 source_type="web_search",
                 evidence="Company profile",
             )
@@ -116,6 +117,7 @@ def test_company_detail_update_status_and_delete(client):
     assert detail.status_code == 200
     assert detail.json()["contacts"][0]["business_email"] == "alex@example.com"
     assert detail.json()["sources"][0]["evidence"] == "Company profile"
+    assert detail.json()["sources"][0]["source_domain"] == "example.com"
 
     updated = client.patch(
         f"/api/v1/companies/{company_id}",
@@ -430,6 +432,7 @@ def test_research_source_crawl_fills_missing_company_details(
     assert company["website"] == "https://example.com/"
     assert company["domain"] == "example.com"
     assert company["sources"][0]["source_type"] == "company_research"
+    assert company["sources"][0]["source_domain"] == "example.com"
     assert company["sources"][0]["verified_at"] is not None
     assert {
         (contact["business_email"], contact["business_phone"])

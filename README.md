@@ -44,13 +44,21 @@ The discovery and ingestion workflow runs as follows:
 9. Save a `web_search` lead source. Crawl failures are reported in the response,
    but the source is still saved for review. Database changes are committed as
    one batch; integrity conflicts trigger a retry, and other failures roll back.
-10. Return counts for search results, new candidates, sources, crawls, and
-   enrichment, along with any crawl failures.
+10. Queue mobile and desktop PageSpeed scans for each distinct company website
+   and return their job IDs without waiting for Google. The worker stores
+   completed reports; job status is available from the company PageSpeed jobs
+   endpoint and the recent-job list at `GET /api/v1/pagespeed/jobs`.
+11. Return counts for search results, new candidates, sources, crawls, and
+   enrichment, along with crawl failures and queued PageSpeed jobs.
 
 Website enrichment is also available as a separate workflow.
 `POST /api/v1/crawler/crawl` accepts a public website URL and queues a job.
-Poll `GET /api/v1/crawler/jobs/{job_id}` until the job succeeds or fails; a
-successful response includes the saved crawl result. The worker fetches the
+Poll `GET /api/v1/crawler/jobs/{job_id}` or list recent jobs with
+`GET /api/v1/crawler/jobs`. Job responses include queue, start, and completion
+timestamps and a failure reason when applicable; successful responses include
+the saved crawl result. Retry a failed job with
+`POST /api/v1/crawler/jobs/{job_id}/retry`; queued or running jobs cannot be
+retried. The worker fetches the
 homepage and up to five relevant same-site About, Blog, Services, Contact, or
 mission/goal pages, then stores their page URLs and text, email addresses, and
 social links in the `website_crawls` table. It does not modify company or
@@ -75,14 +83,12 @@ website/domain values are filled only when the source provides a credible
 company association. The API endpoint is
 `POST /api/v1/companies/{id}/sources/crawl` with a `source_url` field.
 
-When discovery results are saved to the pipeline, each distinct company
-website is also scanned with Google PageSpeed Insights for mobile and desktop
-performance, accessibility, best-practices, and SEO. Category scores and the
-full Lighthouse reports are saved with the company as scan history. The
-pipeline shows score summaries and loads detailed audit data when requested.
-A failed PageSpeed scan is reported in the save response and does not prevent
-the lead from being saved. Configure `GOOGLE_PAGESPEED_API_KEY` in the backend
-`.env` file.
+When discovery results are saved to the pipeline, mobile and desktop Google
+PageSpeed Insights scans are queued for each distinct company website. The
+ingest response returns without waiting for those scans. The worker saves
+category scores and full Lighthouse reports with the company; failed scans
+remain visible through their job status. Configure
+`GOOGLE_PAGESPEED_API_KEY` in the backend `.env` file.
 
 ## Requirements
 
@@ -129,9 +135,10 @@ The website crawler uses Playwright Chromium; install the browser on every
 backend host with `python -m playwright install chromium`.
 `GOOGLE_PAGESPEED_API_KEY` is used by the backend when discovery results are
 saved to the pipeline; it is never sent to the frontend.
-`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are required for
-queued website crawl jobs. PostgreSQL stores durable job status and results;
-Upstash Redis dispatches queued job IDs.
+`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` enable immediate
+dispatch of website crawl and PageSpeed jobs through Upstash Redis. PostgreSQL
+stores durable job status and results; if Redis is unavailable, the running
+worker recovers queued jobs from the database.
 `FRONTEND_ORIGINS` is a comma-separated list of frontend origins allowed to
 call the API; it defaults to `http://localhost:3000,http://127.0.0.1:3000`.
 Keep real credentials in your local environment and out of source control.
@@ -149,7 +156,7 @@ the normalized company-name column and index, enforces globally unique source
 URLs, adds timestamped search keywords and their company associations, and
 stores per-company PageSpeed reports, converts entity IDs and their foreign
 keys to UUIDs while preserving existing records and relationships, and adds
-durable website crawl jobs.
+durable website crawl and PageSpeed scan jobs.
 If the unique source-URL migration detects duplicates in existing data, it
 stops with an error; resolve those duplicates before rerunning the migration.
 
@@ -177,9 +184,9 @@ In another terminal, start a worker with the same environment configuration:
 .\.venv\Scripts\python.exe -m app.worker
 ```
 
-Run one or more workers to process queued crawls. The worker calls the
-separate crawler service, so `WEB_CRAWLER_SERVICE_URL` must point to a running
-crawler service.
+Run one or more workers to process queued crawls and PageSpeed scans. The
+worker calls the separate crawler service for crawl jobs, so
+`WEB_CRAWLER_SERVICE_URL` must point to a running crawler service.
 
 ## API usage
 
@@ -239,7 +246,23 @@ An example success response:
   "websites_crawled": 4,
   "companies_enriched": 3,
   "contacts_added": 2,
-  "crawl_failures": []
+  "crawl_failures": [],
+  "pagespeed_scans_queued": 6,
+  "pagespeed_jobs": [
+    {
+      "id": "b7e9f15d-3e9b-4c7f-b777-4b6a8ad21e6e",
+      "company_ids": ["b3f53f4f-4f4b-4b9d-9c67-3403a180b532"],
+      "website_url": "https://example.com/",
+      "strategy": "mobile",
+      "status": "queued",
+      "attempts": 0,
+      "error": null,
+      "created_at": "2026-11-11T00:00:00Z",
+      "updated_at": "2026-11-11T00:00:00Z",
+      "started_at": null,
+      "completed_at": null
+    }
+  ]
 }
 ```
 
@@ -247,6 +270,13 @@ Counts describe the validated search results and what happened while persisting
 them. A skipped result can be a repeated URL, a URL already stored, or a result
 whose title cannot be normalized into a company name. Crawl failures include
 the source URL and reason; failed sources are still saved without enrichment.
+PageSpeed scan jobs include one job per website and strategy. Poll
+`GET /api/v1/companies/{company_id}/pagespeed-jobs/{job_id}` to check whether a
+scan is queued, running, succeeded, or failed. The discovery screen polls jobs
+automatically and shows queue, start, finish, and elapsed times, as well as a
+failure reason. Completed scan summaries and full Lighthouse reports appear in
+the company's PageSpeed scan history. Retry a failed scan from the PageSpeed
+queue page or with `POST /api/v1/pagespeed/jobs/{job_id}/retry`.
 
 ### Crawl and enrich a website
 
@@ -336,9 +366,9 @@ contains the updated company record, contacts, and lead sources.
 - **Company** — company name and normalized matching key, website/domain,
   optional industry/location/software need, optional lead score, status, and
   creation timestamp.
-- **LeadSource** — a company-linked source URL, source type, evidence, optional
-  verification timestamp, and creation timestamp. Source URLs are unique
-  across companies.
+- **LeadSource** — a company-linked source URL and normalized source domain,
+  source type, evidence, optional verification timestamp, and creation
+  timestamp. Source URLs are unique across companies.
 - **Contact** — optional company-linked contact details. Discovery currently
   does not create contacts.
 - **WebsiteCrawl** — standalone homepage and relevant About, Blog, Services,

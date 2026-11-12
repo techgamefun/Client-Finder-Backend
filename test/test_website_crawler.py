@@ -159,6 +159,86 @@ def test_upstash_queue_uses_rest_commands(monkeypatch):
     ]
 
 
+def test_upstash_queue_error_includes_provider_reason(monkeypatch):
+    class MockAsyncClient:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, url, *, headers, json):
+            return httpx.Response(
+                200,
+                json={"error": "WRONGPASS invalid username-password pair"},
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(
+        redis_queue.settings,
+        "upstash_redis_rest_url",
+        "https://redis.example/",
+    )
+    monkeypatch.setattr(
+        redis_queue.settings,
+        "upstash_redis_rest_token",
+        "test-token",
+    )
+    monkeypatch.setattr(redis_queue.httpx, "AsyncClient", MockAsyncClient)
+
+    with pytest.raises(RedisQueueError, match="WRONGPASS"):
+        asyncio.run(redis_queue.enqueue_job("job-123"))
+
+
+def test_worker_uses_database_recovery_when_redis_is_unavailable(
+    monkeypatch,
+):
+    recovered_queues: list[str] = []
+
+    def fail_redis_validation() -> None:
+        raise RedisQueueError("Redis credentials are not configured.")
+
+    def no_crawl_job():
+        recovered_queues.append("crawl")
+        return None
+
+    def no_pagespeed_job():
+        recovered_queues.append("pagespeed")
+        return None
+
+    async def stop_after_recovery(_seconds: float) -> None:
+        raise RuntimeError("stop worker test")
+
+    monkeypatch.setattr(
+        website_crawl_worker,
+        "validate_redis_configuration",
+        fail_redis_validation,
+    )
+    monkeypatch.setattr(
+        website_crawl_worker,
+        "_find_recoverable_job",
+        no_crawl_job,
+    )
+    monkeypatch.setattr(
+        website_crawl_worker,
+        "_find_recoverable_pagespeed_job",
+        no_pagespeed_job,
+    )
+    monkeypatch.setattr(
+        website_crawl_worker.asyncio,
+        "sleep",
+        stop_after_recovery,
+    )
+
+    with pytest.raises(RuntimeError, match="stop worker test"):
+        asyncio.run(website_crawl_worker.run_worker())
+
+    assert set(recovered_queues) == {"crawl", "pagespeed"}
+
+
 def test_standalone_crawler_service_exposes_crawl_endpoint(monkeypatch):
     async def fake_crawl_website(website_url: str):
         return website_crawler.CrawlData(
@@ -505,12 +585,19 @@ def test_crawl_endpoint_queues_job_and_exposes_status(client, monkeypatch):
     job = response.json()
     assert job["status"] == "queued"
     assert job["website_url"] == "https://example.com/"
+    assert job["started_at"] is None
     assert job["result"] is None
     assert enqueued_ids == [job["id"]]
 
     status_response = client.get(f"/api/v1/crawler/jobs/{job['id']}")
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "queued"
+
+    queue_response = client.get("/api/v1/crawler/jobs")
+    assert queue_response.status_code == 200
+    assert [queued_job["id"] for queued_job in queue_response.json()] == [
+        job["id"]
+    ]
 
     with TestingSessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(WebsiteCrawl)) == 0
@@ -564,6 +651,8 @@ def test_worker_persists_results_and_updates_job_state(client, monkeypatch):
     result = completed.json()
     assert result["status"] == "succeeded"
     assert result["attempts"] == 1
+    assert result["started_at"] is not None
+    assert result["completed_at"] is not None
     assert result["result"]["website_url"] == "https://example.com/"
     assert result["result"]["home_page_url"] == "https://example.com/"
     assert result["result"]["home_content"] == "Welcome to Example."
@@ -631,6 +720,7 @@ def test_worker_requeues_stale_running_job(client, monkeypatch):
         attempts=1,
         created_at=datetime.now(timezone.utc) - timedelta(minutes=10),
         updated_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
     )
     with TestingSessionLocal() as db:
         db.add(job)
@@ -642,6 +732,7 @@ def test_worker_requeues_stale_running_job(client, monkeypatch):
         recovered = db.get(WebsiteCrawlJob, job_id)
         assert recovered is not None
         assert recovered.status == "queued"
+        assert recovered.started_at is None
         assert recovered.error == "Retrying after the worker stopped unexpectedly."
 
 
@@ -724,11 +815,65 @@ def test_crawl_endpoint_reports_redis_queue_failure(client, monkeypatch):
         json={"website_url": "https://example.com"},
     )
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == (
-        "The crawl queue is unavailable. Please try again."
+    assert response.status_code == 202
+    job_id = UUID(response.json()["id"])
+    assert response.json()["status"] == "queued"
+    assert response.json()["error"] is None
+    assert response.json()["completed_at"] is None
+    with TestingSessionLocal() as db:
+        job = db.get(WebsiteCrawlJob, job_id)
+        assert job is not None
+        assert job.status == "queued"
+
+
+def test_failed_crawl_job_can_be_retried(client, monkeypatch):
+    enqueued_ids: list[str] = []
+
+    async def fake_enqueue(job_id: str) -> None:
+        enqueued_ids.append(job_id)
+
+    monkeypatch.setattr(
+        "app.services.crawl_jobs.enqueue_job",
+        fake_enqueue,
     )
     with TestingSessionLocal() as db:
-        job = db.scalar(select(WebsiteCrawlJob))
-        assert job is not None
-        assert job.status == "failed"
+        job = WebsiteCrawlJob(
+            website_url="https://example.com/",
+            status="failed",
+            attempts=3,
+            error="The crawler service failed.",
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    response = client.post(f"/api/v1/crawler/jobs/{job_id}/retry")
+
+    assert response.status_code == 202
+    retried = response.json()
+    assert retried["status"] == "queued"
+    assert retried["attempts"] == 0
+    assert retried["error"] is None
+    assert retried["started_at"] is None
+    assert retried["completed_at"] is None
+    assert enqueued_ids == [str(job_id)]
+
+
+def test_non_failed_crawl_job_cannot_be_retried(client):
+    with TestingSessionLocal() as db:
+        job = WebsiteCrawlJob(
+            website_url="https://example.com/",
+            status="queued",
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    response = client.post(f"/api/v1/crawler/jobs/{job_id}/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Only failed website crawl jobs can be retried."
+    )

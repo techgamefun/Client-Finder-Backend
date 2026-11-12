@@ -14,7 +14,7 @@ from app.models import (
     Company,
     Contact,
     LeadSource,
-    PageSpeedScan,
+    PageSpeedScanJob,
     SearchKeyword,
     WebsiteCrawl,
 )
@@ -22,16 +22,14 @@ from app.schemas.discovery import (
     DiscoveryCrawlFailure,
     DiscoveryIngestRequest,
     DiscoveryIngestResponse,
-    DiscoveryPageSpeedFailure,
     DiscoveryResult,
 )
 from app.services.discovery import search_companies
 from app.services.normalization import normalize_company_name, normalize_domain
-from app.services.pagespeed import (
-    PAGESPEED_STRATEGIES,
-    PageSpeedError,
-    PageSpeedScanData,
-    scan_pagespeed,
+from app.services.pagespeed import PAGESPEED_STRATEGIES
+from app.services.pagespeed_jobs import (
+    enqueue_pagespeed_jobs,
+    serialize_pagespeed_scan_job,
 )
 from app.services.website_crawler import CrawlData, crawl_website
 
@@ -39,12 +37,11 @@ from app.services.website_crawler import CrawlData, crawl_website
 def _persist_search_results(
     results: Sequence[DiscoveryResult],
     crawls_by_url: dict[str, CrawlData],
-    pagespeed_by_website: dict[str, list[PageSpeedScanData]],
     pagespeed_targets_by_source: dict[str, str],
     db: Session,
     query: str,
     search_id: UUID | None,
-) -> tuple[int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, list[PageSpeedScanJob]]:
     for attempt in range(2):
         companies_created = 0
         sources_added = 0
@@ -52,7 +49,8 @@ def _persist_search_results(
         contacts_added = 0
         enriched_company_ids: set[UUID] = set()
         persisted_crawl_urls: set[str] = set()
-        persisted_pagespeed_keys: set[tuple[UUID, str, str]] = set()
+        pagespeed_jobs_by_key: dict[tuple[str, str], PageSpeedScanJob] = {}
+        pagespeed_jobs: list[PageSpeedScanJob] = []
         claimed_domains: set[str] = set()
         seen_urls: set[str] = set()
         linked_company_ids: set[UUID] = set()
@@ -170,21 +168,39 @@ def _persist_search_results(
                     source_url,
                     _homepage_url(source_url),
                 )
-                for scan in pagespeed_by_website.get(website_url, []):
-                    scan_key = (company.id, scan.website_url, scan.strategy)
-                    if scan_key in persisted_pagespeed_keys:
-                        continue
-                    _persist_pagespeed_scan(scan, company.id, db)
-                    persisted_pagespeed_keys.add(scan_key)
+                for strategy in PAGESPEED_STRATEGIES:
+                    job_key = (website_url, strategy)
+                    job = pagespeed_jobs_by_key.get(job_key)
+                    if job is None:
+                        job = PageSpeedScanJob(
+                            company_id=company.id,
+                            website_url=website_url,
+                            strategy=strategy,
+                            companies=[company],
+                        )
+                        db.add(job)
+                        pagespeed_jobs_by_key[job_key] = job
+                        pagespeed_jobs.append(job)
+                    elif all(
+                        linked_company.id != company.id
+                        for linked_company in job.companies
+                    ):
+                        job.companies.append(company)
 
                 if existing_source is None:
                     evidence = result.content
                     if crawl is not None:
                         evidence = _combine_evidence(result.content, crawl)
+                    source_domain = normalize_domain(source_url)
+                    if source_domain is None:
+                        raise ValueError(
+                            f"Could not determine source domain for {source_url!r}."
+                        )
                     db.add(
                         LeadSource(
                             company_id=company.id,
                             source_url=source_url,
+                            source_domain=source_domain,
                             source_type="web_search",
                             evidence=evidence,
                         )
@@ -198,7 +214,7 @@ def _persist_search_results(
                 skipped,
                 len(enriched_company_ids),
                 contacts_added,
-                len(persisted_pagespeed_keys),
+                pagespeed_jobs,
             )
         except IntegrityError:
             db.rollback()
@@ -249,23 +265,6 @@ def _upsert_crawl(crawl: CrawlData, db: Session) -> None:
     record.crawled_at = datetime.now(timezone.utc)
 
 
-def _persist_pagespeed_scan(
-    scan: PageSpeedScanData,
-    company_id: UUID,
-    db: Session,
-) -> None:
-    db.add(
-        PageSpeedScan(
-            company_id=company_id,
-            website_url=scan.website_url,
-            strategy=scan.strategy,
-            category_scores=scan.category_scores,
-            report=scan.report,
-            scanned_at=datetime.now(timezone.utc),
-        )
-    )
-
-
 def _pagespeed_target_url(result: DiscoveryResult, db: Session) -> str:
     source = db.scalar(
         select(LeadSource)
@@ -309,7 +308,7 @@ async def ingest_search_results(
     else:
         results = request.results
 
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(10)
     crawl_failures: list[DiscoveryCrawlFailure] = []
     crawls_by_url: dict[str, CrawlData] = {}
 
@@ -346,50 +345,6 @@ async def ingest_search_results(
         str(result.url): _pagespeed_target_url(result, db)
         for result in unique_results
     }
-    website_urls = sorted(set(pagespeed_targets_by_source.values()))
-    pagespeed_semaphore = asyncio.Semaphore(3)
-    pagespeed_failures: list[DiscoveryPageSpeedFailure] = []
-    pagespeed_by_website: dict[str, list[PageSpeedScanData]] = {}
-
-    async def scan_website(
-        website_url: str,
-    ) -> tuple[
-        str,
-        list[PageSpeedScanData],
-        list[DiscoveryPageSpeedFailure],
-    ]:
-        scans: list[PageSpeedScanData] = []
-        failures: list[DiscoveryPageSpeedFailure] = []
-        async with pagespeed_semaphore:
-            results = await asyncio.gather(
-                *(
-                    scan_pagespeed(website_url, strategy)
-                    for strategy in PAGESPEED_STRATEGIES
-                ),
-                return_exceptions=True,
-            )
-        for strategy, result in zip(
-            PAGESPEED_STRATEGIES,
-            results,
-            strict=True,
-        ):
-            if isinstance(result, PageSpeedScanData):
-                scans.append(result)
-            elif isinstance(result, PageSpeedError):
-                failures.append(
-                    DiscoveryPageSpeedFailure(
-                        website_url=website_url,
-                        strategy=strategy,
-                        detail=str(result),
-                    )
-                )
-            elif isinstance(result, BaseException):
-                raise result
-        return website_url, scans, failures
-
-    pagespeed_results = await asyncio.gather(
-        *(scan_website(website_url) for website_url in website_urls)
-    )
     crawl_results = await crawl_results_task
     for source_url, crawl, failure in crawl_results:
         if crawl is not None:
@@ -397,27 +352,24 @@ async def ingest_search_results(
         if failure is not None:
             crawl_failures.append(failure)
 
-    for website_url, scans, failures in pagespeed_results:
-        pagespeed_by_website[website_url] = scans
-        pagespeed_failures.extend(failures)
-
     (
         companies_created,
         sources_added,
         skipped,
         companies_enriched,
         contacts_added,
-        pagespeed_scans_saved,
+        pagespeed_jobs,
     ) = await run_in_threadpool(
         _persist_search_results,
         results,
         crawls_by_url,
-        pagespeed_by_website,
         pagespeed_targets_by_source,
         db,
         request.query,
         request.search_id,
     )
+
+    await enqueue_pagespeed_jobs([job.id for job in pagespeed_jobs])
 
     return DiscoveryIngestResponse(
         query=request.query,
@@ -429,6 +381,8 @@ async def ingest_search_results(
         companies_enriched=companies_enriched,
         contacts_added=contacts_added,
         crawl_failures=crawl_failures,
-        pagespeed_scans_saved=pagespeed_scans_saved,
-        pagespeed_failures=pagespeed_failures,
+        pagespeed_scans_queued=len(pagespeed_jobs),
+        pagespeed_jobs=[
+            serialize_pagespeed_scan_job(job) for job in pagespeed_jobs
+        ],
     )

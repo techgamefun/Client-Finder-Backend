@@ -158,15 +158,22 @@ def _persist_research_enrichment(
 
     now = datetime.now(timezone.utc)
     evidence = _crawl_evidence(crawl)
+    source_domain = normalize_domain(source_url)
+    if source_domain is None:
+        raise ValueError(
+            f"Could not determine source domain for {source_url!r}."
+        )
     if source is None:
         source = LeadSource(
             source_url=source_url,
+            source_domain=source_domain,
             source_type="company_research",
             evidence=evidence,
             verified_at=now,
         )
         company.sources.append(source)
     else:
+        source.source_domain = source_domain
         source.evidence = evidence
         source.verified_at = now
 

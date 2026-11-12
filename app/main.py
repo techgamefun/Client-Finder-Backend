@@ -9,6 +9,7 @@ from app.database import database_url
 
 from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
+from app.api.pagespeed import router as pagespeed_router
 from app.api.website_crawler import router as website_crawler_router
 
 try:
@@ -63,6 +64,11 @@ app.include_router(
 # Register the independent website crawler API.
 app.include_router(
     website_crawler_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    pagespeed_router,
     prefix="/api/v1",
 )
 

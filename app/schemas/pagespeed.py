@@ -24,3 +24,19 @@ class PageSpeedScanSummary(BaseModel):
 
 class PageSpeedScanResponse(PageSpeedScanSummary):
     report: dict[str, Any]
+
+
+class PageSpeedScanJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    company_ids: list[UUID]
+    website_url: str
+    strategy: PageSpeedStrategy
+    status: Literal["queued", "running", "succeeded", "failed"]
+    attempts: int
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None

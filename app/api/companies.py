@@ -17,6 +17,7 @@ from app.schemas.company import (
     ResearchSourceCrawlRequest,
 )
 from app.schemas.pagespeed import (
+    PageSpeedScanJobResponse,
     PageSpeedScanRequest,
     PageSpeedScanResponse,
 )
@@ -32,6 +33,7 @@ from app.services.normalization import (
     normalize_company_name,
     normalize_domain,
 )
+from app.services.pagespeed_jobs import get_pagespeed_scan_job
 from app.services.research_source_crawler import crawl_research_source
 from app.services.pagespeed import PageSpeedError, scan_pagespeed
 from app.services.website_crawler import get_website_crawl
@@ -247,6 +249,24 @@ def get_pagespeed_scan(
             detail="PageSpeed scan not found.",
         )
     return scan
+
+
+@router.get(
+    "/{company_id}/pagespeed-jobs/{job_id}",
+    response_model=PageSpeedScanJobResponse,
+)
+def get_company_pagespeed_job(
+    company_id: UUID,
+    job_id: UUID,
+    db: DatabaseSession,
+) -> PageSpeedScanJobResponse:
+    if db.get(Company, company_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found.",
+        )
+
+    return get_pagespeed_scan_job(company_id, job_id, db)
 
 
 @router.post(
