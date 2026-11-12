@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.database import SessionLocal
 from app.models import PageSpeedScan, PageSpeedScanJob, WebsiteCrawlJob
+from app.services.application_settings import CrawlSettings, get_crawl_settings
 from app.services.redis_queue import (
     RedisQueueError,
     dequeue_job,
@@ -125,6 +126,11 @@ def _save_success(job_id: UUID, crawl_data: CrawlData) -> None:
         db.commit()
 
 
+def _get_crawl_settings() -> CrawlSettings:
+    with SessionLocal() as db:
+        return get_crawl_settings(db)
+
+
 def _save_failure(job_id: UUID, detail: str) -> None:
     with SessionLocal() as db:
         job = db.get(WebsiteCrawlJob, job_id)
@@ -144,7 +150,12 @@ async def process_job(job_id: UUID) -> None:
         return
 
     try:
-        crawl_data = await crawl_website(website_url)
+        crawl_settings = await run_in_threadpool(_get_crawl_settings)
+        crawl_data = await crawl_website(
+            website_url,
+            max_pages=crawl_settings.max_pages,
+            max_depth=crawl_settings.max_depth,
+        )
         await run_in_threadpool(_save_success, job_id, crawl_data)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)

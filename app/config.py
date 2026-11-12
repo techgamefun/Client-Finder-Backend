@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     database_url: str
 
     tavily_api_key: str | None = None
+    settings_admin_token: str | None = None
+    settings_encryption_key: str | None = None
     google_pagespeed_api_key: str | None = None
     crawler_service_url: str = Field(
         default="http://localhost:8001",

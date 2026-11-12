@@ -121,6 +121,8 @@ Create a `.env` file in the repository root (do not commit it):
 ```dotenv
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
 TAVILY_API_KEY=your-tavily-api-key
+SETTINGS_ADMIN_TOKEN=generated-random-admin-token
+SETTINGS_ENCRYPTION_KEY=generated-fernet-key
 GOOGLE_PAGESPEED_API_KEY=your-google-pagespeed-api-key
 UPSTASH_REDIS_REST_URL=https://your-upstash-database.upstash.io
 UPSTASH_REDIS_REST_TOKEN=your-upstash-rest-token
@@ -128,13 +130,34 @@ ENVIRONMENT=development
 FRONTEND_ORIGINS=http://localhost:3000
 ```
 
-`DATABASE_URL` is required when the application starts. `TAVILY_API_KEY` is
-only needed for web discovery; without it, discovery requests return
-`503 Service Unavailable`. The database layer uses psycopg for PostgreSQL.
+`DATABASE_URL` is required when the application starts. Tavily can be
+configured either with `TAVILY_API_KEY` or from the protected Settings page;
+without either key, discovery requests return `503 Service Unavailable`. The
+database layer uses psycopg for PostgreSQL.
 The website crawler uses Playwright Chromium; install the browser on every
 backend host with `python -m playwright install chromium`.
 `GOOGLE_PAGESPEED_API_KEY` is used by the backend when discovery results are
 saved to the pipeline; it is never sent to the frontend.
+`SETTINGS_ADMIN_TOKEN` protects the Settings page API. Generate a long random
+value and enter it on that page to administer settings.
+`SETTINGS_ENCRYPTION_KEY` is a Fernet key used to encrypt a Tavily key saved
+from the page; keep it stable and backed up, because changing or losing it
+makes the saved key unreadable. Generate both values with:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+The Settings page can replace the Tavily key and query Tavily's usage endpoint
+for current-cycle credits and limits. Keys saved there are encrypted in
+PostgreSQL and are never returned to the browser. `TAVILY_API_KEY` remains a
+deployment-level fallback; if a database key is saved, it takes precedence.
+The page also sets maximum pages and depth for new crawls (up to 6 pages and
+depth 2); the crawler service may enforce lower deployment limits. Address,
+Chrome path, response/timeouts, queue, retries, rate limit, user agent, and Go
+runtime memory/CPU settings remain deployment-managed and require a service
+restart to change.
 `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` enable immediate
 dispatch of website crawl and PageSpeed jobs through Upstash Redis. PostgreSQL
 stores durable job status and results; if Redis is unavailable, the running

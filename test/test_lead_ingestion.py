@@ -40,10 +40,10 @@ def _search_response(*results: tuple[str, str, str]) -> DiscoverySearchResponse:
 
 
 def _mock_search(monkeypatch, response: DiscoverySearchResponse) -> None:
-    async def fake_search(query: str, max_results: int):
+    async def fake_search(query: str, max_results: int, db):
         return response
 
-    async def fake_crawl(website_url: str):
+    async def fake_crawl(website_url: str, **_options):
         return CrawlData(
             website_url=website_url.split("?", maxsplit=1)[0],
             about_page_url=None,
@@ -286,7 +286,7 @@ def test_ingestion_uses_crawl_to_fill_missing_company_details(
         ),
     )
 
-    async def fake_crawl(website_url: str):
+    async def fake_crawl(website_url: str, **_options):
         return CrawlData(
             website_url=website_url,
             about_page_url="https://example.com/about",
@@ -339,7 +339,7 @@ def test_failed_crawl_is_reported_while_saving_the_source(
         ),
     )
 
-    async def fail_crawl(_website_url: str):
+    async def fail_crawl(_website_url: str, **_options):
         raise HTTPException(status_code=502, detail="Website unavailable.")
 
     monkeypatch.setattr(lead_ingestion, "crawl_website", fail_crawl)
@@ -365,12 +365,12 @@ def test_ingestion_crawls_the_submitted_search_result_url(
     client,
     monkeypatch,
 ):
-    async def unexpected_search(query: str, max_results: int):
+    async def unexpected_search(query: str, max_results: int, db):
         raise AssertionError("Ingestion should use the submitted results.")
 
     crawled_urls: list[str] = []
 
-    async def fake_crawl(website_url: str):
+    async def fake_crawl(website_url: str, **_options):
         crawled_urls.append(website_url)
         return CrawlData(
             website_url=website_url,
@@ -420,7 +420,7 @@ def test_ingestion_crawls_up_to_ten_websites_concurrently(client, monkeypatch):
     active_crawls = 0
     peak_crawls = 0
 
-    async def track_crawl(website_url: str):
+    async def track_crawl(website_url: str, **_options):
         nonlocal active_crawls, peak_crawls
         active_crawls += 1
         peak_crawls = max(peak_crawls, active_crawls)

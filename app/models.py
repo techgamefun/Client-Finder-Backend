@@ -233,6 +233,7 @@ class WebsiteCrawl(Base):
         nullable=False,
         unique=True,
     )
+    site_type: Mapped[str | None] = mapped_column(String(64))
     home_page_url: Mapped[str | None] = mapped_column(String(2000))
     home_content: Mapped[str | None] = mapped_column(Text)
     about_page_url: Mapped[str | None] = mapped_column(String(2000))
@@ -300,6 +301,25 @@ class WebsiteCrawlJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     crawl: Mapped[WebsiteCrawl | None] = relationship()
+
+
+class ApplicationSettings(Base):
+    __tablename__ = "application_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tavily_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    crawl_max_pages: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=6,
+        server_default="6",
+    )
+    crawl_max_depth: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=2,
+        server_default="2",
+    )
 
 
 class PageSpeedScan(Base):

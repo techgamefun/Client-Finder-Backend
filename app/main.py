@@ -10,6 +10,7 @@ from app.database import database_url
 from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
 from app.api.pagespeed import router as pagespeed_router
+from app.api.settings import router as settings_router
 from app.api.website_crawler import router as website_crawler_router
 
 try:
@@ -46,7 +47,7 @@ app.add_middleware(
         if origin.strip()
     ],
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Register the companies API.
@@ -69,6 +70,11 @@ app.include_router(
 
 app.include_router(
     pagespeed_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    settings_router,
     prefix="/api/v1",
 )
 

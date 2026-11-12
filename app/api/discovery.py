@@ -34,6 +34,7 @@ async def discover_companies(
 ) -> DiscoverySearchResponse:
     response = await search_companies(
         query=payload.query,
+        db=db,
         max_results=payload.max_results,
     )
     search = SearchKeyword(

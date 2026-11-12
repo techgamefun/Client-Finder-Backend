@@ -48,21 +48,30 @@ app/main.py                 FastAPI app, router registration, health check
   primary key made from UUID foreign keys.
 - `app/api/deps.py` provides a database session per request and closes it when
   the request is complete.
+- `app/api/settings.py` exposes token-protected settings operations. Tavily
+  keys saved through this API are Fernet-encrypted in `ApplicationSettings`;
+  per-crawl page/depth preferences are persisted in the same row.
+- `app/services/application_settings.py` resolves database preferences and
+  environment fallbacks for Tavily and crawl limits.
 - `app/models.py` defines `Company`, `Contact`, `LeadSource`, `PageSpeedScan`,
-  `WebsiteCrawl`, and durable `WebsiteCrawlJob` tables and their relationships.
+  `WebsiteCrawl`, durable `WebsiteCrawlJob`, and singleton
+  `ApplicationSettings` tables and their relationships.
+- `WebsiteCrawl.site_type` stores the crawler's detected website category with
+  the extracted crawl data.
 - `app/schemas/` keeps API payload validation separate from ORM entities.
 - `app/services/discovery.py` handles Tavily requests, provider failures, and
-  validation of returned results.
+  validation of returned results, and retrieves live Tavily usage for the
+  Settings page.
 - `app/services/lead_ingestion.py` matches search results to companies, crawls
   source URLs, fills verified website/domain and public-email details, and
   persists source and crawl evidence.
 - `app/services/website_crawler.py` provides bounded public-site crawling to
   discovery ingestion and the standalone crawl endpoint using headless
-  Chromium; crawled page text, emails, and social links are stored in
-  `WebsiteCrawl` records. Company profiles can retrieve the latest successful
-  crawl for their website and trigger a new crawl or re-crawl. It retries
-  temporary rate-limit and server failures a bounded number of times, but
-  reports denied access without attempting to bypass it.
+  Chromium; crawled page text, emails, social links, and detected site type are
+  stored in `WebsiteCrawl` records. Company profiles can retrieve the latest
+  successful crawl for their website and trigger a new crawl or re-crawl. It
+  retries temporary rate-limit and server failures a bounded number of times,
+  but reports denied access without attempting to bypass it.
 - `app/services/crawl_jobs.py` creates durable PostgreSQL crawl jobs and
   dispatches their IDs through Upstash Redis when available. `app/worker.py`
   consumes jobs, persists crawl results, records failures, and recovers queued

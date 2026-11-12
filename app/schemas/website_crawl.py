@@ -29,6 +29,7 @@ class WebsiteCrawlResponse(BaseModel):
     emails: list[str] = Field(default_factory=list)
     social_links: list[str] = Field(default_factory=list)
     crawled_at: datetime
+    site_type: str | None = None
 
 
 class WebsiteCrawlJobResponse(BaseModel):

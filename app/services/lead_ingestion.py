@@ -24,6 +24,7 @@ from app.schemas.discovery import (
     DiscoveryIngestResponse,
     DiscoveryResult,
 )
+from app.services.application_settings import get_crawl_settings
 from app.services.discovery import search_companies
 from app.services.normalization import normalize_company_name, normalize_domain
 from app.services.pagespeed import PAGESPEED_STRATEGIES
@@ -254,6 +255,8 @@ def _upsert_crawl(crawl: CrawlData, db: Session) -> None:
         record = WebsiteCrawl(website_url=crawl.website_url)
         db.add(record)
 
+    if crawl.site_type is not None:
+        record.site_type = crawl.site_type
     record.about_page_url = crawl.about_page_url
     record.about_content = crawl.about_content
     record.contact_page_url = crawl.contact_page_url
@@ -302,6 +305,7 @@ async def ingest_search_results(
     if request.results is None:
         search_response = await search_companies(
             query=request.query,
+            db=db,
             max_results=request.max_results,
         )
         results = search_response.results
@@ -309,6 +313,7 @@ async def ingest_search_results(
         results = request.results
 
     semaphore = asyncio.Semaphore(10)
+    crawl_settings = get_crawl_settings(db)
     crawl_failures: list[DiscoveryCrawlFailure] = []
     crawls_by_url: dict[str, CrawlData] = {}
 
@@ -318,7 +323,15 @@ async def ingest_search_results(
         source_url = str(result.url)
         async with semaphore:
             try:
-                return source_url, await crawl_website(source_url), None
+                return (
+                    source_url,
+                    await crawl_website(
+                        source_url,
+                        max_pages=crawl_settings.max_pages,
+                        max_depth=crawl_settings.max_depth,
+                    ),
+                    None,
+                )
             except HTTPException as exc:
                 return (
                     source_url,

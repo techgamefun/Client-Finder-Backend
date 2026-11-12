@@ -6,3 +6,4 @@ psycopg[binary]
 pytest
 httpx
 alembic
+cryptography

@@ -209,7 +209,7 @@ def test_company_website_crawl_status_and_recrawl(client, monkeypatch):
     async def fake_enqueue(_job_id: str) -> None:
         return None
 
-    async def fake_crawl_website(website_url: str):
+    async def fake_crawl_website(website_url: str, **_options):
         nonlocal crawl_count
         crawl_count += 1
         return website_crawler.CrawlData(
@@ -351,7 +351,7 @@ def test_company_website_crawl_falls_back_to_domain(client, monkeypatch):
     )
     crawled_urls = []
 
-    async def fake_crawl_website(website_url: str):
+    async def fake_crawl_website(website_url: str, **_options):
         crawled_urls.append(website_url)
         return website_crawler.CrawlData(
             website_url="https://example.com/",
@@ -402,7 +402,7 @@ def test_research_source_crawl_fills_missing_company_details(
     )
     company_id = created.json()["id"]
 
-    async def fake_crawl_website(source_url: str):
+    async def fake_crawl_website(source_url: str, **_options):
         return website_crawler.CrawlData(
             website_url=source_url,
             about_page_url=None,
@@ -458,7 +458,7 @@ def test_research_source_crawl_does_not_assign_unrelated_publisher_details(
     )
     company_id = created.json()["id"]
 
-    async def fake_crawl_website(source_url: str):
+    async def fake_crawl_website(source_url: str, **_options):
         return website_crawler.CrawlData(
             website_url=source_url,
             about_page_url=None,
@@ -505,7 +505,7 @@ def test_research_source_crawl_preserves_existing_company_details(
     )
     company_id = created.json()["id"]
 
-    async def fake_crawl_website(source_url: str):
+    async def fake_crawl_website(source_url: str, **_options):
         return website_crawler.CrawlData(
             website_url=source_url,
             about_page_url=None,

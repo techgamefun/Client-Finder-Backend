@@ -10,6 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.models import WebsiteCrawl
+from app.services.application_settings import get_crawl_settings
 from app.services.public_url import _normalize_website_url
 
 
@@ -17,6 +18,7 @@ class CrawlData(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     website_url: str
+    site_type: str | None = None
     home_page_url: str | None = None
     home_content: str | None = None
     about_page_url: str | None
@@ -35,13 +37,22 @@ class CrawlData(BaseModel):
     company_links: list[tuple[str, str]] = Field(default_factory=list)
 
 
-async def crawl_website(website_url: str) -> CrawlData:
+async def crawl_website(
+    website_url: str,
+    max_pages: int | None = None,
+    max_depth: int | None = None,
+) -> CrawlData:
     service_url = f"{settings.crawler_service_url.rstrip('/')}/crawl"
+    payload: dict[str, object] = {"website_url": website_url}
+    if max_pages is not None:
+        payload["max_pages"] = max_pages
+    if max_depth is not None:
+        payload["max_depth"] = max_depth
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
                 service_url,
-                json={"website_url": website_url},
+                json=payload,
             )
     except httpx.TimeoutException as exc:
         raise HTTPException(
@@ -91,6 +102,8 @@ def _persist_crawl(data: CrawlData, db: Session) -> WebsiteCrawl:
                 crawl = WebsiteCrawl(website_url=data.website_url)
                 db.add(crawl)
 
+            if data.site_type is not None:
+                crawl.site_type = data.site_type
             crawl.home_page_url = data.home_page_url
             crawl.home_content = data.home_content
             crawl.about_page_url = data.about_page_url
@@ -131,5 +144,10 @@ async def crawl_and_persist(
     website_url: str,
     db: Session,
 ) -> WebsiteCrawl:
-    crawl_data = await crawl_website(website_url)
+    crawl_settings = get_crawl_settings(db)
+    crawl_data = await crawl_website(
+        website_url,
+        max_pages=crawl_settings.max_pages,
+        max_depth=crawl_settings.max_depth,
+    )
     return await run_in_threadpool(_persist_crawl, crawl_data, db)

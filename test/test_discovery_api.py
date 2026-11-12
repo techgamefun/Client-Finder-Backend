@@ -15,6 +15,7 @@ def test_frontend_origin_is_allowed_for_api_requests(client):
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
         },
     )
 
@@ -23,6 +24,9 @@ def test_frontend_origin_is_allowed_for_api_requests(client):
         response.headers["access-control-allow-origin"]
         == "http://localhost:3000"
     )
+    assert "authorization" in response.headers[
+        "access-control-allow-headers"
+    ].casefold()
 
 
 def test_search_endpoint_returns_validated_results(client, monkeypatch):
@@ -39,7 +43,7 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
     )
     received: dict[str, str | int] = {}
 
-    async def fake_search(query: str, max_results: int):
+    async def fake_search(query: str, max_results: int, db):
         received["query"] = query
         received["max_results"] = max_results
         return search_response

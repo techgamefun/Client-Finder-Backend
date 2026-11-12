@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.concurrency import run_in_threadpool
 
 from app.models import Company, Contact, LeadSource, WebsiteCrawl
+from app.services.application_settings import get_crawl_settings
 from app.services.normalization import normalize_company_name, normalize_domain
 from app.services.website_crawler import CrawlData, crawl_website
 
@@ -47,7 +48,12 @@ async def crawl_research_source(
     source_url: str,
     db: Session,
 ) -> None:
-    crawl = await crawl_website(source_url)
+    crawl_settings = get_crawl_settings(db)
+    crawl = await crawl_website(
+        source_url,
+        max_pages=crawl_settings.max_pages,
+        max_depth=crawl_settings.max_depth,
+    )
     await run_in_threadpool(
         _persist_research_enrichment,
         company_id,
@@ -274,6 +280,8 @@ def _upsert_crawl(
         record = WebsiteCrawl(website_url=crawl.website_url)
         db.add(record)
 
+    if crawl.site_type is not None:
+        record.site_type = crawl.site_type
     record.about_page_url = crawl.about_page_url
     record.about_content = crawl.about_content
     record.contact_page_url = crawl.contact_page_url

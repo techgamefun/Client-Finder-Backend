@@ -14,7 +14,13 @@ from fastapi.testclient import TestClient
 
 from conftest import TestingSessionLocal
 from app import worker as website_crawl_worker
-from app.models import Company, LeadSource, WebsiteCrawl, WebsiteCrawlJob
+from app.models import (
+    ApplicationSettings,
+    Company,
+    LeadSource,
+    WebsiteCrawl,
+    WebsiteCrawlJob,
+)
 from app.services import website_crawler as app_website_crawler
 from app.services import redis_queue
 from app.services.redis_queue import RedisQueueError
@@ -68,13 +74,19 @@ def test_main_api_crawler_client_calls_standalone_service(monkeypatch):
     )
 
     result = asyncio.run(
-        app_website_crawler.crawl_website("https://example.com")
+        app_website_crawler.crawl_website(
+            "https://example.com",
+            max_pages=4,
+            max_depth=1,
+        )
     )
 
     assert len(received) == 1
     assert str(received[0].url) == "http://crawler.internal:8001/crawl"
     assert json.loads(received[0].content) == {
-        "website_url": "https://example.com"
+        "website_url": "https://example.com",
+        "max_pages": 4,
+        "max_depth": 1,
     }
     assert result.about_content == "Company overview."
     assert result.home_content == "Welcome to Example."
@@ -240,7 +252,7 @@ def test_worker_uses_database_recovery_when_redis_is_unavailable(
 
 
 def test_standalone_crawler_service_exposes_crawl_endpoint(monkeypatch):
-    async def fake_crawl_website(website_url: str):
+    async def fake_crawl_website(website_url: str, **_options):
         return website_crawler.CrawlData(
             website_url=website_url.rstrip("/") + "/",
             about_page_url=None,
@@ -607,10 +619,13 @@ def test_crawl_endpoint_queues_job_and_exposes_status(client, monkeypatch):
 
 
 def test_worker_persists_results_and_updates_job_state(client, monkeypatch):
+    used_crawl_limits = {}
+
     async def fake_enqueue(_job_id: str) -> None:
         return None
 
-    async def fake_crawl_website(_website_url: str):
+    async def fake_crawl_website(_website_url: str, **options):
+        used_crawl_limits.update(options)
         return app_website_crawler.CrawlData(
             website_url="https://example.com/",
             home_page_url="https://example.com/",
@@ -639,6 +654,15 @@ def test_worker_persists_results_and_updates_job_state(client, monkeypatch):
         "crawl_website",
         fake_crawl_website,
     )
+    with TestingSessionLocal() as db:
+        db.add(
+            ApplicationSettings(
+                id=1,
+                crawl_max_pages=4,
+                crawl_max_depth=1,
+            )
+        )
+        db.commit()
 
     queued = client.post(
         "/api/v1/crawler/crawl",
@@ -663,6 +687,7 @@ def test_worker_persists_results_and_updates_job_state(client, monkeypatch):
     assert result["result"]["social_links"] == [
         "https://www.linkedin.com/company/example"
     ]
+    assert used_crawl_limits == {"max_pages": 4, "max_depth": 1}
 
     with TestingSessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(WebsiteCrawl)) == 1
@@ -672,7 +697,7 @@ def test_worker_records_crawl_failure(client, monkeypatch):
     async def fake_enqueue(_job_id: str) -> None:
         return None
 
-    async def fail_crawl(_website_url: str):
+    async def fail_crawl(_website_url: str, **_options):
         raise HTTPException(
             status_code=502,
             detail="The crawler service failed.",
@@ -745,7 +770,7 @@ def test_crawl_jobs_update_existing_site_instead_of_duplicating(
     async def fake_enqueue(_job_id: str) -> None:
         return None
 
-    async def fake_crawl_website(_website_url: str):
+    async def fake_crawl_website(_website_url: str, **_options):
         nonlocal call_count
         call_count += 1
         return app_website_crawler.CrawlData(
