@@ -46,9 +46,9 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
     async def fake_search(query: str, max_results: int, db):
         received["query"] = query
         received["max_results"] = max_results
-        return search_response
+        return search_response.results, [], []
 
-    monkeypatch.setattr(discovery, "search_companies", fake_search)
+    monkeypatch.setattr(discovery, "search_with_selected_tools", fake_search)
 
     response = client.post(
         "/api/v1/discovery/search",
@@ -65,9 +65,12 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
                 "url": "https://example.com/",
                 "content": "Manufacturing company",
                 "score": 0.9,
+                "provider": "tavily",
             }
         ],
         "search_id": data["search_id"],
+        "provider_jobs": [],
+        "provider_failures": [],
     }
     UUID(data["search_id"])
     assert received == {

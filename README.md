@@ -121,7 +121,7 @@ Create a `.env` file in the repository root (do not commit it):
 ```dotenv
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
 TAVILY_API_KEY=your-tavily-api-key
-SETTINGS_ADMIN_TOKEN=generated-random-admin-token
+OCTOPARSE_API_KEY=your-octoparse-api-key
 SETTINGS_ENCRYPTION_KEY=generated-fernet-key
 GOOGLE_PAGESPEED_API_KEY=your-google-pagespeed-api-key
 UPSTASH_REDIS_REST_URL=https://your-upstash-database.upstash.io
@@ -130,29 +130,37 @@ ENVIRONMENT=development
 FRONTEND_ORIGINS=http://localhost:3000
 ```
 
-`DATABASE_URL` is required when the application starts. Tavily can be
-configured either with `TAVILY_API_KEY` or from the protected Settings page;
-without either key, discovery requests return `503 Service Unavailable`. The
-database layer uses psycopg for PostgreSQL.
+`DATABASE_URL` is required when the application starts. Tavily and Octoparse
+can be configured with `TAVILY_API_KEY` and `OCTOPARSE_API_KEY`, respectively,
+or from the public Settings page. The database layer uses psycopg for
+PostgreSQL.
 The website crawler uses Playwright Chromium; install the browser on every
 backend host with `python -m playwright install chromium`.
 `GOOGLE_PAGESPEED_API_KEY` is used by the backend when discovery results are
 saved to the pipeline; it is never sent to the frontend.
-`SETTINGS_ADMIN_TOKEN` protects the Settings page API. Generate a long random
-value and enter it on that page to administer settings.
-`SETTINGS_ENCRYPTION_KEY` is a Fernet key used to encrypt a Tavily key saved
-from the page; keep it stable and backed up, because changing or losing it
-makes the saved key unreadable. Generate both values with:
+`SETTINGS_ENCRYPTION_KEY` is a Fernet key used to encrypt Tavily and Octoparse
+keys saved from the page; keep it stable and backed up, because changing or
+losing it makes saved keys unreadable. Generate an encryption key with:
 
 ```powershell
-python -c "import secrets; print(secrets.token_urlsafe(48))"
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-The Settings page can replace the Tavily key and query Tavily's usage endpoint
-for current-cycle credits and limits. Keys saved there are encrypted in
-PostgreSQL and are never returned to the browser. `TAVILY_API_KEY` remains a
-deployment-level fallback; if a database key is saved, it takes precedence.
+The Settings page and its API are public and require no admin token. Anyone
+who can reach the application can view and change crawler limits, discovery
+tool preferences, and provider keys. Keys are never returned by the API, but
+the settings API must not be exposed to untrusted networks. Use network access
+controls and HTTPS if deploying it beyond a trusted network. The Settings page
+can query Tavily's usage endpoint for current-cycle credits and limits. Keys
+saved there are encrypted in PostgreSQL and are never returned to the browser.
+`TAVILY_API_KEY` and `OCTOPARSE_API_KEY` remain deployment-level fallbacks; if
+a database key is saved, it takes precedence.
+The Settings page can search Octoparse templates and configure the template's
+query input, additional JSON parameters, and output-field mappings. Octoparse
+searches start provider jobs; the Discover Leads page polls those jobs and
+combines completed results with the selected Tavily results. The chosen search
+engines are saved on the backend. The Business listing websites category is
+shown as coming soon until a provider is configured.
 The page also sets maximum pages and depth for new crawls (up to 6 pages and
 depth 2); the crawler service may enforce lower deployment limits. Address,
 Chrome path, response/timeouts, queue, retries, rate limit, user agent, and Go
@@ -178,8 +186,9 @@ The migration chain creates the company, contact, and lead-source tables, adds
 the normalized company-name column and index, enforces globally unique source
 URLs, adds timestamped search keywords and their company associations, and
 stores per-company PageSpeed reports, converts entity IDs and their foreign
-keys to UUIDs while preserving existing records and relationships, and adds
-durable website crawl and PageSpeed scan jobs.
+keys to UUIDs while preserving existing records and relationships, adds
+durable website crawl and PageSpeed scan jobs, and adds persisted discovery
+tool preferences and Octoparse provider jobs.
 If the unique source-URL migration detects duplicates in existing data, it
 stops with an error; resolve those duplicates before rerunning the migration.
 
@@ -226,10 +235,14 @@ All versioned endpoints use the `/api/v1` prefix.
 }
 ```
 
-The response contains the original query, a `search_id`, and validated results
-with `title`, `url`, `content`, and provider `score`. The search keyword and
-timestamp are saved, but no lead records are created until results are ingested.
-Database IDs, including `search_id`, are UUID strings.
+The backend runs the search engines selected in Settings. The response
+contains the original query, a `search_id`, immediate validated results with
+`title`, `url`, `content`, and provider `score`, plus any provider jobs and
+partial provider failures. Octoparse searches run asynchronously; poll
+`GET /api/v1/discovery/jobs/{job_id}` until the job succeeds or fails. The
+search keyword and timestamp are saved, but no lead records are created until
+results are ingested. Database IDs, including `search_id` and job IDs, are UUID
+strings.
 Use `GET /api/v1/discovery/suggestions?query=manu` while typing to retrieve up
 to ten recent matching keywords.
 

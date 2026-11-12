@@ -220,6 +220,36 @@ class SearchKeyword(Base):
     )
 
 
+class DiscoveryProviderJob(Base):
+    __tablename__ = "discovery_provider_jobs"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    search_keyword_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("search_keywords.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_task_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    lot_no: Mapped[str | None] = mapped_column(String(255))
+    max_results: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    result_mapping: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    results: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(Text)
+    warning: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class WebsiteCrawl(Base):
     __tablename__ = "website_crawls"
 
@@ -308,6 +338,9 @@ class ApplicationSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tavily_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    octoparse_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    selected_discovery_tools: Mapped[list[str] | None] = mapped_column(JSON)
+    octoparse_template: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     crawl_max_pages: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

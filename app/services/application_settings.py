@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from hmac import compare_digest
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, status
@@ -8,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import ApplicationSettings
+from app.schemas.discovery import DiscoveryProvider
 from app.schemas.settings import (
     ApplicationSettingsResponse,
     ApplicationSettingsUpdate,
@@ -23,27 +23,6 @@ SETTINGS_ROW_ID = 1
 class CrawlSettings:
     max_pages: int
     max_depth: int
-
-
-def authorize_settings_admin(authorization: str | None) -> None:
-    expected_token = settings.settings_admin_token
-    if not expected_token:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Settings administration is not configured.",
-        )
-
-    scheme, separator, supplied_token = (authorization or "").partition(" ")
-    if (
-        not separator
-        or scheme.casefold() != "bearer"
-        or not compare_digest(supplied_token, expected_token)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="A valid settings administrator token is required.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
 
 
 def get_crawl_settings(db: Session) -> CrawlSettings:
@@ -62,29 +41,70 @@ def get_crawl_settings(db: Session) -> CrawlSettings:
 def get_tavily_api_key(db: Session) -> str | None:
     row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
     if row and row.tavily_api_key_encrypted:
-        return _decrypt_tavily_key(row.tavily_api_key_encrypted)
+        return _decrypt_api_key(row.tavily_api_key_encrypted)
     return settings.tavily_api_key
+
+
+def get_octoparse_api_key(db: Session) -> str | None:
+    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
+    if row and row.octoparse_api_key_encrypted:
+        return _decrypt_api_key(row.octoparse_api_key_encrypted)
+    return settings.octoparse_api_key
+
+
+def get_selected_discovery_tools(db: Session) -> list[DiscoveryProvider]:
+    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
+    if row is None or row.selected_discovery_tools is None:
+        return [DiscoveryProvider.TAVILY]
+    try:
+        return [DiscoveryProvider(tool) for tool in row.selected_discovery_tools]
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The saved discovery-tool selection is invalid.",
+        ) from exc
 
 
 def get_application_settings(db: Session) -> ApplicationSettingsResponse:
     row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
-    is_database_key_configured = bool(
+    tavily_database_key_configured = bool(
         row and row.tavily_api_key_encrypted
     )
-    is_environment_key_configured = bool(settings.tavily_api_key)
+    tavily_environment_key_configured = bool(settings.tavily_api_key)
+    octoparse_database_key_configured = bool(
+        row and row.octoparse_api_key_encrypted
+    )
+    octoparse_environment_key_configured = bool(settings.octoparse_api_key)
     crawl_settings = get_crawl_settings(db)
     return ApplicationSettingsResponse(
         crawl_max_pages=crawl_settings.max_pages,
         crawl_max_depth=crawl_settings.max_depth,
         tavily_configured=(
-            is_database_key_configured or is_environment_key_configured
+            tavily_database_key_configured or tavily_environment_key_configured
         ),
         tavily_key_source=(
             "database"
-            if is_database_key_configured
+            if tavily_database_key_configured
             else "environment"
-            if is_environment_key_configured
+            if tavily_environment_key_configured
             else "unset"
+        ),
+        octoparse_configured=(
+            octoparse_database_key_configured
+            or octoparse_environment_key_configured
+        ),
+        octoparse_key_source=(
+            "database"
+            if octoparse_database_key_configured
+            else "environment"
+            if octoparse_environment_key_configured
+            else "unset"
+        ),
+        selected_discovery_tools=get_selected_discovery_tools(db),
+        octoparse_template=(
+            row.octoparse_template
+            if row and row.octoparse_template
+            else None
         ),
     )
 
@@ -98,12 +118,29 @@ def save_application_settings(
         row = ApplicationSettings(id=SETTINGS_ROW_ID)
         db.add(row)
 
-    row.crawl_max_pages = payload.crawl_max_pages
-    row.crawl_max_depth = payload.crawl_max_depth
+    if payload.crawl_max_pages is not None:
+        row.crawl_max_pages = payload.crawl_max_pages
+    if payload.crawl_max_depth is not None:
+        row.crawl_max_depth = payload.crawl_max_depth
     if payload.tavily_api_key is not None:
         key = payload.tavily_api_key.strip()
         row.tavily_api_key_encrypted = (
-            _encrypt_tavily_key(key) if key else None
+            _encrypt_api_key(key) if key else None
+        )
+    if payload.octoparse_api_key is not None:
+        key = payload.octoparse_api_key.strip()
+        row.octoparse_api_key_encrypted = (
+            _encrypt_api_key(key) if key else None
+        )
+    if payload.selected_discovery_tools is not None:
+        row.selected_discovery_tools = [
+            provider.value for provider in payload.selected_discovery_tools
+        ]
+    if "octoparse_template" in payload.model_fields_set:
+        row.octoparse_template = (
+            payload.octoparse_template.model_dump(mode="json")
+            if payload.octoparse_template is not None
+            else None
         )
 
     try:
@@ -121,26 +158,26 @@ def _cipher() -> Fernet:
     if not key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Tavily key encryption is not configured on the server.",
+            detail="Provider API-key encryption is not configured on the server.",
         )
     try:
         return Fernet(key.encode("ascii"))
     except (ValueError, UnicodeEncodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The server's Tavily key encryption configuration is invalid.",
+            detail="The server's provider API-key encryption configuration is invalid.",
         ) from exc
 
 
-def _encrypt_tavily_key(key: str) -> str:
+def _encrypt_api_key(key: str) -> str:
     return _cipher().encrypt(key.encode("utf-8")).decode("ascii")
 
 
-def _decrypt_tavily_key(encrypted_key: str) -> str:
+def _decrypt_api_key(encrypted_key: str) -> str:
     try:
         return _cipher().decrypt(encrypted_key.encode("ascii")).decode("utf-8")
     except (InvalidToken, UnicodeDecodeError, UnicodeEncodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The saved Tavily key cannot be decrypted. Verify the server encryption key.",
+            detail="A saved provider API key cannot be decrypted. Verify the server encryption key.",
         ) from exc

@@ -5,7 +5,8 @@
 The application is a synchronous-persistence, asynchronous-provider FastAPI
 service. It exposes versioned HTTP routes, validates their inputs and outputs
 with Pydantic, uses SQLAlchemy for relational storage, and calls Tavily for web
-search. Website crawl requests use Upstash Redis to dispatch jobs to a
+search and Octoparse for template-based search. Website crawl requests use
+Upstash Redis to dispatch jobs to a
 separately run worker; PostgreSQL stores durable job state and crawl results.
 PostgreSQL is the configured application database; tests use an in-memory
 SQLite database.
@@ -48,20 +49,31 @@ app/main.py                 FastAPI app, router registration, health check
   primary key made from UUID foreign keys.
 - `app/api/deps.py` provides a database session per request and closes it when
   the request is complete.
-- `app/api/settings.py` exposes token-protected settings operations. Tavily
-  keys saved through this API are Fernet-encrypted in `ApplicationSettings`;
-  per-crawl page/depth preferences are persisted in the same row.
+- `app/api/settings.py` exposes public settings operations, Tavily usage, and
+  Octoparse template search. Tavily and Octoparse keys saved through this API
+  are Fernet-encrypted in `ApplicationSettings`; provider selections,
+  Octoparse template configuration, and per-crawl page/depth preferences are
+  persisted in the same row. Anyone who can reach the API can modify these
+  settings, so deployments should restrict network access appropriately.
 - `app/services/application_settings.py` resolves database preferences and
-  environment fallbacks for Tavily and crawl limits.
-- `app/models.py` defines `Company`, `Contact`, `LeadSource`, `PageSpeedScan`,
-  `WebsiteCrawl`, durable `WebsiteCrawlJob`, and singleton
-  `ApplicationSettings` tables and their relationships.
+  environment fallbacks for Tavily and Octoparse, including the selected
+  discovery tools and Octoparse template.
+- `app/models.py` defines the `Company`, `Contact`, `LeadSource`,
+  `PageSpeedScan`, `WebsiteCrawl`, `WebsiteCrawlJob`, `ApplicationSettings`,
+  and `DiscoveryProviderJob` tables and their relationships.
 - `WebsiteCrawl.site_type` stores the crawler's detected website category with
   the extracted crawl data.
 - `app/schemas/` keeps API payload validation separate from ORM entities.
-- `app/services/discovery.py` handles Tavily requests, provider failures, and
-  validation of returned results, and retrieves live Tavily usage for the
-  Settings page.
+- `app/services/discovery.py` defines the lead-discovery tool contract,
+  executes the selected Tavily and Octoparse tools concurrently, validates
+  results, and reports provider-specific failures. Tavily returns results
+  immediately; Octoparse starts a task that is polled separately. The service
+  also retrieves live Tavily usage for the Settings page. The business-listing
+  category is present in the tool taxonomy but has no configured provider yet.
+- `app/services/octoparse.py` searches templates, starts configured Octoparse
+  tasks, polls their exports, maps template-specific output fields into
+  discovery results, and persists task status and results through
+  `DiscoveryProviderJob`.
 - `app/services/lead_ingestion.py` matches search results to companies, crawls
   source URLs, fills verified website/domain and public-email details, and
   persists source and crawl evidence.
@@ -110,12 +122,15 @@ sources.
 ### Discovery search
 
 `POST /api/v1/discovery/search` validates a query and result limit, then calls
-`search_companies`. The service sends a basic-search request to Tavily and
-validates each result. A successful search is recorded with its keyword and
-timestamp, and its ID is returned for the later ingestion request. A missing
-provider key, timeout, provider HTTP error, or network failure is surfaced as
-an HTTP error without recording a search. `GET /api/v1/discovery/suggestions`
-returns up to ten recent unique keywords matching the supplied query.
+the tools selected in Settings. Tavily returns validated results immediately;
+Octoparse starts a configured template task and returns a durable provider-job
+ID. The successful search is recorded with its keyword and timestamp, and its
+ID is returned for the later ingestion request. Provider failures are included
+in the response when another selected tool succeeds or starts a job; if all
+selected tools fail, the API returns an error. `GET
+/api/v1/discovery/jobs/{job_id}` polls an Octoparse export and persists its
+status and mapped results. `GET /api/v1/discovery/suggestions` returns up to
+ten recent unique keywords matching the supplied query.
 
 ### Discovery ingestion
 
@@ -191,7 +206,8 @@ revision creates the lead tables; subsequent revisions add normalized company
 names, update lead-source URL uniqueness, track discovery search keywords and
 their company associations, save website crawls, store PageSpeed reports,
 convert entity primary keys and their foreign keys to UUIDs while preserving
-existing relationships, and add durable website crawl jobs.
+existing relationships, add durable website crawl jobs, and persist discovery
+tool preferences and Octoparse provider jobs.
 A migration that backfills or constrains existing data must account for
 incompatible existing rows and fail clearly rather than silently discarding
 data.

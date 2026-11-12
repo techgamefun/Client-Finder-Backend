@@ -1,14 +1,24 @@
+import asyncio
+from dataclasses import dataclass
+from typing import Protocol
+
 import httpx
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.schemas.discovery import (
+    DiscoveryProvider,
+    DiscoveryProviderFailure,
     DiscoveryResult,
     DiscoverySearchResponse,
 )
 from app.schemas.settings import TavilyUsageResponse
-from app.services.application_settings import get_tavily_api_key
+from app.services.application_settings import (
+    get_selected_discovery_tools,
+    get_tavily_api_key,
+)
+from app.services.octoparse import start_octoparse_search
 
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
@@ -72,6 +82,7 @@ async def search_companies(
                     url=item["url"],
                     content=item.get("content", ""),
                     score=item.get("score", 0.0),
+                    provider=DiscoveryProvider.TAVILY,
                 )
             )
         except (KeyError, ValueError, TypeError):
@@ -83,6 +94,135 @@ async def search_companies(
         query=query,
         results=results,
     )
+
+
+@dataclass(frozen=True)
+class StartedProviderJob:
+    provider: DiscoveryProvider
+    external_task_id: str
+    lot_no: str | None
+    max_results: int
+    result_mapping: dict[str, str | None]
+
+
+@dataclass(frozen=True)
+class ProviderSearchOutcome:
+    results: list[DiscoveryResult]
+    job: StartedProviderJob | None = None
+
+
+class LeadDiscoveryTool(Protocol):
+    provider: DiscoveryProvider
+
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        db: Session,
+    ) -> ProviderSearchOutcome: ...
+
+
+class TavilyDiscoveryTool:
+    provider = DiscoveryProvider.TAVILY
+
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        db: Session,
+    ) -> ProviderSearchOutcome:
+        response = await search_companies(query, db, max_results)
+        return ProviderSearchOutcome(results=response.results)
+
+
+class OctoparseDiscoveryTool:
+    provider = DiscoveryProvider.OCTOPARSE
+
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        db: Session,
+    ) -> ProviderSearchOutcome:
+        task_id, lot_no, result_mapping = await start_octoparse_search(
+            query,
+            max_results,
+            db,
+        )
+        return ProviderSearchOutcome(
+            results=[],
+            job=StartedProviderJob(
+                provider=self.provider,
+                external_task_id=task_id,
+                lot_no=lot_no,
+                max_results=max_results,
+                result_mapping=result_mapping,
+            ),
+        )
+
+
+LEAD_DISCOVERY_TOOLS: dict[DiscoveryProvider, LeadDiscoveryTool] = {
+    DiscoveryProvider.TAVILY: TavilyDiscoveryTool(),
+    DiscoveryProvider.OCTOPARSE: OctoparseDiscoveryTool(),
+}
+
+
+async def search_with_selected_tools(
+    query: str,
+    max_results: int,
+    db: Session,
+) -> tuple[list[DiscoveryResult], list[StartedProviderJob], list[DiscoveryProviderFailure]]:
+    selected_tools = get_selected_discovery_tools(db)
+
+    async def run_tool(
+        provider: DiscoveryProvider,
+    ) -> tuple[
+        DiscoveryProvider,
+        ProviderSearchOutcome | None,
+        DiscoveryProviderFailure | None,
+    ]:
+        try:
+            outcome = await LEAD_DISCOVERY_TOOLS[provider].search(
+                query,
+                max_results,
+                db,
+            )
+        except HTTPException as exc:
+            return (
+                provider,
+                None,
+                DiscoveryProviderFailure(
+                    provider=provider,
+                    detail=str(exc.detail),
+                ),
+            )
+        return provider, outcome, None
+
+    outcomes = await asyncio.gather(
+        *(run_tool(provider) for provider in selected_tools)
+    )
+    results: list[DiscoveryResult] = []
+    jobs: list[StartedProviderJob] = []
+    failures: list[DiscoveryProviderFailure] = []
+    for _, outcome, failure in outcomes:
+        if failure is not None:
+            failures.append(failure)
+        elif outcome is not None:
+            results.extend(outcome.results)
+            if outcome.job is not None:
+                jobs.append(outcome.job)
+
+    if failures and not results and not jobs:
+        detail = "; ".join(
+            f"{failure.provider.value}: {failure.detail}"
+            for failure in failures
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"All selected discovery tools failed. {detail}",
+        )
+
+    return results, jobs, failures
 
 
 async def get_tavily_usage(db: Session) -> TavilyUsageResponse:

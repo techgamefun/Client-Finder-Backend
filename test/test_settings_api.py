@@ -13,33 +13,33 @@ from app.services.website_crawler import CrawlData
 from conftest import TestingSessionLocal
 
 
-ADMIN_TOKEN = "test-settings-admin-token"
 TAVILY_API_KEY = "tvly-test-secret"
 
 
-def test_settings_api_requires_admin_token(client, monkeypatch):
-    monkeypatch.setattr(settings, "settings_admin_token", ADMIN_TOKEN)
-
+def test_settings_read_and_edit_are_public(client):
     response = client.get("/api/v1/settings")
-    assert response.status_code == 401
+    assert response.status_code == 200
 
-    response = client.get(
+    response = client.put(
         "/api/v1/settings",
-        headers={"Authorization": "Bearer incorrect"},
+        json={
+            "crawl_max_pages": 5,
+            "crawl_max_depth": 2,
+            "tavily_api_key": None,
+        },
     )
-    assert response.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["crawl_max_pages"] == 5
 
 
 def test_settings_save_encrypts_key_and_returns_usage(client, monkeypatch):
     encryption_key = Fernet.generate_key().decode("ascii")
-    monkeypatch.setattr(settings, "settings_admin_token", ADMIN_TOKEN)
     monkeypatch.setattr(settings, "settings_encryption_key", encryption_key)
     monkeypatch.setattr(settings, "tavily_api_key", None)
-    request_headers = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    monkeypatch.setattr(settings, "octoparse_api_key", None)
 
     saved = client.put(
         "/api/v1/settings",
-        headers=request_headers,
         json={
             "crawl_max_pages": 4,
             "crawl_max_depth": 1,
@@ -53,6 +53,10 @@ def test_settings_save_encrypts_key_and_returns_usage(client, monkeypatch):
         "crawl_max_depth": 1,
         "tavily_configured": True,
         "tavily_key_source": "database",
+        "octoparse_configured": False,
+        "octoparse_key_source": "unset",
+        "selected_discovery_tools": ["tavily"],
+        "octoparse_template": None,
     }
 
     with TestingSessionLocal() as db:
@@ -98,14 +102,59 @@ def test_settings_save_encrypts_key_and_returns_usage(client, monkeypatch):
             )
 
     monkeypatch.setattr(discovery.httpx, "AsyncClient", FakeAsyncClient)
-    usage = client.get(
-        "/api/v1/settings/tavily/usage",
-        headers=request_headers,
-    )
+    usage = client.get("/api/v1/settings/tavily/usage")
     assert usage.status_code == 200
     assert usage.json()["key"]["usage"] == 123
     assert usage.json()["key"]["limit"] == 1000
     assert usage.json()["account"]["current_plan"] == "Researcher"
+
+
+def test_octoparse_key_template_and_tool_preference_are_persisted(
+    client,
+    monkeypatch,
+):
+    encryption_key = Fernet.generate_key().decode("ascii")
+    octoparse_key = "octoparse-test-secret"
+    monkeypatch.setattr(settings, "settings_encryption_key", encryption_key)
+    monkeypatch.setattr(settings, "tavily_api_key", None)
+    monkeypatch.setattr(settings, "octoparse_api_key", None)
+
+    response = client.put(
+        "/api/v1/settings",
+        json={
+            "octoparse_api_key": octoparse_key,
+            "selected_discovery_tools": ["tavily", "octoparse"],
+            "octoparse_template": {
+                "template_name": "directory_search",
+                "query_field": "search_keyword",
+                "additional_parameters": {"country": "US"},
+                "title_field": "business_name",
+                "url_field": "profile_url",
+                "content_field": "description",
+                "score_field": None,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["octoparse_configured"] is True
+    assert data["octoparse_key_source"] == "database"
+    assert data["selected_discovery_tools"] == ["tavily", "octoparse"]
+    assert data["octoparse_template"]["template_name"] == "directory_search"
+
+    with TestingSessionLocal() as db:
+        row = db.get(ApplicationSettings, 1)
+        assert row is not None
+        assert row.octoparse_api_key_encrypted != octoparse_key
+        assert (
+            Fernet(encryption_key.encode("ascii"))
+            .decrypt(row.octoparse_api_key_encrypted.encode("ascii"))
+            .decode("utf-8")
+            == octoparse_key
+        )
+        assert row.selected_discovery_tools == ["tavily", "octoparse"]
+        assert row.octoparse_template["template_name"] == "directory_search"
 
 
 def test_worker_applies_saved_crawl_limits(client, monkeypatch):

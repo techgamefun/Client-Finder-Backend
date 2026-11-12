@@ -1,35 +1,29 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.schemas.settings import (
     ApplicationSettingsResponse,
     ApplicationSettingsUpdate,
+    OctoparseTemplateSearchResponse,
     TavilyUsageResponse,
 )
 from app.services.application_settings import (
-    authorize_settings_admin,
     get_application_settings,
     save_application_settings,
 )
 from app.services.discovery import get_tavily_usage
+from app.services.octoparse import search_octoparse_templates
 
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
 
-def require_settings_admin(
-    authorization: Annotated[str | None, Header()] = None,
-) -> None:
-    authorize_settings_admin(authorization)
-
-
 @router.get(
     "",
     response_model=ApplicationSettingsResponse,
-    dependencies=[Depends(require_settings_admin)],
 )
 def read_settings(
     db: Annotated[Session, Depends(get_db)],
@@ -40,7 +34,6 @@ def read_settings(
 @router.put(
     "",
     response_model=ApplicationSettingsResponse,
-    dependencies=[Depends(require_settings_admin)],
 )
 def update_settings(
     payload: ApplicationSettingsUpdate,
@@ -52,9 +45,19 @@ def update_settings(
 @router.get(
     "/tavily/usage",
     response_model=TavilyUsageResponse,
-    dependencies=[Depends(require_settings_admin)],
 )
 async def read_tavily_usage(
     db: Annotated[Session, Depends(get_db)],
 ) -> TavilyUsageResponse:
     return await get_tavily_usage(db)
+
+
+@router.get(
+    "/octoparse/templates",
+    response_model=OctoparseTemplateSearchResponse,
+)
+async def read_octoparse_templates(
+    db: Annotated[Session, Depends(get_db)],
+    keyword: Annotated[str, Query(min_length=2, max_length=200)],
+) -> OctoparseTemplateSearchResponse:
+    return await search_octoparse_templates(keyword, db)

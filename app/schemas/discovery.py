@@ -1,10 +1,28 @@
 
 from datetime import datetime
+from enum import Enum
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl
 
 from app.schemas.pagespeed import PageSpeedScanJobResponse
+
+
+class DiscoveryToolCategory(str, Enum):
+    SEARCH_ENGINE = "search_engine"
+    BUSINESS_LISTING_WEBSITE = "business_listing_website"
+
+
+class DiscoveryProvider(str, Enum):
+    TAVILY = "tavily"
+    OCTOPARSE = "octoparse"
+
+
+class DiscoveryTool(BaseModel):
+    id: DiscoveryProvider
+    category: DiscoveryToolCategory
+    name: str
 
 
 class DiscoverySearchRequest(BaseModel):
@@ -17,12 +35,33 @@ class DiscoveryResult(BaseModel):
     url: HttpUrl
     content: str
     score: float
+    provider: DiscoveryProvider = DiscoveryProvider.TAVILY
+
+
+class DiscoveryProviderFailure(BaseModel):
+    provider: DiscoveryProvider
+    detail: str
+
+
+class DiscoveryProviderJobResponse(BaseModel):
+    id: UUID
+    provider: DiscoveryProvider
+    status: Literal["running", "succeeded", "failed"]
+    results: list[DiscoveryResult] = Field(default_factory=list)
+    error: str | None = None
+    warning: str | None = None
 
 
 class DiscoverySearchResponse(BaseModel):
     query: str
     results: list[DiscoveryResult]
     search_id: UUID | None = None
+    provider_jobs: list[DiscoveryProviderJobResponse] = Field(
+        default_factory=list,
+    )
+    provider_failures: list[DiscoveryProviderFailure] = Field(
+        default_factory=list,
+    )
 
 
 class SearchKeywordResponse(BaseModel):
@@ -32,7 +71,7 @@ class SearchKeywordResponse(BaseModel):
 
 
 class DiscoveryIngestRequest(DiscoverySearchRequest):
-    results: list[DiscoveryResult] | None = Field(default=None, max_length=10)
+    results: list[DiscoveryResult] | None = Field(default=None, max_length=20)
     search_id: UUID | None = None
 
 
