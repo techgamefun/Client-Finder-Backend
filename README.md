@@ -233,6 +233,21 @@ Run one or more workers to process queued crawls and PageSpeed scans. The
 worker calls the separate crawler service for crawl jobs, so
 `WEB_CRAWLER_SERVICE_URL` must point to a running crawler service.
 
+### Run the worker in the API service
+
+For a deployment where a separate background-worker service is not available,
+set `RUN_WORKER_IN_API=true` on the API service. The API starts the queue worker
+after database migrations complete, so keep the web service's normal Uvicorn
+start command. Do not also run a separate worker unless you intentionally want
+multiple workers.
+
+On Render's free web-service plan, the worker runs only while the web service is
+awake. Render may spin the service down after 15 minutes without inbound
+traffic; queued jobs remain in PostgreSQL and can be processed after a request
+wakes the service again. The worker's startup log says
+`Website crawl and PageSpeed worker started.` Ensure
+`WEB_CRAWLER_SERVICE_URL` points to the deployed crawler service.
+
 ## API usage
 
 All versioned endpoints use the `/api/v1` prefix.

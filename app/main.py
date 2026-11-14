@@ -1,5 +1,7 @@
 
-from contextlib import asynccontextmanager
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +24,9 @@ except ModuleNotFoundError:  # pragma: no cover - installed via requirements.txt
     Config = None
 
 
+logger = logging.getLogger(__name__)
+
+
 def should_auto_migrate() -> bool:
     return not database_url.startswith("sqlite")
 
@@ -30,8 +35,27 @@ def should_auto_migrate() -> bool:
 async def lifespan(_: FastAPI):
     if should_auto_migrate() and command is not None and Config is not None:
         alembic_cfg = Config("alembic.ini")
+        logger.info("Starting database migrations.")
         command.upgrade(alembic_cfg, "head")
-    yield
+        logger.info("Database migrations completed.")
+
+    worker_task: asyncio.Task[None] | None = None
+    if settings.run_worker_in_api:
+        from app.worker import run_worker
+
+        logger.info("Starting the background worker inside the API process.")
+        worker_task = asyncio.create_task(
+            run_worker(),
+            name="website-crawl-and-pagespeed-worker",
+        )
+
+    try:
+        yield
+    finally:
+        if worker_task is not None:
+            worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker_task
 
 
 app = FastAPI(

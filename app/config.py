@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     upstash_redis_rest_url: str | None = None
     upstash_redis_rest_token: str | None = None
     frontend_origins: str = Field(validation_alias="FRONTEND_URL")
+    run_worker_in_api: bool = Field(
+        default=False,
+        validation_alias="RUN_WORKER_IN_API",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

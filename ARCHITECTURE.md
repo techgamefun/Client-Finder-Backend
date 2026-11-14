@@ -35,7 +35,7 @@ app/main.py                 FastAPI app, router registration, health check
     |       Upstash Redis REST queue transport
     |
     +-- app/worker.py
-    |       Separate worker process for queued website crawl jobs
+    |       Worker for queued website crawl jobs, run separately or in the API process
     |
     +-- migrations/          Alembic-managed database schema history
 ```
@@ -100,7 +100,8 @@ app/main.py                 FastAPI app, router registration, health check
   consumes jobs, persists crawl results, records failures, and recovers queued
   jobs from PostgreSQL when Redis dispatch is unavailable. Discovery and
   research-source crawls remain synchronous because their results are required
-  by those workflows.
+  by those workflows. Set `RUN_WORKER_IN_API=true` to run the worker in the API
+  lifespan when a separate background-worker service is unavailable.
 - `app/services/research_source_crawler.py` crawls URLs entered on a company
   profile, saves source and crawl evidence, and fills only missing website,
   domain, and public contact details that can be inferred from the source.
