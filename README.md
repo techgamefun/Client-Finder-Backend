@@ -61,9 +61,9 @@ the saved crawl result. Retry a failed job with
 retried. The worker fetches the
 homepage and up to five relevant same-site About, Blog, Services, Contact, or
 mission/goal pages, then stores their page URLs and text, email addresses, and
-social links in the `website_crawls` table. It does not modify company or
-lead-source records by itself. It uses bounded same-site HTTP requests;
-JavaScript-only pages fail explicitly because browser rendering is not enabled.
+social links in the `website_crawls` table. It renders JavaScript pages with
+headless Chromium and does not check `robots.txt`. It does not modify company or
+lead-source records by itself.
 It retries temporary `429` and server errors at most twice,
 respecting a short `Retry-After` delay when provided. A `403` means the site
 denied the request; the crawler reports it without attempting to defeat the refusal.
@@ -75,6 +75,17 @@ company's website (or domain when no website URL is set). Discovery ingestion
 and research-source enrichment remain synchronous because they need crawl
 results before those workflows can finish.
 
+The website registry at `GET /api/v1/websites` stores one row per normalized
+domain. Discovery saves only the provider and canonical HTTPS origin; it does
+not store provider titles or snippets. Each new row keeps `status="new"` and
+has no company link. The save operation sends the origin to the existing crawl
+job queue; crawl progress remains on `website_crawl_jobs`. The Websites page
+links each domain to `GET /api/v1/websites/{id}`, which returns the website
+record, crawl page content, classification signals, contact/social links, and
+crawl-job history. The list API supports bounded `limit`/`offset`, site type,
+page type, and search filters. Website type, site topic, and language can be
+edited with `PATCH /api/v1/websites/{id}`.
+
 On a company profile, select **Crawl and enrich** on an existing Research
 source card to crawl its saved URL and find company website/domain details and
 public contact email addresses or telephone links. The source and crawl
@@ -83,12 +94,11 @@ website/domain values are filled only when the source provides a credible
 company association. The API endpoint is
 `POST /api/v1/companies/{id}/sources/crawl` with a `source_url` field.
 
-When discovery results are saved to the pipeline, mobile and desktop Google
-PageSpeed Insights scans are queued for each distinct company website. The
-ingest response returns without waiting for those scans. The worker saves
-category scores and full Lighthouse reports with the company; failed scans
-remain visible through their job status. Configure
-`GOOGLE_PAGESPEED_API_KEY` in the backend `.env` file.
+The legacy `POST /api/v1/discovery/ingest` endpoint continues to create and
+enrich companies directly and queues mobile and desktop Google PageSpeed
+Insights scans. The frontend discovery workflow instead creates domain
+registry rows and queues crawls without creating companies. Configure
+`GOOGLE_PAGESPEED_API_KEY` in the backend `.env` file to use PageSpeed scans.
 
 ## Requirements
 
@@ -160,7 +170,9 @@ query input, additional JSON parameters, and output-field mappings. Octoparse
 searches start provider jobs; the Discover Leads page polls those jobs and
 combines completed results with the selected Tavily results. The chosen search
 engines are saved on the backend. The Business listing websites category is
-shown as coming soon until a provider is configured.
+shown as coming soon until a provider is configured. Settings summarizes
+Octoparse tasks started through this application for the current UTC month and
+all time; it does not report Octoparse account-wide quota or plan usage.
 The page also sets maximum pages and depth for new crawls (up to 6 pages and
 depth 2); the crawler service may enforce lower deployment limits. Address,
 Chrome path, response/timeouts, queue, retries, rate limit, user agent, and Go
@@ -188,7 +200,8 @@ URLs, adds timestamped search keywords and their company associations, and
 stores per-company PageSpeed reports, converts entity IDs and their foreign
 keys to UUIDs while preserving existing records and relationships, adds
 durable website crawl and PageSpeed scan jobs, and adds persisted discovery
-tool preferences and Octoparse provider jobs.
+tool preferences and Octoparse provider jobs, and creates/backfills the website
+registry.
 If the unique source-URL migration detects duplicates in existing data, it
 stops with an error; resolve those duplicates before rerunning the migration.
 
@@ -231,7 +244,7 @@ All versioned endpoints use the `/api/v1` prefix.
 ```json
 {
   "query": "manufacturing companies in Kolkata",
-  "max_results": 5
+  "max_results": 20
 }
 ```
 
@@ -409,7 +422,14 @@ contains the updated company record, contacts, and lead sources.
   does not create contacts.
 - **WebsiteCrawl** — standalone homepage and relevant About, Blog, Services,
   Contact, and mission/goal page content, email addresses, social
-  links, and crawl timestamp, stored independently of company and lead data.
+  links, per-page classification signals, and crawl timestamp, stored
+  independently of company and lead data. The crawler runs separate website
+  type and topic classifiers; inferred topics populate an empty Website
+  `site_topic` list without replacing existing topic values. Classification
+  signals include page
+  metadata, JSON-LD and Microdata types, article/password/shopping element
+  counts, navigation and CTA text, URL-path patterns, and matched classifier
+  terms.
 
 Company names are matched through `normalized_name`; this helps discovery
 results with different capitalization or punctuation map to one company.

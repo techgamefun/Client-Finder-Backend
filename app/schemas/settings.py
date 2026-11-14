@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -95,3 +96,12 @@ class TavilyAccountUsage(BaseModel):
 class TavilyUsageResponse(BaseModel):
     key: TavilyKeyUsage
     account: TavilyAccountUsage | None = None
+
+
+class OctoparseUsageResponse(BaseModel):
+    period_start: datetime
+    tasks_started: int
+    tasks_running: int
+    tasks_succeeded: int
+    tasks_failed: int
+    all_time_tasks_started: int

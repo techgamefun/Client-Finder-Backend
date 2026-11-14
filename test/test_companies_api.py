@@ -222,6 +222,19 @@ def test_company_website_crawl_status_and_recrawl(client, monkeypatch):
             goals_content=None,
             emails=["hello@example.com"],
             social_links=["https://www.linkedin.com/company/example"],
+            pages=[
+                {
+                    "url": "https://example.com/",
+                    "classification_signals": {
+                        "og_type": "website",
+                        "generator": "Shopify",
+                        "article_count": 1,
+                        "password_input_count": 0,
+                        "shopping_elements": {"product_schema": 1},
+                        "cta_texts": ["Add to Cart"],
+                    },
+                }
+            ],
         )
 
     monkeypatch.setattr(
@@ -253,6 +266,12 @@ def test_company_website_crawl_status_and_recrawl(client, monkeypatch):
     assert status_after_crawl.status_code == 200
     assert status_after_crawl.json()["about_content"] == "Crawl 1"
     assert status_after_crawl.json()["emails"] == ["hello@example.com"]
+    assert (
+        status_after_crawl.json()["classification_signals"][0][
+            "classification_signals"
+        ]["og_type"]
+        == "website"
+    )
 
     recrawl = client.post(
         f"/api/v1/companies/{company_id}/website-crawl"
@@ -389,7 +408,7 @@ def test_company_website_crawl_falls_back_to_domain(client, monkeypatch):
 
     assert response.status_code == 202
     asyncio.run(website_crawl_worker.process_job(UUID(response.json()["id"])))
-    assert crawled_urls == ["https://example.com"]
+    assert crawled_urls == ["https://example.com/"]
 
 
 def test_research_source_crawl_fills_missing_company_details(

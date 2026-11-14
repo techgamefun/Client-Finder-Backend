@@ -28,7 +28,7 @@ TAVILY_USAGE_URL = "https://api.tavily.com/usage"
 async def search_companies(
     query: str,
     db: Session,
-    max_results: int = 5,
+    max_results: int = 20,
 ) -> DiscoverySearchResponse:
     api_key = get_tavily_api_key(db)
     if not api_key:

@@ -8,6 +8,7 @@ from app.schemas.settings import (
     ApplicationSettingsResponse,
     ApplicationSettingsUpdate,
     OctoparseTemplateSearchResponse,
+    OctoparseUsageResponse,
     TavilyUsageResponse,
 )
 from app.services.application_settings import (
@@ -15,7 +16,10 @@ from app.services.application_settings import (
     save_application_settings,
 )
 from app.services.discovery import get_tavily_usage
-from app.services.octoparse import search_octoparse_templates
+from app.services.octoparse import (
+    get_octoparse_usage,
+    search_octoparse_templates,
+)
 
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
@@ -50,6 +54,16 @@ async def read_tavily_usage(
     db: Annotated[Session, Depends(get_db)],
 ) -> TavilyUsageResponse:
     return await get_tavily_usage(db)
+
+
+@router.get(
+    "/octoparse/usage",
+    response_model=OctoparseUsageResponse,
+)
+def read_octoparse_usage(
+    db: Annotated[Session, Depends(get_db)],
+) -> OctoparseUsageResponse:
+    return get_octoparse_usage(db)
 
 
 @router.get(

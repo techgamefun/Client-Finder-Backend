@@ -1,10 +1,12 @@
 import json
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import HTTPException, status
 from pydantic import ValidationError
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models import DiscoveryProviderJob
@@ -16,6 +18,7 @@ from app.schemas.discovery import (
 from app.schemas.settings import (
     OctoparseTemplateOption,
     OctoparseTemplateSearchResponse,
+    OctoparseUsageResponse,
 )
 from app.services.application_settings import (
     get_octoparse_api_key,
@@ -26,6 +29,56 @@ from app.services.application_settings import (
 OCTOPARSE_API_BASE_URL = "https://openapi.octoparse.com"
 OCTOPARSE_EXTERNAL_USER_ID = "business-intelligence-agent"
 OCTOPARSE_REQUEST_TIMEOUT = 30.0
+
+
+def get_octoparse_usage(db: Session) -> OctoparseUsageResponse:
+    now = datetime.now(timezone.utc)
+    period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    monthly_counts = db.execute(
+        select(
+            func.count(DiscoveryProviderJob.id),
+            func.count(
+                case(
+                    (
+                        DiscoveryProviderJob.status == "running",
+                        DiscoveryProviderJob.id,
+                    )
+                )
+            ),
+            func.count(
+                case(
+                    (
+                        DiscoveryProviderJob.status == "succeeded",
+                        DiscoveryProviderJob.id,
+                    )
+                )
+            ),
+            func.count(
+                case(
+                    (
+                        DiscoveryProviderJob.status == "failed",
+                        DiscoveryProviderJob.id,
+                    )
+                )
+            ),
+        ).where(
+            DiscoveryProviderJob.provider == DiscoveryProvider.OCTOPARSE.value,
+            DiscoveryProviderJob.created_at >= period_start,
+        )
+    ).one()
+    all_time_count = db.scalar(
+        select(func.count(DiscoveryProviderJob.id)).where(
+            DiscoveryProviderJob.provider == DiscoveryProvider.OCTOPARSE.value,
+        )
+    )
+    return OctoparseUsageResponse(
+        period_start=period_start,
+        tasks_started=monthly_counts[0],
+        tasks_running=monthly_counts[1],
+        tasks_succeeded=monthly_counts[2],
+        tasks_failed=monthly_counts[3],
+        all_time_tasks_started=all_time_count or 0,
+    )
 
 
 async def search_octoparse_templates(
@@ -147,10 +200,18 @@ async def start_octoparse_search(
         or not isinstance(task_id, str)
         or not task_id
     ):
-        guidance = data.get("recoverySuggestion")
         detail = "Octoparse could not start the configured template."
-        if isinstance(guidance, str) and guidance:
-            detail = f"{detail} {guidance}"
+        error = _first_string(
+            data,
+            ("error", "errorMessage", "message", "reason"),
+        )
+        if error:
+            detail = f"{detail} Octoparse reported: {error[:500]}"
+        guidance = _first_string(data, ("recoverySuggestion",))
+        if guidance and guidance != error:
+            detail = f"{detail} {guidance[:500]}"
+        if not error and not guidance and isinstance(task_status, str):
+            detail = f"{detail} (status: {task_status})."
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=detail,
@@ -403,6 +464,17 @@ def _serialize_job(job: DiscoveryProviderJob) -> DiscoveryProviderJobResponse:
 
 def _optional_string(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _first_string(
+    data: dict[str, Any],
+    keys: tuple[str, ...],
+) -> str | None:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _list_of_dicts(value: Any) -> list[dict[str, Any]]:

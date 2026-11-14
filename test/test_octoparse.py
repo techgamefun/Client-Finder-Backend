@@ -1,11 +1,14 @@
 import asyncio
 import json as jsonlib
+from datetime import datetime, timezone
 
 import httpx
 from cryptography.fernet import Fernet
 
 from app.config import settings
+from app.models import DiscoveryProviderJob, SearchKeyword
 from app.services import octoparse
+from conftest import TestingSessionLocal
 
 
 def test_octoparse_template_search_is_public_and_normalizes_templates(
@@ -193,3 +196,103 @@ def test_octoparse_search_starts_and_polls_configured_template(
             "provider": "octoparse",
         }
     ]
+
+
+def test_octoparse_start_failure_includes_provider_diagnostic(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "octoparse_api_key", "test-octoparse-key")
+    configured = client.put(
+        "/api/v1/settings",
+        json={
+            "selected_discovery_tools": ["octoparse"],
+            "octoparse_template": {
+                "template_name": "google_search",
+                "query_field": "search_keyword",
+                "additional_parameters": {},
+                "title_field": "title",
+                "url_field": "url",
+            },
+        },
+    )
+    assert configured.status_code == 200
+
+    class FakeAsyncClient:
+        def __init__(self, timeout: float):
+            assert timeout == octoparse.OCTOPARSE_REQUEST_TIMEOUT
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url: str, json: dict, headers: dict):
+            assert url.endswith("/api/agentTools/executeTask")
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "success": False,
+                        "status": "start_failed",
+                        "error": "The template is not published for API use.",
+                        "recoverySuggestion": "Publish the template and retry.",
+                    }
+                },
+            )
+
+    monkeypatch.setattr(octoparse.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post(
+        "/api/v1/discovery/search",
+        json={"query": "local bike shops", "max_results": 5},
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "The template is not published for API use." in detail
+    assert "Publish the template and retry." in detail
+
+
+def test_octoparse_usage_reports_this_month_and_all_time_tasks(client):
+    with TestingSessionLocal() as db:
+        search = SearchKeyword(
+            keyword="test search",
+            searched_at=datetime.now(timezone.utc),
+        )
+        db.add(search)
+        db.flush()
+        db.add_all(
+            [
+                DiscoveryProviderJob(
+                    search_keyword_id=search.id,
+                    provider="octoparse",
+                    external_task_id=f"task-{task_status}",
+                    max_results=5,
+                    status=task_status,
+                    result_mapping={},
+                )
+                for task_status in ("running", "succeeded", "failed")
+            ]
+            + [
+                DiscoveryProviderJob(
+                    search_keyword_id=search.id,
+                    provider="tavily",
+                    external_task_id="tavily-task",
+                    max_results=5,
+                    status="succeeded",
+                    result_mapping={},
+                )
+            ]
+        )
+        db.commit()
+
+    response = client.get("/api/v1/settings/octoparse/usage")
+
+    assert response.status_code == 200
+    assert response.json()["tasks_started"] == 3
+    assert response.json()["tasks_running"] == 1
+    assert response.json()["tasks_succeeded"] == 1
+    assert response.json()["tasks_failed"] == 1
+    assert response.json()["all_time_tasks_started"] == 3

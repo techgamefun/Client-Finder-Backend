@@ -15,9 +15,12 @@ from app.schemas.discovery import (
     DiscoverySearchRequest,
     DiscoverySearchResponse,
     DiscoveryProviderJobResponse,
+    DiscoveryWebsiteSaveRequest,
+    DiscoveryWebsiteSaveResponse,
     SearchKeywordResponse,
 )
 from app.services.discovery import search_with_selected_tools
+from app.services.discovery_websites import save_discovered_websites
 from app.services.lead_ingestion import ingest_search_results
 from app.services.octoparse import poll_octoparse_job
 
@@ -145,3 +148,14 @@ async def ingest_companies(
     db: Annotated[Session, Depends(get_db)],
 ) -> DiscoveryIngestResponse:
     return await ingest_search_results(payload, db)
+
+
+@router.post(
+    "/save-websites",
+    response_model=DiscoveryWebsiteSaveResponse,
+)
+async def save_websites_for_review(
+    payload: DiscoveryWebsiteSaveRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> DiscoveryWebsiteSaveResponse:
+    return await save_discovered_websites(payload, db)

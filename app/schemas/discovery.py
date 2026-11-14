@@ -27,7 +27,7 @@ class DiscoveryTool(BaseModel):
 
 class DiscoverySearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=300)
-    max_results: int = Field(default=5, ge=1, le=10)
+    max_results: int = Field(default=20, ge=1, le=20)
 
 
 class DiscoveryResult(BaseModel):
@@ -75,9 +75,28 @@ class DiscoveryIngestRequest(DiscoverySearchRequest):
     search_id: UUID | None = None
 
 
+class DiscoveryWebsiteInput(BaseModel):
+    url: HttpUrl
+    provider: DiscoveryProvider
+
+
+class DiscoveryWebsiteSaveRequest(DiscoverySearchRequest):
+    results: list[DiscoveryWebsiteInput] = Field(max_length=20)
+    search_id: UUID | None = None
+
+
 class DiscoveryCrawlFailure(BaseModel):
     source_url: str
     detail: str
+
+
+class DiscoveryWebsiteSaveResponse(BaseModel):
+    query: str
+    results_found: int
+    websites_saved: int
+    crawl_jobs_enqueued: int
+    crawl_jobs_already_present: int
+    domains_skipped: int
 
 
 class DiscoveryIngestResponse(BaseModel):

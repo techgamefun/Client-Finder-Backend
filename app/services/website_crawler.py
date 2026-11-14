@@ -10,8 +10,10 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.models import WebsiteCrawl
+from app.schemas.website_crawl import CrawlPageClassification
 from app.services.application_settings import get_crawl_settings
 from app.services.public_url import _normalize_website_url
+from app.services.website_registry import upsert_website
 
 
 class CrawlData(BaseModel):
@@ -19,6 +21,8 @@ class CrawlData(BaseModel):
 
     website_url: str
     site_type: str | None = None
+    website_topics: list[str] = Field(default_factory=list)
+    language: str | None = None
     home_page_url: str | None = None
     home_content: str | None = None
     about_page_url: str | None
@@ -35,6 +39,7 @@ class CrawlData(BaseModel):
     social_links: list[str] = Field(default_factory=list)
     phones: list[str] = Field(default_factory=list)
     company_links: list[tuple[str, str]] = Field(default_factory=list)
+    pages: list[CrawlPageClassification] = Field(default_factory=list)
 
 
 async def crawl_website(
@@ -90,7 +95,14 @@ async def crawl_website(
         ) from exc
 
 
-def _persist_crawl(data: CrawlData, db: Session) -> WebsiteCrawl:
+def _persist_crawl(
+    data: CrawlData,
+    db: Session,
+    *,
+    discovery_source: str = "manual",
+    discovery_provider: str | None = None,
+    registry_website_url: str | None = None,
+) -> WebsiteCrawl:
     for attempt in range(2):
         try:
             crawl = db.scalar(
@@ -116,9 +128,28 @@ def _persist_crawl(data: CrawlData, db: Session) -> WebsiteCrawl:
             crawl.contact_content = data.contact_content
             crawl.goals_page_url = data.goals_page_url
             crawl.goals_content = data.goals_content
+            page_signals = [
+                page.model_dump(mode="json")
+                for page in data.pages
+                if page.classification_signals is not None
+            ]
+            if page_signals:
+                crawl.classification_signals = page_signals
             crawl.emails = data.emails
             crawl.social_links = data.social_links
             crawl.crawled_at = datetime.now(timezone.utc)
+            db.flush()
+            website = upsert_website(
+                db,
+                registry_website_url or crawl.website_url,
+                discovery_source=discovery_source,
+                discovery_provider=discovery_provider,
+                category=crawl.site_type,
+                crawl_id=crawl.id,
+                language=data.language,
+            )
+            if data.website_topics and not website.site_topic:
+                website.site_topic = data.website_topics
             db.commit()
             db.refresh(crawl)
             return crawl

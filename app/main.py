@@ -11,6 +11,7 @@ from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
 from app.api.pagespeed import router as pagespeed_router
 from app.api.settings import router as settings_router
+from app.api.websites import router as websites_router
 from app.api.website_crawler import router as website_crawler_router
 
 try:
@@ -65,6 +66,11 @@ app.include_router(
 # Register the independent website crawler API.
 app.include_router(
     website_crawler_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    websites_router,
     prefix="/api/v1",
 )
 

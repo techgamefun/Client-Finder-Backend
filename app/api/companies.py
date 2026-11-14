@@ -37,6 +37,7 @@ from app.services.pagespeed_jobs import get_pagespeed_scan_job
 from app.services.research_source_crawler import crawl_research_source
 from app.services.pagespeed import PageSpeedError, scan_pagespeed
 from app.services.website_crawler import get_website_crawl
+from app.services.website_registry import upsert_website
 
 
 router = APIRouter(
@@ -96,6 +97,14 @@ def create_company(
     db.add(company)
 
     try:
+        db.flush()
+        website_url = _company_website_url(company)
+        if website_url:
+            upsert_website(
+                db,
+                website_url,
+                discovery_source="company_profile",
+            )
         db.commit()
         db.refresh(company)
     except IntegrityError as exc:
@@ -199,7 +208,11 @@ async def crawl_company_website(
             detail="Add a company website or domain before crawling.",
         )
 
-    job = await create_website_crawl_job(website_url, db)
+    job = await create_website_crawl_job(
+        website_url,
+        db,
+        discovery_source="company_profile",
+    )
     return get_website_crawl_job(job.id, db)
 
 
@@ -357,6 +370,16 @@ def update_company(
         setattr(company, field, value)
 
     try:
+        if "website" in company_data or "domain" in company_data:
+            website_url = _company_website_url(company)
+        else:
+            website_url = None
+        if website_url:
+            upsert_website(
+                db,
+                website_url,
+                discovery_source="company_profile",
+            )
         db.commit()
         db.refresh(company)
     except IntegrityError as exc:

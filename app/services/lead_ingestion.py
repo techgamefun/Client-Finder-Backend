@@ -33,6 +33,7 @@ from app.services.pagespeed_jobs import (
     serialize_pagespeed_scan_job,
 )
 from app.services.website_crawler import CrawlData, crawl_website
+from app.services.website_registry import upsert_website
 
 
 def _persist_search_results(
@@ -49,7 +50,6 @@ def _persist_search_results(
         skipped = 0
         contacts_added = 0
         enriched_company_ids: set[UUID] = set()
-        persisted_crawl_urls: set[str] = set()
         pagespeed_jobs_by_key: dict[tuple[str, str], PageSpeedScanJob] = {}
         pagespeed_jobs: list[PageSpeedScanJob] = []
         claimed_domains: set[str] = set()
@@ -77,6 +77,31 @@ def _persist_search_results(
                     skipped += 1
                     continue
                 seen_urls.add(source_url)
+
+                crawl = crawls_by_url.get(source_url)
+                crawl_record = (
+                    _upsert_crawl(
+                        crawl,
+                        db,
+                        discovery_source=result.provider.value,
+                        discovery_provider=result.provider.value,
+                    )
+                    if crawl is not None
+                    else None
+                )
+                upsert_website(
+                    db,
+                    source_url,
+                    discovery_source=result.provider.value,
+                    discovery_provider=result.provider.value,
+                    category=crawl.site_type if crawl is not None else None,
+                    crawl_id=(
+                        crawl_record.id
+                        if crawl_record is not None
+                        and crawl_record.website_url == source_url
+                        else None
+                    ),
+                )
 
                 existing_source = db.scalar(
                     select(LeadSource)
@@ -108,6 +133,23 @@ def _persist_search_results(
                         db.flush()
                         companies_created += 1
 
+                website = upsert_website(
+                    db,
+                    source_url,
+                    category=crawl.site_type if crawl is not None else None,
+                    crawl_id=(
+                        crawl_record.id
+                        if crawl_record is not None
+                        and crawl_record.website_url == source_url
+                        else None
+                    ),
+                )
+                if crawl_record is not None and crawl_record.website_url != source_url:
+                    upsert_website(
+                        db,
+                        crawl_record.website_url,
+                    )
+
                 if company.id not in linked_company_ids:
                     if all(
                         keyword.id != search_keyword.id
@@ -116,12 +158,24 @@ def _persist_search_results(
                         company.search_keywords.append(search_keyword)
                     linked_company_ids.add(company.id)
 
-                crawl = crawls_by_url.get(source_url)
-                if crawl is not None:
+                is_listing = website.site_type == "listing"
+                if crawl is not None and not is_listing:
                     homepage = _homepage_url(crawl.website_url)
                     if not company.website:
                         company.website = homepage
                         enriched_company_ids.add(company.id)
+                        upsert_website(
+                            db,
+                            homepage,
+                            discovery_source=result.provider.value,
+                            discovery_provider=result.provider.value,
+                            category=crawl.site_type,
+                            crawl_id=(
+                                crawl_record.id
+                                if crawl_record.website_url == homepage
+                                else None
+                            ),
+                        )
 
                     domain = normalize_domain(company.website)
                     if (
@@ -161,32 +215,29 @@ def _persist_search_results(
                         contacts_added += 1
                         enriched_company_ids.add(company.id)
 
-                    if crawl.website_url not in persisted_crawl_urls:
-                        _upsert_crawl(crawl, db)
-                        persisted_crawl_urls.add(crawl.website_url)
-
-                website_url = pagespeed_targets_by_source.get(
-                    source_url,
-                    _homepage_url(source_url),
-                )
-                for strategy in PAGESPEED_STRATEGIES:
-                    job_key = (website_url, strategy)
-                    job = pagespeed_jobs_by_key.get(job_key)
-                    if job is None:
-                        job = PageSpeedScanJob(
-                            company_id=company.id,
-                            website_url=website_url,
-                            strategy=strategy,
-                            companies=[company],
-                        )
-                        db.add(job)
-                        pagespeed_jobs_by_key[job_key] = job
-                        pagespeed_jobs.append(job)
-                    elif all(
-                        linked_company.id != company.id
-                        for linked_company in job.companies
-                    ):
-                        job.companies.append(company)
+                if not is_listing:
+                    website_url = pagespeed_targets_by_source.get(
+                        source_url,
+                        _homepage_url(source_url),
+                    )
+                    for strategy in PAGESPEED_STRATEGIES:
+                        job_key = (website_url, strategy)
+                        job = pagespeed_jobs_by_key.get(job_key)
+                        if job is None:
+                            job = PageSpeedScanJob(
+                                company_id=company.id,
+                                website_url=website_url,
+                                strategy=strategy,
+                                companies=[company],
+                            )
+                            db.add(job)
+                            pagespeed_jobs_by_key[job_key] = job
+                            pagespeed_jobs.append(job)
+                        elif all(
+                            linked_company.id != company.id
+                            for linked_company in job.companies
+                        ):
+                            job.companies.append(company)
 
                 if existing_source is None:
                     evidence = result.content
@@ -245,7 +296,13 @@ def _combine_evidence(search_evidence: str, crawl: CrawlData) -> str:
     return "\n\n".join(section for section in sections if section)
 
 
-def _upsert_crawl(crawl: CrawlData, db: Session) -> None:
+def _upsert_crawl(
+    crawl: CrawlData,
+    db: Session,
+    *,
+    discovery_source: str = "manual",
+    discovery_provider: str | None = None,
+) -> WebsiteCrawl:
     record = db.scalar(
         select(WebsiteCrawl)
         .where(WebsiteCrawl.website_url == crawl.website_url)
@@ -257,6 +314,13 @@ def _upsert_crawl(crawl: CrawlData, db: Session) -> None:
 
     if crawl.site_type is not None:
         record.site_type = crawl.site_type
+    page_signals = [
+        page.model_dump(mode="json")
+        for page in crawl.pages
+        if page.classification_signals is not None
+    ]
+    if page_signals:
+        record.classification_signals = page_signals
     record.about_page_url = crawl.about_page_url
     record.about_content = crawl.about_content
     record.contact_page_url = crawl.contact_page_url
@@ -266,6 +330,17 @@ def _upsert_crawl(crawl: CrawlData, db: Session) -> None:
     record.emails = crawl.emails
     record.social_links = crawl.social_links
     record.crawled_at = datetime.now(timezone.utc)
+    db.flush()
+    upsert_website(
+        db,
+        record.website_url,
+        discovery_source=discovery_source,
+        discovery_provider=discovery_provider,
+        category=record.site_type,
+        crawl_id=record.id,
+        language=crawl.language,
+    )
+    return record
 
 
 def _pagespeed_target_url(result: DiscoveryResult, db: Session) -> str:

@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -115,7 +116,6 @@ class Company(Base):
         cascade="all, delete-orphan",
         order_by="desc(PageSpeedScan.scanned_at)",
     )
-
     __table_args__ = (
         Index("ix_companies_name", "name"),
         Index("ix_companies_industry", "industry"),
@@ -276,6 +276,12 @@ class WebsiteCrawl(Base):
     contact_content: Mapped[str | None] = mapped_column(Text)
     goals_page_url: Mapped[str | None] = mapped_column(String(2000))
     goals_content: Mapped[str | None] = mapped_column(Text)
+    classification_signals: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     emails: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     social_links: Mapped[list[str]] = mapped_column(
         JSON,
@@ -286,6 +292,96 @@ class WebsiteCrawl(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+
+    websites: Mapped[list["Website"]] = relationship(
+        back_populates="crawl",
+        passive_deletes=True,
+    )
+
+
+class Website(Base):
+    __tablename__ = "websites"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    website_url: Mapped[str] = mapped_column(
+        String(2000),
+        nullable=False,
+    )
+    domain: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    crawl_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("website_crawls.id", ondelete="SET NULL"),
+    )
+    category: Mapped[str | None] = mapped_column(String(64))
+    page_type: Mapped[str | None] = mapped_column(String(64))
+    classification_manual: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    site_topic: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    language: Mapped[str | None] = mapped_column(String(35))
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="new",
+        server_default="new",
+    )
+    site_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="normal",
+        server_default="normal",
+    )
+    discovery_source: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        default="manual",
+        server_default="manual",
+    )
+    discovery_provider: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    crawl: Mapped[WebsiteCrawl | None] = relationship(back_populates="websites")
+
+    __table_args__ = (
+        UniqueConstraint("website_url", name="uq_websites_website_url"),
+        UniqueConstraint("domain", name="uq_websites_domain"),
+        CheckConstraint(
+            "status = 'new'",
+            name="ck_websites_status_new",
+        ),
+        CheckConstraint(
+            "site_type IN ('normal', 'listing')",
+            name="ck_websites_site_type",
+        ),
+        Index("ix_websites_site_type", "site_type"),
+        Index("ix_websites_page_type", "page_type"),
+        Index("ix_websites_created_at", "created_at"),
     )
 
 

@@ -59,10 +59,19 @@ app/main.py                 FastAPI app, router registration, health check
   environment fallbacks for Tavily and Octoparse, including the selected
   discovery tools and Octoparse template.
 - `app/models.py` defines the `Company`, `Contact`, `LeadSource`,
-  `PageSpeedScan`, `WebsiteCrawl`, `WebsiteCrawlJob`, `ApplicationSettings`,
-  and `DiscoveryProviderJob` tables and their relationships.
-- `WebsiteCrawl.site_type` stores the crawler's detected website category with
-  the extracted crawl data.
+  `PageSpeedScan`, `WebsiteCrawl`, `Website`, `WebsiteCrawlJob`,
+  `ApplicationSettings`, and `DiscoveryProviderJob` tables and their
+  relationships.
+- `WebsiteCrawl.site_type` stores the crawler's detected website type with the
+  extracted crawl data. The separate topic classifier fills `Website.site_topic`
+  when it is still empty. The `classification_signals` JSON column preserves
+  bounded, per-page metadata, schema types, DOM counts, navigation/CTA text,
+  URL patterns, and matched metadata, URL, and body classification terms.
+- `Website` is the all-sites registry. It tracks discovery source/provider,
+  detected category, normal/listing type, and optional company and crawl links.
+  Listing sites are constrained to have no company association.
+- `app/services/website_registry.py` centralizes website upserts and applies
+  the listing-site association rule.
 - `app/schemas/` keeps API payload validation separate from ORM entities.
 - `app/services/discovery.py` defines the lead-discovery tool contract,
   executes the selected Tavily and Octoparse tools concurrently, validates
@@ -73,15 +82,17 @@ app/main.py                 FastAPI app, router registration, health check
 - `app/services/octoparse.py` searches templates, starts configured Octoparse
   tasks, polls their exports, maps template-specific output fields into
   discovery results, and persists task status and results through
-  `DiscoveryProviderJob`.
+  `DiscoveryProviderJob`. Its usage summary counts app-tracked Octoparse tasks
+  for the current UTC month and all time; this is not account quota data.
 - `app/services/lead_ingestion.py` matches search results to companies, crawls
   source URLs, fills verified website/domain and public-email details, and
   persists source and crawl evidence.
 - `app/services/website_crawler.py` provides bounded public-site crawling to
   discovery ingestion and the standalone crawl endpoint using headless
-  Chromium; crawled page text, emails, social links, and detected site type are
-  stored in `WebsiteCrawl` records. Company profiles can retrieve the latest
-  successful crawl for their website and trigger a new crawl or re-crawl. It
+  Chromium; crawled page text, emails, social links, detected site type, and
+  detailed per-page classification signals are stored in `WebsiteCrawl`
+  records. Company profiles can retrieve the latest successful crawl for their
+  website and trigger a new crawl or re-crawl. It
   retries temporary rate-limit and server failures a bounded number of times,
   but reports denied access without attempting to bypass it.
 - `app/services/crawl_jobs.py` creates durable PostgreSQL crawl jobs and
@@ -125,16 +136,34 @@ sources.
 the tools selected in Settings. Tavily returns validated results immediately;
 Octoparse starts a configured template task and returns a durable provider-job
 ID. The successful search is recorded with its keyword and timestamp, and its
-ID is returned for the later ingestion request. Provider failures are included
-in the response when another selected tool succeeds or starts a job; if all
+ID is returned for the later website review request. Provider failures are
+included in the response when another selected tool succeeds or starts a job; if all
 selected tools fail, the API returns an error. `GET
 /api/v1/discovery/jobs/{job_id}` polls an Octoparse export and persists its
 status and mapped results. `GET /api/v1/discovery/suggestions` returns up to
-ten recent unique keywords matching the supplied query.
+ten recent unique keywords matching the supplied query. Search results are
+kept transient until the user saves them for website review.
+
+### Domain registry and discovery crawl queue
+
+The Discover leads page's save action sends only result URLs and providers to
+`POST /api/v1/discovery/save-websites`; provider titles and snippets are not
+stored or sent to the save endpoint. URLs are reduced to canonical HTTPS
+origins and deduplicated by normalized domain. The `websites` table has a
+unique domain constraint, a permanent `status="new"`, no company foreign key,
+and a `site_topic` list. Repeated discoveries reuse the same domain row.
+
+New domains are sent to the existing `website_crawl_jobs` queue. Crawl state
+remains solely on those job rows; a domain with an active job or saved crawl
+does not get another discovery crawl queued. The worker persists successful
+crawl data and links it to the domain registry row. The Websites page displays
+the crawl signals and allows editing website type, site topic, and language.
+This discovery flow does not create companies or queue PageSpeed scans.
 
 ### Discovery ingestion
 
-`POST /api/v1/discovery/ingest` accepts the displayed search results (or runs
+`POST /api/v1/discovery/ingest` remains available for legacy clients that
+create and enrich company records directly. It accepts search results (or runs
 Tavily search for older clients that omit them), crawls each distinct source
 URL with a maximum of ten concurrent crawls, then hands the results and
 successful crawls to `ingest_search_results`. Persistence is moved to
@@ -158,9 +187,19 @@ Starlette's thread pool because the SQLAlchemy session is synchronous:
    source domain, and combined search/crawl evidence.
 8. Commit the database changes as one batch. Roll back on failure. Retry once after an
    `IntegrityError` to handle concurrent uniqueness conflicts.
-9. Return result, candidate, source, enrichment, PageSpeed, and skipped counts,
-   plus any crawl or PageSpeed failures. Provider failures do not prevent
-   sources from being saved.
+9. Register each result and successful crawl in the domain-unique `Website`
+   registry. Website rows are not linked to companies; listing sites still do
+   not receive company PageSpeed jobs.
+10. Return result, candidate, source, enrichment, PageSpeed, and skipped
+   counts, plus any crawl or PageSpeed failures. Provider failures do not
+   prevent sources from being saved.
+
+`GET /api/v1/websites` lists the canonical URL, normalized domain, permanent
+status, page type, site topic, language, discovery source/provider, and crawl
+status. It supports bounded `limit`/`offset` pagination, site type, page type,
+and search filters. `GET /api/v1/websites/{id}` returns the website record,
+stored crawl page content, classification signals, contact/social links, and
+crawl-job history for the website detail page.
 
 ### Website crawling
 
@@ -181,6 +220,9 @@ IP addresses; and does not follow cross-site links
 or redirects. Extracted page text, emails, and social URLs are upserted into
 the separate `website_crawls` table. Discovery ingestion and research-source
 enrichment continue using synchronous crawling.
+Company profiles, discovery results, direct crawl jobs, and successful crawls
+also upsert the `websites` registry by normalized domain. Website rows are
+never linked to companies; the crawl relation is maintained independently.
 Company profiles can read their latest successful crawl at
 `GET /api/v1/companies/{id}/website-crawl` and start or repeat a crawl with
 `POST /api/v1/companies/{id}/website-crawl`. These routes use the company's
@@ -206,8 +248,9 @@ revision creates the lead tables; subsequent revisions add normalized company
 names, update lead-source URL uniqueness, track discovery search keywords and
 their company associations, save website crawls, store PageSpeed reports,
 convert entity primary keys and their foreign keys to UUIDs while preserving
-existing relationships, add durable website crawl jobs, and persist discovery
-tool preferences and Octoparse provider jobs.
+existing relationships, add durable website crawl jobs, persist discovery
+tool preferences and Octoparse provider jobs, and backfill the website
+registry from existing crawl, company, lead-source, and crawl-job records.
 A migration that backfills or constrains existing data must account for
 incompatible existing rows and fail clearly rather than silently discarding
 data.

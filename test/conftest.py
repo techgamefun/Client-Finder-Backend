@@ -35,8 +35,9 @@ TestingSessionLocal = sessionmaker(
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     Base.metadata.create_all(bind=test_engine)
+    monkeypatch.setattr("app.main.should_auto_migrate", lambda: False)
 
     def override_get_db():
         db = TestingSessionLocal()

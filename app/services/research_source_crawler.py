@@ -13,6 +13,7 @@ from app.models import Company, Contact, LeadSource, WebsiteCrawl
 from app.services.application_settings import get_crawl_settings
 from app.services.normalization import normalize_company_name, normalize_domain
 from app.services.website_crawler import CrawlData, crawl_website
+from app.services.website_registry import upsert_website
 
 
 NAME_STOPWORDS = {
@@ -184,7 +185,21 @@ def _persist_research_enrichment(
         source.verified_at = now
 
     try:
-        _upsert_crawl(crawl, db, now)
+        crawl_record = _upsert_crawl(crawl, db, now)
+        upsert_website(
+            db,
+            crawl_record.website_url,
+            discovery_source="company_research",
+            category=crawl_record.site_type,
+            crawl_id=crawl_record.id,
+            language=crawl.language,
+        )
+        if company.website:
+            upsert_website(
+                db,
+                company.website,
+                discovery_source="company_research",
+            )
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -270,7 +285,7 @@ def _upsert_crawl(
     crawl: CrawlData,
     db: Session,
     crawled_at: datetime,
-) -> None:
+) -> WebsiteCrawl:
     record = db.scalar(
         select(WebsiteCrawl)
         .where(WebsiteCrawl.website_url == crawl.website_url)
@@ -282,6 +297,13 @@ def _upsert_crawl(
 
     if crawl.site_type is not None:
         record.site_type = crawl.site_type
+    page_signals = [
+        page.model_dump(mode="json")
+        for page in crawl.pages
+        if page.classification_signals is not None
+    ]
+    if page_signals:
+        record.classification_signals = page_signals
     record.about_page_url = crawl.about_page_url
     record.about_content = crawl.about_content
     record.contact_page_url = crawl.contact_page_url
@@ -291,3 +313,5 @@ def _upsert_crawl(
     record.emails = crawl.emails
     record.social_links = crawl.social_links
     record.crawled_at = crawled_at
+    db.flush()
+    return record

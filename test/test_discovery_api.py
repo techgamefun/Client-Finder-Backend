@@ -52,7 +52,7 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
 
     response = client.post(
         "/api/v1/discovery/search",
-        json={"query": "manufacturing companies", "max_results": 3},
+        json={"query": "manufacturing companies", "max_results": 20},
     )
 
     assert response.status_code == 200
@@ -75,7 +75,7 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
     UUID(data["search_id"])
     assert received == {
         "query": "manufacturing companies",
-        "max_results": 3,
+        "max_results": 20,
     }
 
     with TestingSessionLocal() as db:
@@ -83,6 +83,12 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
         assert search is not None
         assert search.keyword == "manufacturing companies"
         assert search.searched_at is not None
+
+    over_limit = client.post(
+        "/api/v1/discovery/search",
+        json={"query": "manufacturing companies", "max_results": 21},
+    )
+    assert over_limit.status_code == 422
 
     suggestions = client.get(
         "/api/v1/discovery/suggestions",

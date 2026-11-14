@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import WebsiteCrawlJob
 from app.schemas.website_crawl import WebsiteCrawlJobResponse
 from app.services.redis_queue import RedisQueueError, enqueue_job
+from app.services.website_registry import upsert_website
 
 
 logger = logging.getLogger(__name__)
@@ -17,8 +18,17 @@ logger = logging.getLogger(__name__)
 async def create_website_crawl_job(
     website_url: str,
     db: Session,
+    *,
+    discovery_source: str = "manual",
+    discovery_provider: str | None = None,
 ) -> WebsiteCrawlJob:
-    job = WebsiteCrawlJob(website_url=website_url, status="queued")
+    website = upsert_website(
+        db,
+        website_url,
+        discovery_source=discovery_source,
+        discovery_provider=discovery_provider,
+    )
+    job = WebsiteCrawlJob(website_url=website.website_url, status="queued")
     db.add(job)
     db.commit()
     db.refresh(job)
