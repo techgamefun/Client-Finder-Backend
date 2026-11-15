@@ -3,7 +3,6 @@ import json as jsonlib
 from datetime import datetime, timezone
 
 import httpx
-from cryptography.fernet import Fernet
 
 from app.config import settings
 from app.models import DiscoveryProviderJob, SearchKeyword
@@ -15,7 +14,11 @@ def test_octoparse_template_search_is_public_and_normalizes_templates(
     client,
     monkeypatch,
 ):
-    monkeypatch.setattr(settings, "octoparse_api_key", "test-octoparse-key")
+    saved_key = client.put(
+        "/api/v1/settings",
+        json={"octoparse_api_key": "test-octoparse-key"},
+    )
+    assert saved_key.status_code == 200
 
     class FakeAsyncClient:
         def __init__(self, timeout: float):
@@ -88,9 +91,7 @@ def test_octoparse_search_starts_and_polls_configured_template(
     client,
     monkeypatch,
 ):
-    encryption_key = Fernet.generate_key().decode("ascii")
     octoparse_key = "test-octoparse-key"
-    monkeypatch.setattr(settings, "settings_encryption_key", encryption_key)
     monkeypatch.setattr(settings, "octoparse_api_key", None)
     monkeypatch.setattr(settings, "tavily_api_key", None)
 
@@ -206,6 +207,7 @@ def test_octoparse_start_failure_includes_provider_diagnostic(
     configured = client.put(
         "/api/v1/settings",
         json={
+            "octoparse_api_key": "test-octoparse-key",
             "selected_discovery_tools": ["octoparse"],
             "octoparse_template": {
                 "template_name": "google_search",

@@ -1,8 +1,9 @@
 from sqlalchemy import func, select
 
 from conftest import TestingSessionLocal
-from app.models import Website, WebsiteCrawlJob
+from app.models import Website, WebsiteCrawlJob, WebsiteHypeStatProfile
 from app.services import crawl_jobs
+from app.services.hypestat import HypeStatFetchResult
 
 
 def _disable_redis_enqueue(monkeypatch):
@@ -42,6 +43,9 @@ def test_saving_discovery_results_canonicalizes_domains_and_queues_crawls(
     with TestingSessionLocal() as db:
         websites = db.scalars(select(Website)).all()
         jobs = db.scalars(select(WebsiteCrawlJob)).all()
+        website_keywords = [
+            keyword.keyword for keyword in websites[0].search_keywords
+        ]
 
     assert len(websites) == 1
     assert websites[0].website_url == "https://example.com/"
@@ -49,6 +53,7 @@ def test_saving_discovery_results_canonicalizes_domains_and_queues_crawls(
     assert websites[0].status == "new"
     assert websites[0].site_topic == []
     assert websites[0].crawl_id is None
+    assert website_keywords == ["local manufacturing news"]
     assert jobs[0].website_url == "https://example.com/"
     assert jobs[0].status == "queued"
 
@@ -121,6 +126,132 @@ def test_saving_discovery_websites_ignores_snippet_fields(client, monkeypatch):
         assert website.website_url == "https://example.com/"
         assert "title" not in Website.__table__.columns
         assert "snippet" not in Website.__table__.columns
+
+
+def test_saving_websites_persists_hypestat_profiles_without_losing_websites(
+    client,
+    monkeypatch,
+):
+    _disable_redis_enqueue(monkeypatch)
+
+    async def fake_fetch_profiles(domains, _api_key):
+        assert domains == ["known.example", "unavailable.example"]
+        return {
+            "known.example": HypeStatFetchResult(
+                status="succeeded",
+                payload={
+                    "entry": {
+                        "domain": "known.example",
+                        "status": "ok",
+                        "data": {
+                            "traffic": {"visits_daily": 1234},
+                            "whois": {"registrar": "Example Registrar"},
+                        },
+                    },
+                    "meta": {"requests_left_today": 999},
+                },
+            ),
+            "unavailable.example": HypeStatFetchResult(
+                status="failed",
+                error="HypeStat returned HTTP 429: Daily limit reached.",
+            ),
+        }
+
+    monkeypatch.setattr(
+        "app.services.discovery_websites.fetch_hypestat_profiles",
+        fake_fetch_profiles,
+    )
+    response = client.post(
+        "/api/v1/discovery/save-websites",
+        json={
+            "query": "industrial suppliers",
+            "results": [
+                {"url": "https://known.example/about", "provider": "tavily"},
+                {
+                    "url": "https://unavailable.example/",
+                    "provider": "tavily",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["websites_saved"] == 2
+    assert result["hypestat_profiles_requested"] == 2
+    assert result["hypestat_profiles_succeeded"] == 1
+    assert result["hypestat_profiles_failed"] == 1
+
+    with TestingSessionLocal() as db:
+        websites = db.scalars(select(Website).order_by(Website.domain)).all()
+        profiles = db.scalars(
+            select(WebsiteHypeStatProfile).order_by(
+                WebsiteHypeStatProfile.website_id
+            )
+        ).all()
+        successful_website_id = next(
+            website.id
+            for website in websites
+            if website.domain == "known.example"
+        )
+
+    assert len(profiles) == 2
+    successful = next(
+        profile
+        for profile in profiles
+        if profile.payload is not None
+    )
+    failed = next(profile for profile in profiles if profile.error is not None)
+    assert successful.status == "succeeded"
+    assert successful.payload["entry"]["data"]["traffic"]["visits_daily"] == 1234
+    assert successful.fetched_at is not None
+    assert failed.status == "failed"
+    assert failed.error == "HypeStat returned HTTP 429: Daily limit reached."
+    assert failed.fetched_at is None
+
+    detail = client.get(f"/api/v1/websites/{successful_website_id}")
+    assert detail.status_code == 200
+    assert (
+        detail.json()["hypestat_profile"]["payload"]["entry"]["data"]["whois"]
+        ["registrar"]
+        == "Example Registrar"
+    )
+
+
+def test_saving_websites_can_skip_automatic_hypestat_lookups(
+    client,
+    monkeypatch,
+):
+    _disable_redis_enqueue(monkeypatch)
+    settings_response = client.put(
+        "/api/v1/settings",
+        json={"hypestat_auto_fetch_enabled": False},
+    )
+    assert settings_response.status_code == 200
+
+    async def unexpected_hypestat_fetch(*_args):
+        raise AssertionError("HypeStat should be disabled")
+
+    monkeypatch.setattr(
+        "app.services.discovery_websites.fetch_hypestat_profiles",
+        unexpected_hypestat_fetch,
+    )
+    response = client.post(
+        "/api/v1/discovery/save-websites",
+        json={
+            "query": "industrial suppliers",
+            "results": [
+                {"url": "https://disabled.example/", "provider": "tavily"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["hypestat_profiles_requested"] == 0
+    with TestingSessionLocal() as db:
+        website = db.scalar(select(Website))
+        assert website is not None
+        assert db.get(WebsiteHypeStatProfile, website.id) is None
 
 
 def test_website_status_stays_new_when_classification_is_updated(

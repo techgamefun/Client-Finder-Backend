@@ -5,7 +5,6 @@ from typing import Any, Literal
 import httpx
 from fastapi import HTTPException
 
-from app.config import settings
 from app.services.public_url import _validate_public_url
 
 
@@ -37,9 +36,10 @@ class PageSpeedScanData:
 async def scan_pagespeed(
     website_url: str,
     strategy: PageSpeedStrategy,
+    api_key: str | None = None,
 ) -> PageSpeedScanData:
-    if not settings.google_pagespeed_api_key:
-        raise PageSpeedError("Google PageSpeed API key is not configured.")
+    if not api_key:
+        raise PageSpeedError("Your Google PageSpeed API key is not configured.")
 
     try:
         await _validate_public_url(website_url)
@@ -48,7 +48,7 @@ async def scan_pagespeed(
 
     params: dict[str, str | list[str]] = {
         "url": website_url,
-        "key": settings.google_pagespeed_api_key,
+        "key": api_key,
         "strategy": strategy,
         "category": list(LIGHTHOUSE_CATEGORIES),
     }

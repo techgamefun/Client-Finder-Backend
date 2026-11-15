@@ -77,14 +77,33 @@ results before those workflows can finish.
 
 The website registry at `GET /api/v1/websites` stores one row per normalized
 domain. Discovery saves only the provider and canonical HTTPS origin; it does
-not store provider titles or snippets. Each new row keeps `status="new"` and
-has no company link. The save operation sends the origin to the existing crawl
+not store provider titles or snippets. Each new row starts with status `new`;
+website statuses can be `new`, `lead`, or `checked`. Rows have no company link.
+The save operation sends the origin to the existing crawl
 job queue; crawl progress remains on `website_crawl_jobs`. The Websites page
 links each domain to `GET /api/v1/websites/{id}`, which returns the website
 record, crawl page content, classification signals, contact/social links, and
-crawl-job history. The list API supports bounded `limit`/`offset`, site type,
-page type, and search filters. Website type, site topic, and language can be
-edited with `PATCH /api/v1/websites/{id}`.
+crawl-job history. The list API supports bounded `limit`/`offset`, page type,
+and search filters. Website type, site topic, and language can be
+edited with `PATCH /api/v1/websites/{id}`. The **Add to Lead** action creates
+companies for the filtered crawled websites and marks their registry status as
+`lead`; listing websites are excluded. Newly created companies use the domain
+as their initial name and have lead status `new`.
+The Websites page also displays the top keywords extracted from each domain's
+own saved crawl page titles and descriptions. `GET
+/api/v1/websites/corpus-words` computes these independently using the Go
+crawler service's `POST /corpus-words` endpoint and persists each domain's
+results until that website is re-crawled.
+Deploy or restart the Go crawler service whenever its corpus response contract
+changes; `GET /health` alone does not verify that `/corpus-words` is current.
+When **Save websites** is used, the Agent also requests full HypeStat profiles
+through the Go crawler service's authenticated `POST /hypestat/domains` proxy.
+The response is stored unchanged in `website_hypestat_profiles` and displayed
+on the website detail page. Successful profiles are reused on later saves;
+queued or failed lookups can be retried by saving the website again or using
+the **Refetch HypeStat** action on the website detail page. HypeStat limits
+requests to 60 per minute and 1,000 per day, with up to 50 new or updated
+website analyses per day; domains not yet analyzed are queued.
 
 On a company profile, select **Crawl and enrich** on an existing Research
 source card to crawl its saved URL and find company website/domain details and
@@ -94,11 +113,17 @@ website/domain values are filled only when the source provides a credible
 company association. The API endpoint is
 `POST /api/v1/companies/{id}/sources/crawl` with a `source_url` field.
 
+The crawler and PageSpeed queue pages and active crawl-status views receive job
+updates over the WebSocket endpoint `/api/v1/queue/events`. PostgreSQL publishes
+an event after a job is created or updated, including when a separate worker
+process changes it. The frontend reconnects and refreshes the affected job data
+when it receives an event; it does not continuously poll those job statuses.
+
 The legacy `POST /api/v1/discovery/ingest` endpoint continues to create and
 enrich companies directly and queues mobile and desktop Google PageSpeed
 Insights scans. The frontend discovery workflow instead creates domain
-registry rows and queues crawls without creating companies. Configure
-`GOOGLE_PAGESPEED_API_KEY` in the backend `.env` file to use PageSpeed scans.
+registry rows and queues crawls without creating companies. Users configure
+their own Google PageSpeed API key from **Settings → PageSpeed**.
 
 ## Requirements
 
@@ -130,41 +155,95 @@ Create a `.env` file in the repository root (do not commit it):
 
 ```dotenv
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
-TAVILY_API_KEY=your-tavily-api-key
-OCTOPARSE_API_KEY=your-octoparse-api-key
-SETTINGS_ENCRYPTION_KEY=generated-fernet-key
-GOOGLE_PAGESPEED_API_KEY=your-google-pagespeed-api-key
+ACCESS_TOKEN_SECRET=generate-a-unique-64-character-hex-secret
+ACCESS_TOKEN_EXPIRY=15m
+REFRESH_TOKEN_SECRET=generate-a-different-64-character-hex-secret
+REFRESH_TOKEN_EXPIRY=168h
 UPSTASH_REDIS_REST_URL=https://your-upstash-database.upstash.io
 UPSTASH_REDIS_REST_TOKEN=your-upstash-rest-token
 ENVIRONMENT=development
-FRONTEND_ORIGINS=http://localhost:3000
+FRONTEND_URL=http://localhost:3000
+CRAWLER_SERVICE_SHARED_TOKEN=your-shared-service-token
+GOOGLE_OAUTH_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_OAUTH_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
+GOOGLE_OAUTH_STATE_SECRET=generate-a-random-64-character-hex-secret
+GMAIL_TOKEN_ENCRYPTION_KEY=replace-with-generated-Fernet-key
 ```
 
-`DATABASE_URL` is required when the application starts. Tavily and Octoparse
-can be configured with `TAVILY_API_KEY` and `OCTOPARSE_API_KEY`, respectively,
-or from the public Settings page. The database layer uses psycopg for
-PostgreSQL.
+`DATABASE_URL` is required when the application starts. The access and refresh
+token secrets must be distinct, random hexadecimal values containing at least
+32 bytes each; keep them stable. Generate independent values with
+`python -c "import secrets; print(secrets.token_hex(32))"` and set the expiry
+values using positive `s`, `m`, `h`, or `d` durations. Access tokens may be at
+most 24 hours; refresh tokens may be at most 365 days. Sessions created with
+older token signing are not accepted; users must sign in again after rotating
+to these separate secrets. The database layer uses psycopg for PostgreSQL.
 The website crawler uses Playwright Chromium; install the browser on every
 backend host with `python -m playwright install chromium`.
-`GOOGLE_PAGESPEED_API_KEY` is used by the backend when discovery results are
-saved to the pipeline; it is never sent to the frontend.
-`SETTINGS_ENCRYPTION_KEY` is a Fernet key used to encrypt Tavily and Octoparse
-keys saved from the page; keep it stable and backed up, because changing or
-losing it makes saved keys unreadable. Generate an encryption key with:
+Set the same `CRAWLER_SERVICE_SHARED_TOKEN` in the Agent environment and
+`crawler-service/.env` (or its process environment). Enter the HypeStat API key
+on the Settings page; it is sent only from the Agent to the Go proxy. The Go
+proxy uses it for the first-party HypeStat API and never returns it to the
+frontend. Generate a shared token with
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
-```powershell
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
+To connect Gmail accounts, configure a Google OAuth client with the redirect
+URI above (use your HTTPS API URL in production). Generate a state-signing key
+with `python -c "import secrets; print(secrets.token_hex(32))"` and a Gmail
+refresh-token encryption key with
+`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+Keep both secrets private and stable. The OAuth flow requests verified profile
+email plus Gmail modify and send scopes. Refresh tokens are encrypted in the
+database; Gmail access is limited to accounts explicitly assigned by an
+organization administrator.
 
-The Settings page and its API are public and require no admin token. Anyone
-who can reach the application can view and change crawler limits, discovery
-tool preferences, and provider keys. Keys are never returned by the API, but
-the settings API must not be exposed to untrusted networks. Use network access
-controls and HTTPS if deploying it beyond a trusted network. The Settings page
-can query Tavily's usage endpoint for current-cycle credits and limits. Keys
-saved there are encrypted in PostgreSQL and are never returned to the browser.
-`TAVILY_API_KEY` and `OCTOPARSE_API_KEY` remain deployment-level fallbacks; if
-a database key is saved, it takes precedence.
+After connecting an account, administrators can assign it to members under
+**Settings → Gmail accounts**. Assigned members open **Gmail** in the workspace
+navigation to search and page through the inbox, read messages, and send
+threaded replies. Message HTML is shown as plain text; the inbox does not expose
+message content from accounts that are not assigned to the signed-in member.
+
+Organization email templates are available under
+`/api/v1/orgs/{org_id}/templates`. Administrators can create, update, and
+delete templates; organization members can list and retrieve them.
+`GET /variables` returns insertable placeholders.
+Preview with `POST /{template_id}/preview` using a `company_id`, optional
+`contact_id`, optional `gmail_account_id`, and optional `custom_variables`.
+Send with `POST /{template_id}/send` using a `company_id`, `contact_id`, and an
+assigned `gmail_account_id`; delivery is to that contact's business email. The
+body is rendered in a Jinja sandbox with HTML autoescaping, and
+`default("there")` substitutes null or empty values. Custom variables may add
+top-level values or override nested context fields, except `sender.email`, which
+is determined by the preview identity or connected Gmail account.
+`company.crawled_text` aggregates available crawl-page text for the company
+domain, and `company.phone` maps to the selected contact's business phone
+because the Company model has no phone column.
+
+Apply migrations, then open the frontend and create the first organization
+administrator. Subsequent users can sign in; anyone can create a separate
+organization, while an organization administrator can add members from
+**Settings → Organization users**. Roles are `admin` and `user`. Members share
+their organization's companies, websites, and jobs; provider API keys are
+personal to each user and stored as plaintext in the database. Restrict
+database access and use dedicated provider keys: anyone with database access
+can read them. Existing records are assigned to one default organization by
+the migration. Previously saved encrypted provider keys are removed by the
+plaintext-storage migration and must be entered again.
+
+All business APIs and queue WebSockets require authentication. The API issues
+HTTP-only access and refresh cookies using the configured expiry values.
+Refresh tokens are rotated after use and their hashes are stored so they can be
+revoked; both token types are invalidated after a password change. The browser
+refreshes and retries a request once when its access token expires. Cookies are
+same-site; production cookies require HTTPS. The frontend and API should use
+the same hostname (for local development, use
+`localhost` for both rather than mixing `localhost` and `127.0.0.1`). The API
+checks request origins for state-changing browser requests. Organization
+administrators can change shared crawler/discovery settings and manage
+organization users; regular users can manage their own provider keys.
+Provider keys are never returned by the API. The Settings page can query
+Tavily's usage endpoint for current-cycle credits and limits.
 The Settings page can search Octoparse templates and configure the template's
 query input, additional JSON parameters, and output-field mappings. Octoparse
 searches start provider jobs; the Discover Leads page polls those jobs and
@@ -182,8 +261,9 @@ restart to change.
 dispatch of website crawl and PageSpeed jobs through Upstash Redis. PostgreSQL
 stores durable job status and results; if Redis is unavailable, the running
 worker recovers queued jobs from the database.
-`FRONTEND_ORIGINS` is a comma-separated list of frontend origins allowed to
-call the API; it defaults to `http://localhost:3000,http://127.0.0.1:3000`.
+Set `FRONTEND_URL` to the comma-separated list of frontend origins allowed to
+call the API, for example
+`FRONTEND_URL=http://localhost:3000,http://127.0.0.1:3000`.
 Keep real credentials in your local environment and out of source control.
 
 ## Database setup
@@ -194,14 +274,17 @@ Apply the migrations to the configured PostgreSQL database:
 alembic upgrade head
 ```
 
-The migration chain creates the company, contact, and lead-source tables, adds
-the normalized company-name column and index, enforces globally unique source
-URLs, adds timestamped search keywords and their company associations, and
-stores per-company PageSpeed reports, converts entity IDs and their foreign
-keys to UUIDs while preserving existing records and relationships, adds
-durable website crawl and PageSpeed scan jobs, and adds persisted discovery
-tool preferences and Octoparse provider jobs, and creates/backfills the website
-registry.
+The migration chain creates the core company, contact, and lead-source tables;
+adds normalized company names, source URL uniqueness, timestamped search
+keywords, and per-company PageSpeed reports; converts entity IDs to UUIDs while
+preserving existing records and relationships; adds durable crawl and scan
+jobs, discovery preferences, and Octoparse provider jobs; creates and
+backfills the website registry; and adds per-website HypeStat profiles with
+the full provider response, lookup status, errors, and timestamps. The latest
+migration adds organizations, users, roles, encrypted per-user provider
+credentials, creator attribution, and organization ownership for existing
+business data and queued jobs; it assigns pre-existing records to the default
+organization.
 If the unique source-URL migration detects duplicates in existing data, it
 stops with an error; resolve those duplicates before rerunning the migration.
 
@@ -305,7 +388,6 @@ An example success response:
   "query": "manufacturing companies in Kolkata",
   "results_found": 5,
   "candidates_created": 3,
-  "sources_added": 4,
   "results_skipped": 1,
   "websites_crawled": 4,
   "companies_enriched": 3,
@@ -430,9 +512,8 @@ contains the updated company record, contacts, and lead sources.
 - **Company** — company name and normalized matching key, website/domain,
   optional industry/location/software need, optional lead score, status, and
   creation timestamp.
-- **LeadSource** — a company-linked source URL and normalized source domain,
-  source type, evidence, optional verification timestamp, and creation
-  timestamp. Source URLs are unique across companies.
+- **SearchKeyword** — a recorded discovery query and timestamp linked to the
+  websites surfaced by that search.
 - **Contact** — optional company-linked contact details. Discovery currently
   does not create contacts.
 - **WebsiteCrawl** — standalone homepage and relevant About, Blog, Services,

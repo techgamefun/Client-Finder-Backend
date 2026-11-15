@@ -17,7 +17,6 @@ from app import worker as website_crawl_worker
 from app.models import (
     ApplicationSettings,
     Company,
-    LeadSource,
     WebsiteCrawl,
     WebsiteCrawlJob,
 )
@@ -614,7 +613,6 @@ def test_crawl_endpoint_queues_job_and_exposes_status(client, monkeypatch):
     with TestingSessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(WebsiteCrawl)) == 0
         assert db.scalar(select(func.count()).select_from(Company)) == 0
-        assert db.scalar(select(func.count()).select_from(LeadSource)) == 0
         assert db.get(WebsiteCrawlJob, UUID(job["id"])) is not None
 
 

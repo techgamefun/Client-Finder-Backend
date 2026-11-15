@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 .env
 *.py[cod]
+
+# Google OAuth Credentials
+client_secret_*.json
+credentials.json

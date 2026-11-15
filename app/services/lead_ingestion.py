@@ -7,13 +7,12 @@ from urllib.parse import urlsplit, urlunsplit
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.models import (
     Company,
     Contact,
-    LeadSource,
     PageSpeedScanJob,
     SearchKeyword,
     WebsiteCrawl,
@@ -43,10 +42,9 @@ def _persist_search_results(
     db: Session,
     query: str,
     search_id: UUID | None,
-) -> tuple[int, int, int, int, int, list[PageSpeedScanJob]]:
+) -> tuple[int, int, int, int, list[PageSpeedScanJob]]:
     for attempt in range(2):
         companies_created = 0
-        sources_added = 0
         skipped = 0
         contacts_added = 0
         enriched_company_ids: set[UUID] = set()
@@ -54,7 +52,7 @@ def _persist_search_results(
         pagespeed_jobs: list[PageSpeedScanJob] = []
         claimed_domains: set[str] = set()
         seen_urls: set[str] = set()
-        linked_company_ids: set[UUID] = set()
+        linked_website_ids: set[UUID] = set()
 
         try:
             search_keyword = (
@@ -89,7 +87,7 @@ def _persist_search_results(
                     if crawl is not None
                     else None
                 )
-                upsert_website(
+                website = upsert_website(
                     db,
                     source_url,
                     discovery_source=result.provider.value,
@@ -103,62 +101,36 @@ def _persist_search_results(
                     ),
                 )
 
-                existing_source = db.scalar(
-                    select(LeadSource)
-                    .where(LeadSource.source_url == source_url)
+                candidate_name = result.title.strip()[:200]
+                normalized_name = normalize_company_name(candidate_name)
+                if not candidate_name or not normalized_name:
+                    skipped += 1
+                    continue
+
+                company = db.scalar(
+                    select(Company)
+                    .where(Company.normalized_name == normalized_name)
                     .limit(1)
                 )
-                if existing_source is not None:
-                    skipped += 1
-                    company = existing_source.company
-                else:
-                    candidate_name = result.title.strip()[:200]
-                    normalized_name = normalize_company_name(candidate_name)
-                    if not candidate_name or not normalized_name:
-                        skipped += 1
-                        continue
-
-                    company = db.scalar(
-                        select(Company)
-                        .where(Company.normalized_name == normalized_name)
-                        .limit(1)
+                if company is None:
+                    company = Company(
+                        name=candidate_name,
+                        normalized_name=normalized_name,
+                        lead_status="needs_review",
                     )
-                    if company is None:
-                        company = Company(
-                            name=candidate_name,
-                            normalized_name=normalized_name,
-                            lead_status="needs_review",
-                        )
-                        db.add(company)
-                        db.flush()
-                        companies_created += 1
+                    db.add(company)
+                    db.flush()
+                    companies_created += 1
 
-                website = upsert_website(
-                    db,
-                    source_url,
-                    category=crawl.site_type if crawl is not None else None,
-                    crawl_id=(
-                        crawl_record.id
-                        if crawl_record is not None
-                        and crawl_record.website_url == source_url
-                        else None
-                    ),
-                )
-                if crawl_record is not None and crawl_record.website_url != source_url:
-                    upsert_website(
-                        db,
-                        crawl_record.website_url,
-                    )
-
-                if company.id not in linked_company_ids:
+                if website.id not in linked_website_ids:
                     if all(
                         keyword.id != search_keyword.id
-                        for keyword in company.search_keywords
+                        for keyword in website.search_keywords
                     ):
-                        company.search_keywords.append(search_keyword)
-                    linked_company_ids.add(company.id)
+                        website.search_keywords.append(search_keyword)
+                    linked_website_ids.add(website.id)
 
-                is_listing = website.site_type == "listing"
+                is_listing = website.page_type == "business_listing"
                 if crawl is not None and not is_listing:
                     homepage = _homepage_url(crawl.website_url)
                     if not company.website:
@@ -239,30 +211,9 @@ def _persist_search_results(
                         ):
                             job.companies.append(company)
 
-                if existing_source is None:
-                    evidence = result.content
-                    if crawl is not None:
-                        evidence = _combine_evidence(result.content, crawl)
-                    source_domain = normalize_domain(source_url)
-                    if source_domain is None:
-                        raise ValueError(
-                            f"Could not determine source domain for {source_url!r}."
-                        )
-                    db.add(
-                        LeadSource(
-                            company_id=company.id,
-                            source_url=source_url,
-                            source_domain=source_domain,
-                            source_type="web_search",
-                            evidence=evidence,
-                        )
-                    )
-                    sources_added += 1
-
             db.commit()
             return (
                 companies_created,
-                sources_added,
                 skipped,
                 len(enriched_company_ids),
                 contacts_added,
@@ -282,18 +233,6 @@ def _persist_search_results(
 def _homepage_url(url: str) -> str:
     parsed = urlsplit(url)
     return urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
-
-
-def _combine_evidence(search_evidence: str, crawl: CrawlData) -> str:
-    sections = [search_evidence.strip()]
-    for label, content in (
-        ("About", crawl.about_content),
-        ("Contact", crawl.contact_content),
-        ("Mission and goals", crawl.goals_content),
-    ):
-        if content:
-            sections.append(f"{label} page:\n{content}")
-    return "\n\n".join(section for section in sections if section)
 
 
 def _upsert_crawl(
@@ -344,14 +283,6 @@ def _upsert_crawl(
 
 
 def _pagespeed_target_url(result: DiscoveryResult, db: Session) -> str:
-    source = db.scalar(
-        select(LeadSource)
-        .options(selectinload(LeadSource.company))
-        .where(LeadSource.source_url == str(result.url))
-    )
-    if source and source.company.website:
-        return _homepage_url(source.company.website)
-
     normalized_name = normalize_company_name(result.title.strip()[:200])
     if normalized_name:
         company = db.scalar(
@@ -442,7 +373,6 @@ async def ingest_search_results(
 
     (
         companies_created,
-        sources_added,
         skipped,
         companies_enriched,
         contacts_added,
@@ -463,7 +393,6 @@ async def ingest_search_results(
         query=request.query,
         results_found=len(results),
         candidates_created=companies_created,
-        sources_added=sources_added,
         results_skipped=skipped,
         websites_crawled=len(crawls_by_url),
         companies_enriched=companies_enriched,

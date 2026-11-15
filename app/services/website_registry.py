@@ -7,20 +7,31 @@ from app.models import Website
 from app.services.normalization import normalize_domain
 
 
-LISTING_CATEGORY = "directories_listings"
-
 CRAWL_CATEGORY_PAGE_TYPES = {
     "directories_listings": "business_listing",
+    "marketplace": "business_listing",
+    "classifieds": "business_listing",
+    "job_boards_career_portals": "business_listing",
+    "real_estate_property_portals": "business_listing",
     "news_editorial": "news",
+    "blog": "blog",
     "ecommerce_retail": "ecommerce",
+    "deals_and_coupons": "ecommerce",
     "documentation_knowledge_base": "documentation",
+    "api_and_developer_platform": "documentation",
+    "help_centers_support_portals": "documentation",
+    "wiki_and_encyclopedia": "documentation",
     "forums_communities": "forum",
+    "question_and_answer": "forum",
     "media_video_podcast_hubs": "media",
+    "video_platform": "media",
+    "audio_and_podcast_platform": "media",
+    "photo_and_image_gallery": "media",
+    "saas_corporate_marketing": "business_site",
+    "corporate_and_business_website": "business_site",
+    "portfolio_and_personal_website": "business_site",
+    "landing_page_and_lead_generation": "business_site",
 }
-
-
-def is_listing_category(category: str | None) -> bool:
-    return category == LISTING_CATEGORY
 
 
 def page_type_from_crawl_category(category: str | None) -> str | None:
@@ -82,14 +93,7 @@ def upsert_website(
             inferred_page_type = page_type_from_crawl_category(category)
             if inferred_page_type:
                 website.page_type = inferred_page_type
-        website.site_type = "listing" if (
-            website.page_type == "business_listing"
-            or (
-                not website.classification_manual
-                and is_listing_category(category)
-            )
-        ) else "normal"
-        if website.site_type == "listing":
+        if website.page_type == "business_listing":
             website.discovery_source = "listing_website"
         elif website.discovery_source == "listing_website":
             website.discovery_source = (

@@ -1,32 +1,39 @@
 from dataclasses import dataclass
 
-from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import ApplicationSettings
+from app.models import (
+    ApplicationSettings,
+    UserProviderCredential,
+)
 from app.schemas.discovery import DiscoveryProvider
 from app.schemas.settings import (
     ApplicationSettingsResponse,
     ApplicationSettingsUpdate,
 )
+from app.tenant_context import get_tenant_context
 
 
 DEFAULT_CRAWL_MAX_PAGES = 6
 DEFAULT_CRAWL_MAX_DEPTH = 2
-SETTINGS_ROW_ID = 1
-
-
 @dataclass(frozen=True)
 class CrawlSettings:
     max_pages: int
     max_depth: int
 
 
+@dataclass(frozen=True)
+class HypeStatSettings:
+    api_key: str | None
+    auto_fetch_enabled: bool
+
+
 def get_crawl_settings(db: Session) -> CrawlSettings:
-    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
+    row = _get_settings_row(db)
     if row is None:
         return CrawlSettings(
             max_pages=DEFAULT_CRAWL_MAX_PAGES,
@@ -39,21 +46,80 @@ def get_crawl_settings(db: Session) -> CrawlSettings:
 
 
 def get_tavily_api_key(db: Session) -> str | None:
-    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
-    if row and row.tavily_api_key_encrypted:
-        return _decrypt_api_key(row.tavily_api_key_encrypted)
-    return settings.tavily_api_key
+    return get_user_provider_api_key(db, "tavily")
 
 
 def get_octoparse_api_key(db: Session) -> str | None:
-    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
-    if row and row.octoparse_api_key_encrypted:
-        return _decrypt_api_key(row.octoparse_api_key_encrypted)
-    return settings.octoparse_api_key
+    return get_user_provider_api_key(db, "octoparse")
+
+
+def get_user_provider_api_key(
+    db: Session,
+    provider: str,
+    *,
+    user_id=None,
+) -> str | None:
+    if user_id is None:
+        context = get_tenant_context() or db.info.get("tenant_context")
+        if context is None:
+            return None
+        user_id = context.user_id
+    credential = db.scalar(
+        select(UserProviderCredential).where(
+            UserProviderCredential.user_id == user_id,
+            UserProviderCredential.provider == provider,
+        )
+    )
+    return credential.api_key if credential is not None else None
+
+
+def save_user_provider_api_key(
+    db: Session,
+    provider: str,
+    key: str | None,
+    *,
+    user_id=None,
+) -> None:
+    if user_id is None:
+        context = get_tenant_context() or db.info.get("tenant_context")
+        if context is None:
+            raise RuntimeError("Authenticated user context is required.")
+        user_id = context.user_id
+    credential = db.scalar(
+        select(UserProviderCredential).where(
+            UserProviderCredential.user_id == user_id,
+            UserProviderCredential.provider == provider,
+        )
+    )
+    normalized_key = key.strip() if key else ""
+    if not normalized_key:
+        if credential is not None:
+            db.delete(credential)
+        return
+    if credential is None:
+        db.add(
+            UserProviderCredential(
+                user_id=user_id,
+                provider=provider,
+                api_key=normalized_key,
+            )
+        )
+    else:
+        credential.api_key = normalized_key
+
+
+def get_hypestat_settings(db: Session) -> HypeStatSettings:
+    row = _get_settings_row(db)
+    return HypeStatSettings(
+        api_key=get_user_provider_api_key(db, "hypestat"),
+        auto_fetch_enabled=(
+            row.hypestat_auto_fetch_enabled if row is not None else True
+        ),
+    )
 
 
 def get_selected_discovery_tools(db: Session) -> list[DiscoveryProvider]:
-    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
+    row = _get_settings_row(db)
     if row is None or row.selected_discovery_tools is None:
         return [DiscoveryProvider.TAVILY]
     try:
@@ -66,39 +132,29 @@ def get_selected_discovery_tools(db: Session) -> list[DiscoveryProvider]:
 
 
 def get_application_settings(db: Session) -> ApplicationSettingsResponse:
-    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
-    tavily_database_key_configured = bool(
-        row and row.tavily_api_key_encrypted
-    )
-    tavily_environment_key_configured = bool(settings.tavily_api_key)
-    octoparse_database_key_configured = bool(
-        row and row.octoparse_api_key_encrypted
-    )
-    octoparse_environment_key_configured = bool(settings.octoparse_api_key)
+    row = _get_settings_row(db)
+    tavily_configured = bool(get_user_provider_api_key(db, "tavily"))
+    octoparse_configured = bool(get_user_provider_api_key(db, "octoparse"))
     crawl_settings = get_crawl_settings(db)
     return ApplicationSettingsResponse(
         crawl_max_pages=crawl_settings.max_pages,
         crawl_max_depth=crawl_settings.max_depth,
-        tavily_configured=(
-            tavily_database_key_configured or tavily_environment_key_configured
-        ),
-        tavily_key_source=(
+        tavily_configured=tavily_configured,
+        tavily_key_source="database" if tavily_configured else "unset",
+        octoparse_configured=octoparse_configured,
+        octoparse_key_source="database" if octoparse_configured else "unset",
+        hypestat_configured=bool(get_user_provider_api_key(db, "hypestat")),
+        pagespeed_configured=bool(get_user_provider_api_key(db, "pagespeed")),
+        pagespeed_key_source=(
             "database"
-            if tavily_database_key_configured
-            else "environment"
-            if tavily_environment_key_configured
+            if get_user_provider_api_key(db, "pagespeed")
             else "unset"
         ),
-        octoparse_configured=(
-            octoparse_database_key_configured
-            or octoparse_environment_key_configured
+        hypestat_auto_fetch_enabled=(
+            row.hypestat_auto_fetch_enabled if row is not None else True
         ),
-        octoparse_key_source=(
-            "database"
-            if octoparse_database_key_configured
-            else "environment"
-            if octoparse_environment_key_configured
-            else "unset"
+        hypestat_service_auth_configured=bool(
+            settings.crawler_service_shared_token
         ),
         selected_discovery_tools=get_selected_discovery_tools(db),
         octoparse_template=(
@@ -113,9 +169,9 @@ def save_application_settings(
     payload: ApplicationSettingsUpdate,
     db: Session,
 ) -> ApplicationSettingsResponse:
-    row = db.get(ApplicationSettings, SETTINGS_ROW_ID)
+    row = _get_settings_row(db)
     if row is None:
-        row = ApplicationSettings(id=SETTINGS_ROW_ID)
+        row = ApplicationSettings()
         db.add(row)
 
     if payload.crawl_max_pages is not None:
@@ -123,15 +179,15 @@ def save_application_settings(
     if payload.crawl_max_depth is not None:
         row.crawl_max_depth = payload.crawl_max_depth
     if payload.tavily_api_key is not None:
-        key = payload.tavily_api_key.strip()
-        row.tavily_api_key_encrypted = (
-            _encrypt_api_key(key) if key else None
-        )
+        save_user_provider_api_key(db, "tavily", payload.tavily_api_key)
     if payload.octoparse_api_key is not None:
-        key = payload.octoparse_api_key.strip()
-        row.octoparse_api_key_encrypted = (
-            _encrypt_api_key(key) if key else None
-        )
+        save_user_provider_api_key(db, "octoparse", payload.octoparse_api_key)
+    if payload.hypestat_api_key is not None:
+        save_user_provider_api_key(db, "hypestat", payload.hypestat_api_key)
+    if payload.pagespeed_api_key is not None:
+        save_user_provider_api_key(db, "pagespeed", payload.pagespeed_api_key)
+    if payload.hypestat_auto_fetch_enabled is not None:
+        row.hypestat_auto_fetch_enabled = payload.hypestat_auto_fetch_enabled
     if payload.selected_discovery_tools is not None:
         row.selected_discovery_tools = [
             provider.value for provider in payload.selected_discovery_tools
@@ -153,31 +209,14 @@ def save_application_settings(
     return get_application_settings(db)
 
 
-def _cipher() -> Fernet:
-    key = settings.settings_encryption_key
-    if not key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Provider API-key encryption is not configured on the server.",
+def _get_settings_row(db: Session) -> ApplicationSettings | None:
+    context = get_tenant_context() or db.info.get("tenant_context")
+    if context is None:
+        return None
+    return db.scalar(
+        select(ApplicationSettings).where(
+            ApplicationSettings.organization_id == context.organization_id
         )
-    try:
-        return Fernet(key.encode("ascii"))
-    except (ValueError, UnicodeEncodeError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The server's provider API-key encryption configuration is invalid.",
-        ) from exc
+    )
 
 
-def _encrypt_api_key(key: str) -> str:
-    return _cipher().encrypt(key.encode("utf-8")).decode("ascii")
-
-
-def _decrypt_api_key(encrypted_key: str) -> str:
-    try:
-        return _cipher().decrypt(encrypted_key.encode("ascii")).decode("utf-8")
-    except (InvalidToken, UnicodeDecodeError, UnicodeEncodeError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="A saved provider API key cannot be decrypted. Verify the server encryption key.",
-        ) from exc

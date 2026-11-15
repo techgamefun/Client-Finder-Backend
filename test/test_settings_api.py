@@ -1,12 +1,16 @@
 import asyncio
 import json
 
-from cryptography.fernet import Fernet
 import httpx
+from sqlalchemy import select
 
 from app.config import settings
 from app import worker as website_crawl_worker
-from app.models import ApplicationSettings, WebsiteCrawlJob
+from app.models import (
+    ApplicationSettings,
+    UserProviderCredential,
+    WebsiteCrawlJob,
+)
 from app.services import discovery
 from app.services import website_crawler
 from app.services.website_crawler import CrawlData
@@ -17,8 +21,9 @@ TAVILY_API_KEY = "tvly-test-secret"
 
 
 def test_settings_read_and_edit_are_public(client):
-    response = client.get("/api/v1/settings")
-    assert response.status_code == 200
+    settings_response = client.get("/api/v1/settings")
+    assert settings_response.status_code == 200
+    assert "hypestat_service_auth_configured" in settings_response.json()
 
     response = client.put(
         "/api/v1/settings",
@@ -32,9 +37,7 @@ def test_settings_read_and_edit_are_public(client):
     assert response.json()["crawl_max_pages"] == 5
 
 
-def test_settings_save_encrypts_key_and_returns_usage(client, monkeypatch):
-    encryption_key = Fernet.generate_key().decode("ascii")
-    monkeypatch.setattr(settings, "settings_encryption_key", encryption_key)
+def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
     monkeypatch.setattr(settings, "tavily_api_key", None)
     monkeypatch.setattr(settings, "octoparse_api_key", None)
 
@@ -55,20 +58,28 @@ def test_settings_save_encrypts_key_and_returns_usage(client, monkeypatch):
         "tavily_key_source": "database",
         "octoparse_configured": False,
         "octoparse_key_source": "unset",
+        "hypestat_configured": False,
+        "hypestat_auto_fetch_enabled": True,
+        "hypestat_service_auth_configured": bool(
+            settings.crawler_service_shared_token
+        ),
+        "pagespeed_configured": False,
+        "pagespeed_key_source": "unset",
         "selected_discovery_tools": ["tavily"],
         "octoparse_template": None,
     }
+    assert TAVILY_API_KEY not in saved.text
 
     with TestingSessionLocal() as db:
-        row = db.get(ApplicationSettings, 1)
-        assert row is not None
-        assert row.tavily_api_key_encrypted != TAVILY_API_KEY
-        assert (
-            Fernet(encryption_key.encode("ascii"))
-            .decrypt(row.tavily_api_key_encrypted.encode("ascii"))
-            .decode("utf-8")
-            == TAVILY_API_KEY
+        context = db.info["tenant_context"]
+        credential = db.scalar(
+            select(UserProviderCredential).where(
+                UserProviderCredential.user_id == context.user_id,
+                UserProviderCredential.provider == "tavily",
+            )
         )
+        assert credential is not None
+        assert credential.api_key == TAVILY_API_KEY
 
     class FakeAsyncClient:
         def __init__(self, timeout: float):
@@ -113,9 +124,7 @@ def test_octoparse_key_template_and_tool_preference_are_persisted(
     client,
     monkeypatch,
 ):
-    encryption_key = Fernet.generate_key().decode("ascii")
     octoparse_key = "octoparse-test-secret"
-    monkeypatch.setattr(settings, "settings_encryption_key", encryption_key)
     monkeypatch.setattr(settings, "tavily_api_key", None)
     monkeypatch.setattr(settings, "octoparse_api_key", None)
 
@@ -146,15 +155,66 @@ def test_octoparse_key_template_and_tool_preference_are_persisted(
     with TestingSessionLocal() as db:
         row = db.get(ApplicationSettings, 1)
         assert row is not None
-        assert row.octoparse_api_key_encrypted != octoparse_key
-        assert (
-            Fernet(encryption_key.encode("ascii"))
-            .decrypt(row.octoparse_api_key_encrypted.encode("ascii"))
-            .decode("utf-8")
-            == octoparse_key
+        context = db.info["tenant_context"]
+        credential = db.scalar(
+            select(UserProviderCredential).where(
+                UserProviderCredential.user_id == context.user_id,
+                UserProviderCredential.provider == "octoparse",
+            )
         )
+        assert credential is not None
+        assert credential.api_key == octoparse_key
         assert row.selected_discovery_tools == ["tavily", "octoparse"]
         assert row.octoparse_template["template_name"] == "directory_search"
+
+
+def test_hypestat_key_is_saved_and_auto_fetch_setting_is_saved(client):
+    hypestat_key = "hypestat-test-secret"
+
+    response = client.put(
+        "/api/v1/settings",
+        json={
+            "hypestat_api_key": hypestat_key,
+            "hypestat_auto_fetch_enabled": False,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["hypestat_configured"] is True
+    assert data["hypestat_auto_fetch_enabled"] is False
+    assert hypestat_key not in response.text
+
+    with TestingSessionLocal() as db:
+        row = db.get(ApplicationSettings, 1)
+        assert row is not None
+        context = db.info["tenant_context"]
+        credential = db.scalar(
+            select(UserProviderCredential).where(
+                UserProviderCredential.user_id == context.user_id,
+                UserProviderCredential.provider == "hypestat",
+            )
+        )
+        assert credential is not None
+        assert credential.api_key == hypestat_key
+        assert row.hypestat_auto_fetch_enabled is False
+
+    removed = client.put(
+        "/api/v1/settings",
+        json={"hypestat_api_key": ""},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["hypestat_configured"] is False
+    assert removed.json()["hypestat_auto_fetch_enabled"] is False
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        credential = db.scalar(
+            select(UserProviderCredential).where(
+                UserProviderCredential.user_id == context.user_id,
+                UserProviderCredential.provider == "hypestat",
+            )
+        )
+        assert credential is None
 
 
 def test_worker_applies_saved_crawl_limits(client, monkeypatch):

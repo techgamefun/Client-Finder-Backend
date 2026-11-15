@@ -97,13 +97,17 @@ class DiscoveryWebsiteSaveResponse(BaseModel):
     crawl_jobs_enqueued: int
     crawl_jobs_already_present: int
     domains_skipped: int
+    hypestat_profiles_requested: int = 0
+    hypestat_profiles_reused: int = 0
+    hypestat_profiles_succeeded: int = 0
+    hypestat_profiles_queued: int = 0
+    hypestat_profiles_failed: int = 0
 
 
 class DiscoveryIngestResponse(BaseModel):
     query: str
     results_found: int
     candidates_created: int
-    sources_added: int
     results_skipped: int
     websites_crawled: int
     companies_enriched: int

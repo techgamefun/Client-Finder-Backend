@@ -7,12 +7,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import database_url
+from app.database import SessionLocal, database_url
+from app.auth_middleware import authenticate_request
+from app.services.auth import validate_auth_configuration
 
+from app.api.auth import router as auth_router
 from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
+from app.api.gmail import router as gmail_router
+from app.api.email_templates import router as email_templates_router
 from app.api.pagespeed import router as pagespeed_router
+from app.api.queue_events import router as queue_events_router
 from app.api.settings import router as settings_router
+from app.api.google_oauth import router as google_oauth_router
 from app.api.websites import router as websites_router
 from app.api.website_crawler import router as website_crawler_router
 
@@ -33,6 +40,7 @@ def should_auto_migrate() -> bool:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_auth_configuration()
     if should_auto_migrate() and command is not None and Config is not None:
         alembic_cfg = Config("alembic.ini")
         logger.info("Starting database migrations.")
@@ -64,15 +72,41 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+frontend_origins = [
+    origin.strip()
+    for origin in settings.frontend_origins.split(",")
+    if origin.strip()
+]
+app.state.frontend_origins = frontend_origins
+app.state.session_factory = SessionLocal
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in settings.frontend_origins.split(",")
-        if origin.strip()
-    ],
+    allow_origins=frontend_origins,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+)
+app.middleware("http")(authenticate_request)
+
+app.include_router(
+    auth_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    google_oauth_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    gmail_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    email_templates_router,
+    prefix="/api/v1",
 )
 
 # Register the companies API.
@@ -100,6 +134,11 @@ app.include_router(
 
 app.include_router(
     pagespeed_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    queue_events_router,
     prefix="/api/v1",
 )
 

@@ -23,6 +23,7 @@ from app.schemas.settings import (
 from app.services.application_settings import (
     get_octoparse_api_key,
     get_application_settings,
+    get_user_provider_api_key,
 )
 
 
@@ -238,7 +239,7 @@ async def poll_octoparse_job(
         return _serialize_job(job)
 
     try:
-        api_key = _get_api_key(db)
+        api_key = _get_api_key(db, user_id=job.created_by_user_id)
     except HTTPException as exc:
         job.status = "failed"
         job.error = str(exc.detail)
@@ -325,12 +326,16 @@ async def poll_octoparse_job(
     return _serialize_job(job)
 
 
-def _get_api_key(db: Session) -> str:
-    api_key = get_octoparse_api_key(db)
+def _get_api_key(db: Session, *, user_id=None) -> str:
+    api_key = (
+        get_octoparse_api_key(db)
+        if user_id is None
+        else get_user_provider_api_key(db, "octoparse", user_id=user_id)
+    )
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Octoparse is not configured. Add OCTOPARSE_API_KEY or save a key in Settings.",
+            detail="Octoparse is not configured. Save your personal API key in Settings.",
         )
     return api_key
 

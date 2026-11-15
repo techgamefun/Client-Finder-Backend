@@ -12,10 +12,10 @@ from conftest import TestingSessionLocal
 from app.models import (
     Company,
     Contact,
-    LeadSource,
     PageSpeedScan,
     PageSpeedScanJob,
     SearchKeyword,
+    Website,
     WebsiteCrawl,
 )
 from app.schemas.discovery import DiscoveryResult, DiscoverySearchResponse
@@ -89,7 +89,6 @@ def test_ingestion_deduplicates_company_name_and_source_url(client, monkeypatch)
         "query": "manufacturing companies",
         "results_found": 3,
         "candidates_created": 1,
-        "sources_added": 2,
         "results_skipped": 1,
         "websites_crawled": 2,
         "companies_enriched": 1,
@@ -103,35 +102,32 @@ def test_ingestion_deduplicates_company_name_and_source_url(client, monkeypatch)
 
     with TestingSessionLocal() as db:
         companies = db.scalars(select(Company)).all()
-        sources = db.scalars(select(LeadSource)).all()
+        websites = db.scalars(select(Website)).all()
         scans = db.scalars(select(PageSpeedScan)).all()
         scan_jobs = db.scalars(select(PageSpeedScanJob)).all()
         search_keywords = [
             (search.keyword, search.searched_at)
-            for search in companies[0].search_keywords
+            for search in websites[0].search_keywords
         ]
 
     assert len(companies) == 1
     assert companies[0].normalized_name == "acme inc"
     assert companies[0].lead_status == "needs_review"
-    assert len(sources) == 2
-    assert {source.source_domain for source in sources} == {"example.com"}
+    assert len(websites) == 1
     assert scans == []
     assert len(scan_jobs) == 2
     assert {job.strategy for job in scan_jobs} == {"mobile", "desktop"}
-    assert {source.company_id for source in sources} == {companies[0].id}
     assert len(search_keywords) == 1
     assert search_keywords[0][0] == "manufacturing companies"
     assert search_keywords[0][1] is not None
     company_record = client.get(f"/api/v1/companies/{companies[0].id}")
     assert company_record.status_code == 200
-    assert company_record.json()["search_keywords"][0]["keyword"] == (
-        "manufacturing companies"
-    )
+    assert "search_keywords" not in company_record.json()
+    assert "sources" not in company_record.json()
     assert company_record.json()["pagespeed_scans"] == []
 
 
-def test_reingesting_existing_source_skips_it(client, monkeypatch):
+def test_reingesting_existing_result_keeps_one_company(client, monkeypatch):
     response = _search_response(
         ("Example Company", "https://example.com/company", "Evidence"),
     )
@@ -147,17 +143,17 @@ def test_reingesting_existing_source_skips_it(client, monkeypatch):
     )
 
     assert first.status_code == 200
-    assert first.json()["sources_added"] == 1
     assert second.status_code == 200
     assert second.json()["candidates_created"] == 0
-    assert second.json()["sources_added"] == 0
-    assert second.json()["results_skipped"] == 1
+    assert second.json()["results_skipped"] == 0
     assert second.json()["websites_crawled"] == 1
     assert second.json()["pagespeed_scans_queued"] == 2
 
     with TestingSessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(Company)) == 1
-        assert db.scalar(select(func.count()).select_from(LeadSource)) == 1
+        website = db.scalar(select(Website))
+        assert website is not None
+        assert len(website.search_keywords) == 2
         assert db.scalar(select(func.count()).select_from(PageSpeedScanJob)) == 4
         assert db.scalar(select(func.count()).select_from(PageSpeedScan)) == 0
 
@@ -222,13 +218,12 @@ def test_ingestion_links_the_original_search_timestamp(client, monkeypatch):
 
     assert response.status_code == 200
     assert repeated_response.status_code == 200
-    assert repeated_response.json()["sources_added"] == 0
     with TestingSessionLocal() as db:
-        company = db.scalar(select(Company))
-        assert company is not None
-        assert len(company.search_keywords) == 1
-        assert company.search_keywords[0].id == search_id
-        assert company.search_keywords[0].searched_at == searched_at
+        website = db.scalar(select(Website))
+        assert website is not None
+        assert len(website.search_keywords) == 1
+        assert website.search_keywords[0].id == search_id
+        assert website.search_keywords[0].searched_at == searched_at
 
 
 def test_ingestion_attaches_new_source_to_existing_company(client, monkeypatch):
@@ -260,19 +255,23 @@ def test_ingestion_attaches_new_source_to_existing_company(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["candidates_created"] == 0
-    assert response.json()["sources_added"] == 1
 
     with TestingSessionLocal() as db:
         companies = db.scalars(select(Company)).all()
-        sources = db.scalars(select(LeadSource)).all()
+        website = db.scalar(
+            select(Website).where(Website.domain == "example.com")
+        )
+        website_keywords = [
+            keyword.keyword for keyword in website.search_keywords
+        ] if website is not None else []
 
     assert len(companies) == 1
     assert companies[0].lead_status == "new"
     assert companies[0].website == "https://existing.example/"
     assert companies[0].domain == "existing.example"
     assert companies[0].industry == "Manufacturing"
-    assert len(sources) == 1
-    assert sources[0].company_id == companies[0].id
+    assert website is not None
+    assert website_keywords == ["manufacturing companies"]
 
 
 def test_ingestion_uses_crawl_to_fill_missing_company_details(
@@ -316,7 +315,6 @@ def test_ingestion_uses_crawl_to_fill_missing_company_details(
     with TestingSessionLocal() as db:
         company = db.query(Company).one()
         contacts = db.query(Contact).all()
-        source = db.query(LeadSource).one()
         crawl = db.query(WebsiteCrawl).one()
 
     assert company.website == "https://example.com/"
@@ -324,7 +322,6 @@ def test_ingestion_uses_crawl_to_fill_missing_company_details(
     assert len(contacts) == 1
     assert contacts[0].business_email == "hello@example.com"
     assert contacts[0].is_publicly_listed is True
-    assert "About page:\nAbout the company." in source.evidence
     assert crawl.about_content == "About the company."
 
 
@@ -350,7 +347,6 @@ def test_failed_crawl_is_reported_while_saving_the_source(
     )
 
     assert response.status_code == 200
-    assert response.json()["sources_added"] == 1
     assert response.json()["websites_crawled"] == 0
     assert response.json()["crawl_failures"] == [
         {
@@ -466,7 +462,11 @@ def test_ingestion_queues_pagespeed_jobs_and_worker_saves_results(
     async def capture_enqueued_jobs(job_ids):
         saved_job_ids.extend(str(job_id) for job_id in job_ids)
 
-    async def unexpected_inline_scan(_website_url: str, _strategy: str):
+    async def unexpected_inline_scan(
+        _website_url: str,
+        _strategy: str,
+        _api_key: str | None = None,
+    ):
         raise AssertionError("Ingestion must not wait for PageSpeed.")
 
     monkeypatch.setattr(
@@ -491,14 +491,17 @@ def test_ingestion_queues_pagespeed_jobs_and_worker_saves_results(
     )
 
     assert response.status_code == 200
-    assert response.json()["sources_added"] == 1
     assert response.json()["pagespeed_scans_queued"] == 2
     jobs = response.json()["pagespeed_jobs"]
     assert saved_job_ids == [job["id"] for job in jobs]
     assert all(job["status"] == "queued" for job in jobs)
     assert all(job["started_at"] is None for job in jobs)
 
-    async def fake_pagespeed_scan(website_url: str, strategy: str):
+    async def fake_pagespeed_scan(
+        website_url: str,
+        strategy: str,
+        _api_key: str | None = None,
+    ):
         return PageSpeedScanData(
             website_url=website_url,
             strategy=strategy,
@@ -547,7 +550,11 @@ def test_failed_pagespeed_job_exposes_reason_and_timestamps(
         TestingSessionLocal,
     )
 
-    async def fail_scan(_website_url: str, _strategy: str):
+    async def fail_scan(
+        _website_url: str,
+        _strategy: str,
+        _api_key: str | None = None,
+    ):
         raise PageSpeedError("Google PageSpeed API key is not configured.")
 
     monkeypatch.setattr(pagespeed_worker, "scan_pagespeed", fail_scan)
@@ -761,5 +768,5 @@ def test_ingestion_rolls_back_whole_batch_on_commit_failure(
 
     with TestingSessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(Company)) == 0
-        assert db.scalar(select(func.count()).select_from(LeadSource)) == 0
+        assert db.scalar(select(func.count()).select_from(SearchKeyword)) == 0
         assert db.scalar(select(func.count()).select_from(PageSpeedScan)) == 0

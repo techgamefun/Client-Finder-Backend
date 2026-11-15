@@ -51,14 +51,12 @@ def test_pagespeed_scan_requests_all_categories_and_preserves_audits(
 
     monkeypatch.setattr(pagespeed.httpx, "AsyncClient", mock_async_client)
     monkeypatch.setattr(pagespeed, "_validate_public_url", allow_public_url)
-    monkeypatch.setattr(
-        pagespeed.settings,
-        "google_pagespeed_api_key",
-        "test-key",
-    )
-
     scan = asyncio.run(
-        pagespeed.scan_pagespeed("https://example.com/", "mobile")
+        pagespeed.scan_pagespeed(
+            "https://example.com/",
+            "mobile",
+            "test-key",
+        )
     )
 
     assert len(received) == 1
@@ -84,17 +82,11 @@ def test_pagespeed_scan_requests_all_categories_and_preserves_audits(
     )
 
 
-def test_pagespeed_scan_requires_configured_key(monkeypatch):
-    monkeypatch.setattr(
-        pagespeed.settings,
-        "google_pagespeed_api_key",
-        None,
-    )
-
+def test_pagespeed_scan_requires_configured_key():
     with pytest.raises(
         pagespeed.PageSpeedError,
         match="Google PageSpeed API key is not configured",
     ):
         asyncio.run(
-            pagespeed.scan_pagespeed("https://example.com/", "mobile")
+            pagespeed.scan_pagespeed("https://example.com/", "mobile", None)
         )

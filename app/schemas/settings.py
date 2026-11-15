@@ -41,6 +41,9 @@ class ApplicationSettingsUpdate(BaseModel):
     crawl_max_depth: int | None = Field(default=None, ge=0, le=2)
     tavily_api_key: str | None = Field(default=None, max_length=512)
     octoparse_api_key: str | None = Field(default=None, max_length=512)
+    hypestat_api_key: str | None = Field(default=None, max_length=512)
+    pagespeed_api_key: str | None = Field(default=None, max_length=512)
+    hypestat_auto_fetch_enabled: bool | None = None
     selected_discovery_tools: list[DiscoveryProvider] | None = Field(
         default=None,
         min_length=1,
@@ -66,6 +69,11 @@ class ApplicationSettingsResponse(BaseModel):
     tavily_key_source: str
     octoparse_configured: bool
     octoparse_key_source: str
+    hypestat_configured: bool
+    hypestat_auto_fetch_enabled: bool
+    hypestat_service_auth_configured: bool
+    pagespeed_configured: bool
+    pagespeed_key_source: str
     selected_discovery_tools: list[DiscoveryProvider]
     octoparse_template: OctoparseTemplateConfiguration | None = None
 

@@ -27,10 +27,6 @@ class CompanyUpdate(BaseModel):
     lead_score: int | None = Field(default=None, ge=0)
 
 
-class ResearchSourceCrawlRequest(BaseModel):
-    source_url: HttpUrl = Field(max_length=2000)
-
-
 class LeadStatusUpdate(BaseModel):
     lead_status: str = Field(min_length=1, max_length=30)
 
@@ -54,25 +50,6 @@ class ContactResponse(BaseModel):
     is_publicly_listed: bool
 
 
-class LeadSourceResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    source_url: str
-    source_domain: str
-    source_type: str | None
-    evidence: str | None
-    verified_at: datetime | None
-    created_at: datetime
-
-
-class CompanySearchKeywordResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    keyword: str
-    searched_at: datetime
-
-
 class CompanyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -87,7 +64,6 @@ class CompanyResponse(BaseModel):
     lead_score: int | None
     lead_status: str
     created_at: datetime
+    created_by_email: str | None = None
     contacts: list[ContactResponse]
-    sources: list[LeadSourceResponse]
-    search_keywords: list[CompanySearchKeywordResponse]
     pagespeed_scans: list[PageSpeedScanSummary] = Field(default_factory=list)

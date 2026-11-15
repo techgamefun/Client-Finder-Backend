@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
@@ -20,6 +20,7 @@ from app.services.octoparse import (
     get_octoparse_usage,
     search_octoparse_templates,
 )
+from app.tenant_context import get_tenant_context
 
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
@@ -43,6 +44,23 @@ def update_settings(
     payload: ApplicationSettingsUpdate,
     db: Annotated[Session, Depends(get_db)],
 ) -> ApplicationSettingsResponse:
+    context = get_tenant_context()
+    organization_fields = {
+        "crawl_max_pages",
+        "crawl_max_depth",
+        "hypestat_auto_fetch_enabled",
+        "selected_discovery_tools",
+        "octoparse_template",
+    }
+    if (
+        context is not None
+        and context.role != "admin"
+        and organization_fields.intersection(payload.model_fields_set)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization administrator privileges are required to change these settings.",
+        )
     return save_application_settings(payload, db)
 
 

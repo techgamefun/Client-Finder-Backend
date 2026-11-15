@@ -17,20 +17,266 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    event,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import inspect
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, with_loader_criteria
 
 from app.database import Base
+from app.tenant_context import get_tenant_context
 
 
-company_search_keywords = Table(
-    "company_search_keywords",
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+    auth_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('admin', 'user')",
+            name="ck_users_role_allowed",
+        ),
+    )
+
+
+class AuthRefreshSession(Base):
+    __tablename__ = "auth_refresh_sessions"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class UserProviderCredential(Base):
+    __tablename__ = "user_provider_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_user_provider_credential"),
+    )
+
+
+class ConnectedGmailAccount(Base):
+    __tablename__ = "connected_gmail_accounts"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    org_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    google_account_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    encrypted_refresh_token: Mapped[str] = mapped_column(Text, nullable=False)
+    token_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "google_account_id",
+            name="uq_connected_gmail_google_account_id",
+        ),
+    )
+
+
+class UserGmailAssignment(Base):
+    __tablename__ = "user_gmail_assignments"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    org_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    gmail_account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("connected_gmail_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    assigned_by: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "gmail_account_id",
+            name="uq_user_gmail_assignment",
+        ),
+    )
+
+
+class EmailTemplate(Base):
+    __tablename__ = "email_templates"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    org_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    subject: Mapped[str] = mapped_column(String(998), nullable=False)
+    body_content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class TenantOwnedMixin:
+    organization_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+
+
+website_search_keywords = Table(
+    "website_search_keywords",
     Base.metadata,
     Column(
-        "company_id",
+        "website_id",
         Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
+        ForeignKey("websites.id", ondelete="CASCADE"),
         primary_key=True,
     ),
     Column(
@@ -59,7 +305,7 @@ pagespeed_scan_job_companies = Table(
 )
 
 
-class Company(Base):
+class Company(TenantOwnedMixin, Base):
     __tablename__ = "companies"
 
     id: Mapped[UUID] = mapped_column(
@@ -67,7 +313,6 @@ class Company(Base):
         primary_key=True,
         default=uuid4,
     )
-
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     normalized_name: Mapped[str | None] = mapped_column(
         String(200),
@@ -76,7 +321,6 @@ class Company(Base):
     website: Mapped[str | None] = mapped_column(String(500))
     domain: Mapped[str | None] = mapped_column(
         String(255),
-        unique=True,
     )
     industry: Mapped[str | None] = mapped_column(String(150))
     city: Mapped[str | None] = mapped_column(String(100))
@@ -101,28 +345,36 @@ class Company(Base):
         back_populates="company",
         cascade="all, delete-orphan",
     )
+    created_by_user: Mapped["User | None"] = relationship(
+        foreign_keys="Company.created_by_user_id",
+    )
 
-    sources: Mapped[list["LeadSource"]] = relationship(
-        back_populates="company",
-        cascade="all, delete-orphan",
-    )
-    search_keywords: Mapped[list["SearchKeyword"]] = relationship(
-        secondary=company_search_keywords,
-        back_populates="companies",
-        order_by="desc(SearchKeyword.searched_at)",
-    )
     pagespeed_scans: Mapped[list["PageSpeedScan"]] = relationship(
         back_populates="company",
         cascade="all, delete-orphan",
         order_by="desc(PageSpeedScan.scanned_at)",
     )
+
+    @property
+    def created_by_email(self) -> str | None:
+        return (
+            self.created_by_user.email
+            if self.created_by_user is not None
+            else None
+        )
+
     __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "domain",
+            name="uq_companies_organization_domain",
+        ),
         Index("ix_companies_name", "name"),
         Index("ix_companies_industry", "industry"),
     )
 
 
-class Contact(Base):
+class Contact(TenantOwnedMixin, Base):
     __tablename__ = "contacts"
 
     id: Mapped[UUID] = mapped_column(
@@ -154,52 +406,7 @@ class Contact(Base):
     )
 
 
-class LeadSource(Base):
-    __tablename__ = "lead_sources"
-
-    id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
-
-    company_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-
-    source_url: Mapped[str] = mapped_column(
-        String(2000),
-        nullable=False,
-    )
-    source_domain: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
-    source_type: Mapped[str | None] = mapped_column(String(100))
-    evidence: Mapped[str | None] = mapped_column(Text)
-
-    verified_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-
-    company: Mapped["Company"] = relationship(
-        back_populates="sources",
-    )
-
-    __table_args__ = (
-        UniqueConstraint("source_url", name="uq_lead_source_url"),
-    )
-
-
-class SearchKeyword(Base):
+class SearchKeyword(TenantOwnedMixin, Base):
     __tablename__ = "search_keywords"
 
     id: Mapped[UUID] = mapped_column(
@@ -214,13 +421,14 @@ class SearchKeyword(Base):
         index=True,
     )
 
-    companies: Mapped[list[Company]] = relationship(
-        secondary=company_search_keywords,
+    websites: Mapped[list["Website"]] = relationship(
+        secondary=website_search_keywords,
         back_populates="search_keywords",
+        order_by="desc(SearchKeyword.searched_at)",
     )
 
 
-class DiscoveryProviderJob(Base):
+class DiscoveryProviderJob(TenantOwnedMixin, Base):
     __tablename__ = "discovery_provider_jobs"
 
     id: Mapped[UUID] = mapped_column(
@@ -250,7 +458,7 @@ class DiscoveryProviderJob(Base):
     )
 
 
-class WebsiteCrawl(Base):
+class WebsiteCrawl(TenantOwnedMixin, Base):
     __tablename__ = "website_crawls"
 
     id: Mapped[UUID] = mapped_column(
@@ -261,7 +469,6 @@ class WebsiteCrawl(Base):
     website_url: Mapped[str] = mapped_column(
         String(2000),
         nullable=False,
-        unique=True,
     )
     site_type: Mapped[str | None] = mapped_column(String(64))
     home_page_url: Mapped[str | None] = mapped_column(String(2000))
@@ -298,9 +505,46 @@ class WebsiteCrawl(Base):
         back_populates="crawl",
         passive_deletes=True,
     )
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "website_url",
+            name="uq_website_crawls_organization_url",
+        ),
+    )
 
 
-class Website(Base):
+class WebsiteCorpusAnalysis(TenantOwnedMixin, Base):
+    __tablename__ = "website_corpus_analyses"
+
+    website_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("websites.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    words: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    algorithm_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    source_crawled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class Website(TenantOwnedMixin, Base):
     __tablename__ = "websites"
 
     id: Mapped[UUID] = mapped_column(
@@ -341,12 +585,6 @@ class Website(Base):
         default="new",
         server_default="new",
     )
-    site_type: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        default="normal",
-        server_default="normal",
-    )
     discovery_source: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -367,25 +605,72 @@ class Website(Base):
     )
 
     crawl: Mapped[WebsiteCrawl | None] = relationship(back_populates="websites")
+    created_by_user: Mapped["User | None"] = relationship(
+        foreign_keys="Website.created_by_user_id",
+    )
+    hypestat_profile: Mapped["WebsiteHypeStatProfile | None"] = relationship(
+        back_populates="website",
+        cascade="all, delete-orphan",
+        uselist=False,
+        passive_deletes=True,
+    )
+    search_keywords: Mapped[list[SearchKeyword]] = relationship(
+        secondary=website_search_keywords,
+        back_populates="websites",
+        order_by="desc(SearchKeyword.searched_at)",
+    )
 
     __table_args__ = (
-        UniqueConstraint("website_url", name="uq_websites_website_url"),
-        UniqueConstraint("domain", name="uq_websites_domain"),
-        CheckConstraint(
-            "status = 'new'",
-            name="ck_websites_status_new",
+        UniqueConstraint(
+            "organization_id",
+            "website_url",
+            name="uq_websites_organization_url",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "domain",
+            name="uq_websites_organization_domain",
         ),
         CheckConstraint(
-            "site_type IN ('normal', 'listing')",
-            name="ck_websites_site_type",
+            "status IN ('new', 'lead', 'checked')",
+            name="ck_websites_status_allowed",
         ),
-        Index("ix_websites_site_type", "site_type"),
         Index("ix_websites_page_type", "page_type"),
         Index("ix_websites_created_at", "created_at"),
     )
 
 
-class WebsiteCrawlJob(Base):
+class WebsiteHypeStatProfile(TenantOwnedMixin, Base):
+    __tablename__ = "website_hypestat_profiles"
+
+    website_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("websites.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(Text)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    website: Mapped[Website] = relationship(back_populates="hypestat_profile")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'succeeded', 'queued', 'failed', 'invalid_domain', 'removed')",
+            name="ck_website_hypestat_profiles_status_allowed",
+        ),
+    )
+
+
+class WebsiteCrawlJob(TenantOwnedMixin, Base):
     __tablename__ = "website_crawl_jobs"
 
     id: Mapped[UUID] = mapped_column(
@@ -429,12 +714,20 @@ class WebsiteCrawlJob(Base):
     crawl: Mapped[WebsiteCrawl | None] = relationship()
 
 
-class ApplicationSettings(Base):
+class ApplicationSettings(TenantOwnedMixin, Base):
     __tablename__ = "application_settings"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tavily_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
-    octoparse_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    hypestat_auto_fetch_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
     selected_discovery_tools: Mapped[list[str] | None] = mapped_column(JSON)
     octoparse_template: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     crawl_max_pages: Mapped[int] = mapped_column(
@@ -449,9 +742,15 @@ class ApplicationSettings(Base):
         default=2,
         server_default="2",
     )
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            name="uq_application_settings_organization",
+        ),
+    )
 
 
-class PageSpeedScan(Base):
+class PageSpeedScan(TenantOwnedMixin, Base):
     __tablename__ = "pagespeed_scans"
 
     id: Mapped[UUID] = mapped_column(
@@ -490,7 +789,7 @@ class PageSpeedScan(Base):
     )
 
 
-class PageSpeedScanJob(Base):
+class PageSpeedScanJob(TenantOwnedMixin, Base):
     __tablename__ = "pagespeed_scan_jobs"
 
     id: Mapped[UUID] = mapped_column(
@@ -550,3 +849,111 @@ class PageSpeedScanJob(Base):
             "created_at",
         ),
     )
+
+
+_TENANT_MODELS = (
+    Company,
+    Contact,
+    SearchKeyword,
+    DiscoveryProviderJob,
+    WebsiteCrawl,
+    WebsiteCorpusAnalysis,
+    Website,
+    WebsiteHypeStatProfile,
+    WebsiteCrawlJob,
+    ApplicationSettings,
+    PageSpeedScan,
+    PageSpeedScanJob,
+)
+
+_ORG_ID_MODELS = (
+    ConnectedGmailAccount,
+    UserGmailAssignment,
+    EmailTemplate,
+)
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _scope_tenant_queries(execute_state: Any) -> None:
+    context = get_tenant_context() or execute_state.session.info.get(
+        "tenant_context"
+    )
+    if context is None:
+        return
+
+    statement = execute_state.statement
+    if execute_state.is_select:
+        for model in _TENANT_MODELS:
+            organization_id = context.organization_id
+            statement = statement.options(
+                with_loader_criteria(
+                    model,
+                    lambda entity: entity.organization_id == organization_id,
+                    include_aliases=True,
+                )
+            )
+        for model in _ORG_ID_MODELS:
+            organization_id = context.organization_id
+            statement = statement.options(
+                with_loader_criteria(
+                    model,
+                    lambda entity: entity.org_id == organization_id,
+                    include_aliases=True,
+                )
+            )
+        execute_state.statement = statement
+        return
+
+    mapper = execute_state.bind_arguments.get("mapper")
+    model = mapper.class_ if mapper is not None else None
+    if model in _TENANT_MODELS:
+        execute_state.statement = statement.where(
+            model.organization_id == context.organization_id
+        )
+    elif model in _ORG_ID_MODELS:
+        execute_state.statement = statement.where(
+            model.org_id == context.organization_id
+        )
+
+
+@event.listens_for(Session, "before_flush")
+def _assign_tenant_to_new_entities(
+    session: Session,
+    flush_context: Any,
+    instances: Any,
+) -> None:
+    context = get_tenant_context() or session.info.get("tenant_context")
+    for instance in session.new:
+        if not isinstance(instance, TenantOwnedMixin):
+            continue
+        if context is None:
+            raise RuntimeError("Tenant context is required to save business data.")
+        if (
+            instance.organization_id is not None
+            and instance.organization_id != context.organization_id
+        ):
+            raise RuntimeError("Cannot create data for another organization.")
+        instance.organization_id = context.organization_id
+        if instance.created_by_user_id is None and context.user_id is not None:
+            instance.created_by_user_id = context.user_id
+    for instance in session.new:
+        if not isinstance(instance, _ORG_ID_MODELS):
+            continue
+        if context is None:
+            raise RuntimeError("Tenant context is required to save Gmail data.")
+        if instance.org_id is not None and instance.org_id != context.organization_id:
+            raise RuntimeError("Cannot create Gmail data for another organization.")
+        instance.org_id = context.organization_id
+
+    if context is not None:
+        for instance in session.dirty:
+            state = inspect(instance)
+            if isinstance(instance, TenantOwnedMixin) and (
+                state.attrs.organization_id.history.has_changes()
+            ):
+                raise RuntimeError("Organization ownership cannot be changed.")
+            if (
+                isinstance(instance, _ORG_ID_MODELS)
+                and state.attrs.org_id.history.has_changes()
+            ):
+                raise RuntimeError("Gmail organization ownership cannot be changed.")

@@ -9,6 +9,12 @@ from starlette.concurrency import run_in_threadpool
 
 from app.database import SessionLocal
 from app.models import PageSpeedScan, PageSpeedScanJob, WebsiteCrawlJob
+from app.services.application_settings import get_user_provider_api_key
+from app.tenant_context import (
+    TenantContext,
+    reset_tenant_context,
+    set_tenant_context,
+)
 from app.services.application_settings import CrawlSettings, get_crawl_settings
 from app.services.redis_queue import (
     RedisQueueError,
@@ -35,7 +41,7 @@ JOB_LEASE_SECONDS = 300
 MAX_JOB_ATTEMPTS = 3
 
 
-def _claim_job(job_id: UUID) -> str | None:
+def _claim_job(job_id: UUID) -> tuple[str, TenantContext] | None:
     started_at = datetime.now(timezone.utc)
     with SessionLocal() as db:
         result = db.execute(
@@ -60,9 +66,17 @@ def _claim_job(job_id: UUID) -> str | None:
         if job is None:
             db.rollback()
             return None
-        website_url = job.website_url
+        job_data = (
+            job.website_url,
+            TenantContext(
+                organization_id=job.organization_id,
+                user_id=job.created_by_user_id,
+                email="",
+                role="system",
+            ),
+        )
         db.commit()
-        return website_url
+        return job_data
 
 
 def _find_recoverable_job() -> UUID | None:
@@ -131,6 +145,11 @@ def _get_crawl_settings() -> CrawlSettings:
         return get_crawl_settings(db)
 
 
+def _get_pagespeed_api_key() -> str | None:
+    with SessionLocal() as db:
+        return get_user_provider_api_key(db, "pagespeed")
+
+
 def _save_failure(job_id: UUID, detail: str) -> None:
     with SessionLocal() as db:
         job = db.get(WebsiteCrawlJob, job_id)
@@ -145,9 +164,11 @@ def _save_failure(job_id: UUID, detail: str) -> None:
 
 
 async def process_job(job_id: UUID) -> None:
-    website_url = await run_in_threadpool(_claim_job, job_id)
-    if website_url is None:
+    job_data = await run_in_threadpool(_claim_job, job_id)
+    if job_data is None:
         return
+    website_url, context = job_data
+    tenant_token = set_tenant_context(context)
 
     try:
         crawl_settings = await run_in_threadpool(_get_crawl_settings)
@@ -167,11 +188,13 @@ async def process_job(job_id: UUID) -> None:
             job_id,
             "The website crawler failed unexpectedly. Please retry the job.",
         )
+    finally:
+        reset_tenant_context(tenant_token)
 
 
 def _claim_pagespeed_job(
     job_id: UUID,
-) -> tuple[list[UUID], str, str] | None:
+) -> tuple[list[UUID], str, str, TenantContext] | None:
     started_at = datetime.now(timezone.utc)
     with SessionLocal() as db:
         result = db.execute(
@@ -200,6 +223,12 @@ def _claim_pagespeed_job(
             [company.id for company in job.companies],
             job.website_url,
             job.strategy,
+            TenantContext(
+                organization_id=job.organization_id,
+                user_id=job.created_by_user_id,
+                email="",
+                role="system",
+            ),
         )
         db.commit()
         return job_data
@@ -300,11 +329,13 @@ async def process_pagespeed_job(job_id: UUID) -> None:
     if job_data is None:
         return
 
-    company_ids, website_url, strategy = job_data
+    company_ids, website_url, strategy, context = job_data
+    tenant_token = set_tenant_context(context)
     try:
         if strategy not in ("mobile", "desktop"):
             raise PageSpeedError("The PageSpeed scan job has an invalid strategy.")
-        scan_data = await scan_pagespeed(website_url, strategy)
+        api_key = await run_in_threadpool(_get_pagespeed_api_key)
+        scan_data = await scan_pagespeed(website_url, strategy, api_key)
         await run_in_threadpool(
             _save_pagespeed_success,
             job_id,
@@ -320,6 +351,8 @@ async def process_pagespeed_job(job_id: UUID) -> None:
             job_id,
             "The PageSpeed scan failed unexpectedly. Please retry the job.",
         )
+    finally:
+        reset_tenant_context(tenant_token)
 
 
 async def run_worker() -> None:

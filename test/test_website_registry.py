@@ -7,9 +7,11 @@ from conftest import TestingSessionLocal
 from app.models import (
     Company,
     PageSpeedScanJob,
+    SearchKeyword,
     Website,
     WebsiteCrawl,
     WebsiteCrawlJob,
+    WebsiteHypeStatProfile,
 )
 from app.schemas.discovery import (
     DiscoveryProvider,
@@ -34,7 +36,6 @@ def test_websites_endpoint_returns_domain_and_crawl_details(client):
                 domain="example.com",
                 crawl_id=crawl.id,
                 category=crawl.site_type,
-                site_type="normal",
                 discovery_source="tavily",
                 discovery_provider="tavily",
             )
@@ -56,11 +57,84 @@ def test_websites_endpoint_returns_domain_and_crawl_details(client):
     assert website["is_crawled"] is True
     assert website["crawl_job_status"] == "succeeded"
     assert website["category"] == "saas_corporate_marketing"
-    assert website["site_type"] == "normal"
+    assert "site_type" not in website
     assert website["discovery_source"] == "tavily"
     assert website["discovery_provider"] == "tavily"
     assert website["created_at"]
     assert website["crawled_at"]
+    website_parameters = client.get("/openapi.json").json()["paths"][
+        "/api/v1/websites"
+    ]["get"]["parameters"]
+    assert "site_type" not in {
+        parameter["name"] for parameter in website_parameters
+    }
+
+
+def test_websites_endpoint_returns_hypestat_table_summaries(client):
+    with TestingSessionLocal() as db:
+        website = Website(
+            website_url="https://metrics.example/",
+            domain="metrics.example",
+        )
+        db.add(website)
+        db.flush()
+        db.add(
+            WebsiteHypeStatProfile(
+                website_id=website.id,
+                status="succeeded",
+                payload={
+                    "entry": {
+                        "domain": "metrics.example",
+                        "status": "ok",
+                        "data": {
+                            "traffic": {
+                                "visits_monthly": 2314375,
+                                "countries": [
+                                    {"country": "India", "visits": 80},
+                                    {"name": "United States", "visits": 20},
+                                ],
+                            },
+                            "rank": {
+                                "hypestat": 43457,
+                                "country": {
+                                    "country": "India",
+                                    "country_code": "IN",
+                                },
+                            },
+                            "backlinks": {
+                                "referring_domains": 403,
+                                "by_country": [
+                                    {"country": "Singapore", "domains": 191},
+                                    {"country": "United States", "domains": 132},
+                                ],
+                            },
+                        },
+                    },
+                    "meta": {"count": 1},
+                },
+            )
+        )
+        db.commit()
+        website_id = website.id
+
+    response = client.get("/api/v1/websites")
+
+    assert response.status_code == 200
+    result = next(
+        row for row in response.json() if row["id"] == str(website_id)
+    )
+    assert result["hypestat_monthly_visits"] == 2314375
+    assert result["hypestat_referring_domains"] == 403
+    assert result["hypestat_global_rank"] == 43457
+    assert result["hypestat_country"] == "India"
+    assert result["hypestat_referring_domains_by_country"] == [
+        {"country": "Singapore", "domains": 191},
+        {"country": "United States", "domains": 132},
+    ]
+    assert result["hypestat_audience_countries"] == [
+        "India",
+        "United States",
+    ]
 
 
 def test_website_detail_includes_crawl_content_signals_and_job_history(client):
@@ -96,11 +170,16 @@ def test_website_detail_includes_crawl_content_signals_and_job_history(client):
             page_type="ecommerce",
             site_topic=["home goods"],
             language="en",
-            site_type="normal",
             discovery_source="tavily",
             discovery_provider="tavily",
         )
         db.add(website)
+        website.search_keywords.append(
+            SearchKeyword(
+                keyword="home goods manufacturers",
+                searched_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+            )
+        )
         db.add_all(
             [
                 WebsiteCrawlJob(
@@ -145,6 +224,13 @@ def test_website_detail_includes_crawl_content_signals_and_job_history(client):
         "failed",
     ]
     assert result["crawl_jobs"][1]["error"] == "Temporary failure"
+    assert len(result["discovery_keywords"]) == 1
+    assert result["discovery_keywords"][0]["keyword"] == (
+        "home goods manufacturers"
+    )
+    assert result["discovery_keywords"][0]["searched_at"].startswith(
+        "2026-01-03T00:00:00"
+    )
 
 
 def test_website_detail_returns_404_for_unknown_id(client):
@@ -220,7 +306,7 @@ def test_listing_discovery_is_unlinked_and_not_queued_for_pagespeed(
     assert website is not None
     assert website.website_url == "https://directory.example/"
     assert website.domain == "directory.example"
-    assert website.site_type == "listing"
+    assert website.page_type == "business_listing"
     assert website.category == "directories_listings"
     assert website.discovery_source == "listing_website"
     assert website.discovery_provider == "octoparse"
@@ -229,6 +315,9 @@ def test_listing_discovery_is_unlinked_and_not_queued_for_pagespeed(
     assert company.website is None
     assert company.domain is None
     assert pagespeed_job is None
-    listing_response = client.get("/api/v1/websites?site_type=listing")
+    listing_response = client.get(
+        "/api/v1/websites?page_type=business_listing"
+    )
     assert listing_response.status_code == 200
     assert len(listing_response.json()) == 1
+    assert "site_type" not in listing_response.json()[0]

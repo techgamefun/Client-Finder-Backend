@@ -14,7 +14,6 @@ from app.schemas.company import (
     CompanyResponse,
     CompanyUpdate,
     LeadStatusUpdate,
-    ResearchSourceCrawlRequest,
 )
 from app.schemas.pagespeed import (
     PageSpeedScanJobResponse,
@@ -34,8 +33,8 @@ from app.services.normalization import (
     normalize_domain,
 )
 from app.services.pagespeed_jobs import get_pagespeed_scan_job
-from app.services.research_source_crawler import crawl_research_source
 from app.services.pagespeed import PageSpeedError, scan_pagespeed
+from app.services.application_settings import get_user_provider_api_key
 from app.services.website_crawler import get_website_crawl
 from app.services.website_registry import upsert_website
 
@@ -47,9 +46,8 @@ router = APIRouter(
 
 DatabaseSession = Annotated[Session, Depends(get_db)]
 COMPANY_DETAILS = (
+    selectinload(Company.created_by_user),
     selectinload(Company.contacts),
-    selectinload(Company.sources),
-    selectinload(Company.search_keywords),
     selectinload(Company.pagespeed_scans),
 )
 
@@ -216,25 +214,6 @@ async def crawl_company_website(
     return get_website_crawl_job(job.id, db)
 
 
-@router.post(
-    "/{company_id}/sources/crawl",
-    response_model=CompanyResponse,
-)
-async def crawl_research_source_for_company(
-    company_id: UUID,
-    payload: ResearchSourceCrawlRequest,
-    db: DatabaseSession,
-) -> Company:
-    if db.get(Company, company_id) is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Company not found.",
-        )
-
-    await crawl_research_source(company_id, str(payload.source_url), db)
-    return get_company_or_404(company_id, db)
-
-
 @router.get(
     "/{company_id}/pagespeed-scans/{scan_id}",
     response_model=PageSpeedScanResponse,
@@ -307,7 +286,8 @@ async def create_pagespeed_scan(
         )
 
     try:
-        result = await scan_pagespeed(website_url, payload.strategy)
+        api_key = get_user_provider_api_key(db, "pagespeed")
+        result = await scan_pagespeed(website_url, payload.strategy, api_key)
     except PageSpeedError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
