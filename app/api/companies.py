@@ -2,17 +2,20 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import get_db
-from app.models import Company, PageSpeedScan
+from app.api.deps import get_db, require_authenticated_context
+from app.models import Company, Contact, PageSpeedScan
 from app.schemas.company import (
     CompanyCreate,
     CompanyResponse,
     CompanyUpdate,
+    ContactCreate,
+    ContactResponse,
+    ContactUpdate,
     LeadStatusUpdate,
 )
 from app.schemas.pagespeed import (
@@ -37,6 +40,7 @@ from app.services.pagespeed import PageSpeedError, scan_pagespeed
 from app.services.application_settings import get_user_provider_api_key
 from app.services.website_crawler import get_website_crawl
 from app.services.website_registry import upsert_website
+from app.tenant_context import TenantContext
 
 
 router = APIRouter(
@@ -45,6 +49,10 @@ router = APIRouter(
 )
 
 DatabaseSession = Annotated[Session, Depends(get_db)]
+CurrentContext = Annotated[
+    TenantContext,
+    Depends(require_authenticated_context),
+]
 COMPANY_DETAILS = (
     selectinload(Company.created_by_user),
     selectinload(Company.contacts),
@@ -65,6 +73,176 @@ def get_company_or_404(company_id: UUID, db: Session) -> Company:
             detail="Company not found.",
         )
     return company
+
+
+def _get_company_for_contact_management(
+    company_id: UUID,
+    organization_id: UUID,
+    db: Session,
+) -> Company:
+    company = db.scalar(
+        select(Company).where(
+            Company.id == company_id,
+            Company.organization_id == organization_id,
+        )
+    )
+    if company is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found.",
+        )
+    return company
+
+
+def _get_contact_or_404(
+    company_id: UUID,
+    contact_id: UUID,
+    organization_id: UUID,
+    db: Session,
+) -> Contact:
+    contact = db.scalar(
+        select(Contact).where(
+            Contact.id == contact_id,
+            Contact.company_id == company_id,
+            Contact.organization_id == organization_id,
+        )
+    )
+    if contact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contact not found for this company.",
+        )
+    return contact
+
+
+@router.get(
+    "/{company_id}/contacts",
+    response_model=list[ContactResponse],
+)
+def list_company_contacts(
+    company_id: UUID,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> list[Contact]:
+    _get_company_for_contact_management(
+        company_id,
+        context.organization_id,
+        db,
+    )
+    return list(
+        db.scalars(
+            select(Contact)
+            .where(
+                Contact.company_id == company_id,
+                Contact.organization_id == context.organization_id,
+            )
+            .order_by(Contact.id)
+        ).all()
+    )
+
+
+@router.post(
+    "/{company_id}/contacts",
+    response_model=ContactResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_company_contact(
+    company_id: UUID,
+    payload: ContactCreate,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> Contact:
+    _get_company_for_contact_management(
+        company_id,
+        context.organization_id,
+        db,
+    )
+    contact = Contact(
+        company_id=company_id,
+        **payload.model_dump(),
+    )
+    db.add(contact)
+    db.commit()
+    db.refresh(contact)
+    return contact
+
+
+@router.get(
+    "/{company_id}/contacts/{contact_id}",
+    response_model=ContactResponse,
+)
+def get_company_contact(
+    company_id: UUID,
+    contact_id: UUID,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> Contact:
+    _get_company_for_contact_management(
+        company_id,
+        context.organization_id,
+        db,
+    )
+    return _get_contact_or_404(
+        company_id,
+        contact_id,
+        context.organization_id,
+        db,
+    )
+
+
+@router.patch(
+    "/{company_id}/contacts/{contact_id}",
+    response_model=ContactResponse,
+)
+def update_company_contact(
+    company_id: UUID,
+    contact_id: UUID,
+    payload: ContactUpdate,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> Contact:
+    _get_company_for_contact_management(
+        company_id,
+        context.organization_id,
+        db,
+    )
+    contact = _get_contact_or_404(
+        company_id,
+        contact_id,
+        context.organization_id,
+        db,
+    )
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(contact, field, value)
+    db.commit()
+    db.refresh(contact)
+    return contact
+
+
+@router.delete(
+    "/{company_id}/contacts/{contact_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_company_contact(
+    company_id: UUID,
+    contact_id: UUID,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> Response:
+    _get_company_for_contact_management(
+        company_id,
+        context.organization_id,
+        db,
+    )
+    contact = _get_contact_or_404(
+        company_id,
+        contact_id,
+        context.organization_id,
+        db,
+    )
+    db.delete(contact)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

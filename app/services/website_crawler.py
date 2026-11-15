@@ -5,13 +5,15 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
-from app.models import WebsiteCrawl
+from app.models import Company, WebsiteCrawl
 from app.schemas.website_crawl import CrawlPageClassification
 from app.services.application_settings import get_crawl_settings
+from app.services.contact_import import add_crawl_contacts
+from app.services.normalization import normalize_domain
 from app.services.public_url import _normalize_website_url
 from app.services.website_registry import upsert_website
 
@@ -136,8 +138,18 @@ def _persist_crawl(
             if page_signals:
                 crawl.classification_signals = page_signals
             crawl.emails = data.emails
+            crawl.phones = data.phones
             crawl.social_links = data.social_links
             crawl.crawled_at = datetime.now(timezone.utc)
+            domain = normalize_domain(data.website_url)
+            if domain:
+                company = db.scalar(
+                    select(Company)
+                    .options(selectinload(Company.contacts))
+                    .where(Company.domain == domain)
+                )
+                if company is not None:
+                    add_crawl_contacts(company, data.emails, data.phones)
             db.flush()
             website = upsert_website(
                 db,

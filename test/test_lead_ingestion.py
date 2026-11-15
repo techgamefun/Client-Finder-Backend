@@ -295,6 +295,7 @@ def test_ingestion_uses_crawl_to_fill_missing_company_details(
             goals_page_url=None,
             goals_content=None,
             emails=["hello@example.com", "HELLO@example.com"],
+            phones=["+1 (555) 0100", "15550100"],
             social_links=["https://www.linkedin.com/company/example"],
         )
 
@@ -308,7 +309,7 @@ def test_ingestion_uses_crawl_to_fill_missing_company_details(
     assert response.status_code == 200
     assert response.json()["websites_crawled"] == 1
     assert response.json()["companies_enriched"] == 1
-    assert response.json()["contacts_added"] == 1
+    assert response.json()["contacts_added"] == 2
     assert response.json()["crawl_failures"] == []
     assert response.json()["pagespeed_scans_queued"] == 2
 
@@ -319,10 +320,17 @@ def test_ingestion_uses_crawl_to_fill_missing_company_details(
 
     assert company.website == "https://example.com/"
     assert company.domain == "example.com"
-    assert len(contacts) == 1
-    assert contacts[0].business_email == "hello@example.com"
-    assert contacts[0].is_publicly_listed is True
+    assert len(contacts) == 2
+    email_contact = next(contact for contact in contacts if contact.business_email)
+    phone_contact = next(contact for contact in contacts if contact.business_phone)
+    assert email_contact.business_email == "hello@example.com"
+    assert email_contact.business_phone is None
+    assert email_contact.is_publicly_listed is True
+    assert phone_contact.business_phone == "+1 (555) 0100"
+    assert phone_contact.business_email is None
+    assert phone_contact.is_publicly_listed is True
     assert crawl.about_content == "About the company."
+    assert crawl.phones == ["+1 (555) 0100", "15550100"]
 
 
 def test_failed_crawl_is_reported_while_saving_the_source(

@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -10,7 +11,7 @@ from app.api.deps import (
     require_admin_context,
     require_authenticated_context,
 )
-from app.models import EmailTemplate, Organization
+from app.models import EmailCampaign, EmailTemplate
 from app.schemas.email_templates import (
     EmailTemplateCreate,
     EmailTemplatePreviewRequest,
@@ -24,6 +25,7 @@ from app.schemas.email_templates import (
 from app.services.email_templates import (
     TEMPLATE_VARIABLES,
     build_lead_context,
+    build_sender_info,
     render_email_template,
     validate_email_template_syntax,
 )
@@ -156,8 +158,28 @@ def delete_email_template(
 ) -> Response:
     _require_matching_organization(org_id, context)
     template = _get_email_template_or_404(db, org_id, template_id)
+    campaign_reference = db.scalar(
+        select(EmailCampaign.id)
+        .where(
+            EmailCampaign.org_id == org_id,
+            EmailCampaign.template_id == template_id,
+        )
+        .limit(1)
+    )
+    if campaign_reference is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This template is used by an email campaign and cannot be deleted.",
+        )
     db.delete(template)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This template is used by an email campaign and cannot be deleted.",
+        ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -183,7 +205,13 @@ def preview_email_template(
         db,
         payload.company_id,
         payload.contact_id,
-        _sender_info(db, context, email=sender_email),
+        build_sender_info(
+            db,
+            organization_id=context.organization_id,
+            user_email=context.email,
+            role=context.role,
+            email=sender_email,
+        ),
     )
     subject, body_content = render_email_template(
         template.subject,
@@ -215,7 +243,13 @@ def send_email_template(
         db,
         payload.company_id,
         payload.contact_id,
-        _sender_info(db, context, email=sender_email),
+        build_sender_info(
+            db,
+            organization_id=context.organization_id,
+            user_email=context.email,
+            role=context.role,
+            email=sender_email,
+        ),
     )
     recipient_email = lead_context["contact"]["email"]
     if not recipient_email:
@@ -274,26 +308,3 @@ def _get_email_template_or_404(
     return template
 
 
-def _sender_info(
-    db: Session,
-    context: TenantContext,
-    *,
-    email: str | None = None,
-) -> dict[str, str | None]:
-    account_email = email or context.email
-    local_part = account_email.partition("@")[0]
-    sender_name = " ".join(
-        part
-        for part in local_part.replace(".", " ").replace("_", " ").split()
-    ).title()
-    organization_name = db.scalar(
-        select(Organization.name).where(
-            Organization.id == context.organization_id
-        )
-    )
-    return {
-        "name": sender_name or None,
-        "email": account_email,
-        "role": context.role,
-        "organization": organization_name,
-    }

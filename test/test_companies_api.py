@@ -83,6 +83,102 @@ def test_invalid_company_is_rejected(client):
     assert response.status_code == 422
 
 
+def test_company_contact_crud_and_company_scoping(client):
+    company = client.post(
+        "/api/v1/companies",
+        json={"name": "Contact CRUD Company"},
+    )
+    other_company = client.post(
+        "/api/v1/companies",
+        json={"name": "Other Contact Company"},
+    )
+    company_id = company.json()["id"]
+    other_company_id = other_company.json()["id"]
+
+    created = client.post(
+        f"/api/v1/companies/{company_id}/contacts",
+        json={
+            "name": "  Alex Example  ",
+            "role": " Operations ",
+            "business_email": "alex@example.com",
+            "business_phone": " +1 555 0100 ",
+            "is_publicly_listed": True,
+        },
+    )
+    assert created.status_code == 201
+    contact = created.json()
+    contact_id = contact["id"]
+    assert contact["company_id"] == company_id
+    assert contact["name"] == "Alex Example"
+    assert contact["role"] == "Operations"
+    assert contact["business_email"] == "alex@example.com"
+    assert contact["business_phone"] == "+1 555 0100"
+    assert contact["is_publicly_listed"] is True
+
+    listed = client.get(f"/api/v1/companies/{company_id}/contacts")
+    assert listed.status_code == 200
+    assert [row["id"] for row in listed.json()] == [contact_id]
+
+    fetched = client.get(
+        f"/api/v1/companies/{company_id}/contacts/{contact_id}"
+    )
+    assert fetched.status_code == 200
+    assert fetched.json() == contact
+
+    updated = client.patch(
+        f"/api/v1/companies/{company_id}/contacts/{contact_id}",
+        json={
+            "name": "Alex A. Example",
+            "business_email": None,
+            "is_publicly_listed": False,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Alex A. Example"
+    assert updated.json()["business_email"] is None
+    assert updated.json()["business_phone"] == "+1 555 0100"
+    assert updated.json()["is_publicly_listed"] is False
+
+    assert client.get(
+        f"/api/v1/companies/{other_company_id}/contacts/{contact_id}"
+    ).status_code == 404
+    assert client.patch(
+        f"/api/v1/companies/{company_id}/contacts/{contact_id}",
+        json={},
+    ).status_code == 422
+    assert client.post(
+        f"/api/v1/companies/{company_id}/contacts",
+        json={"business_email": "not-an-email"},
+    ).status_code == 422
+    assert client.post(
+        f"/api/v1/companies/{company_id}/contacts",
+        json={"name": "  "},
+    ).status_code == 422
+
+    deleted = client.delete(
+        f"/api/v1/companies/{company_id}/contacts/{contact_id}"
+    )
+    assert deleted.status_code == 204
+    assert client.get(
+        f"/api/v1/companies/{company_id}/contacts/{contact_id}"
+    ).status_code == 404
+    assert client.get(f"/api/v1/companies/{company_id}").json()["contacts"] == []
+
+
+def test_company_contact_crud_requires_authentication(client):
+    company = client.post(
+        "/api/v1/companies",
+        json={"name": "Contact Auth Company"},
+    )
+    client.cookies.clear()
+
+    response = client.get(
+        f"/api/v1/companies/{company.json()['id']}/contacts"
+    )
+
+    assert response.status_code == 401
+
+
 def test_company_detail_update_status_and_delete(client):
     created = client.post(
         "/api/v1/companies",

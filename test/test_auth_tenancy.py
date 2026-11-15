@@ -150,6 +150,11 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
         json={"name": "First tenant", "domain": "shared.example"},
     )
     assert first_company.status_code == 201
+    first_contact = client.post(
+        f"/api/v1/companies/{first_company.json()['id']}/contacts",
+        json={"name": "Private first-tenant contact"},
+    )
+    assert first_contact.status_code == 201
 
     with TestClient(app) as second_client:
         registration = second_client.post(
@@ -169,6 +174,13 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
 
         assert second_client.get(
             f"/api/v1/companies/{first_company.json()['id']}"
+        ).status_code == 404
+        assert second_client.get(
+            f"/api/v1/companies/{first_company.json()['id']}/contacts"
+        ).status_code == 404
+        assert second_client.get(
+            f"/api/v1/companies/{second_company.json()['id']}/contacts/"
+            f"{first_contact.json()['id']}"
         ).status_code == 404
 
     first_list = client.get("/api/v1/companies")

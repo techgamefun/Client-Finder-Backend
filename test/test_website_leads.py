@@ -3,16 +3,22 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from conftest import TestingSessionLocal
-from app.models import Company, Website, WebsiteCrawl
+from app.models import Company, Contact, Website, WebsiteCrawl
 
 
 def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
     client,
 ):
     with TestingSessionLocal() as db:
-        new_crawl = WebsiteCrawl(website_url="https://new.example/")
+        new_crawl = WebsiteCrawl(
+            website_url="https://new.example/",
+            emails=["hello@new.example", "HELLO@new.example"],
+            phones=["+1 (555) 0100", "15550100"],
+        )
         existing_crawl = WebsiteCrawl(
             website_url="https://existing.example/",
+            emails=["sales@existing.example"],
+            phones=["+1 555 0200"],
         )
         listing_crawl = WebsiteCrawl(
             website_url="https://directory.example/",
@@ -41,20 +47,29 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
             website_url="https://uncrawled.example/",
             domain="uncrawled.example",
         )
+        existing_company = Company(
+            name="Existing Company",
+            website="https://existing.example/",
+            domain="existing.example",
+        )
+        existing_company.contacts.append(
+            Contact(
+                name="Sales Team",
+                business_email="SALES@EXISTING.EXAMPLE",
+                is_publicly_listed=False,
+            )
+        )
         db.add_all(
             [
                 new_website,
                 existing_website,
                 listing_website,
                 uncrawled_website,
-                Company(
-                    name="Existing Company",
-                    website="https://existing.example/",
-                    domain="existing.example",
-                ),
+                existing_company,
             ]
         )
         db.commit()
+        existing_company_id = existing_company.id
         website_ids = [
             new_website.id,
             existing_website.id,
@@ -86,6 +101,7 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
 
     with TestingSessionLocal() as db:
         companies = db.scalars(select(Company)).all()
+        contacts = db.scalars(select(Contact)).all()
         websites = {
             website.id: website.status
             for website in db.scalars(select(Website)).all()
@@ -97,6 +113,25 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
     assert created_company.name == "new.example"
     assert created_company.website == "https://new.example/"
     assert created_company.lead_status == "new"
+    new_contacts = [
+        contact for contact in contacts if contact.company_id == created_company.id
+    ]
+    assert sorted(contact.business_email for contact in new_contacts if contact.business_email) == [
+        "hello@new.example",
+    ]
+    assert sorted(contact.business_phone for contact in new_contacts if contact.business_phone) == [
+        "+1 (555) 0100",
+    ]
+    existing_contacts = [
+        contact
+        for contact in contacts
+        if contact.company_id == existing_company_id
+    ]
+    assert len(existing_contacts) == 2
+    assert next(
+        contact for contact in existing_contacts if contact.name == "Sales Team"
+    ).is_publicly_listed is False
+    assert sum(contact.business_phone == "+1 555 0200" for contact in existing_contacts) == 1
     assert websites[new_website_id] == "lead"
     assert websites[existing_website_id] == "lead"
     assert websites[listing_website_id] == "new"
@@ -109,6 +144,12 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
     assert repeated_response.status_code == 200
     assert repeated_response.json()["created_count"] == 0
     assert repeated_response.json()["already_existing_count"] == 1
+    with TestingSessionLocal() as db:
+        repeated_company = db.scalar(
+            select(Company).where(Company.domain == "new.example")
+        )
+        assert repeated_company is not None
+        assert len(repeated_company.contacts) == 2
 
 
 def test_website_status_can_be_updated_to_checked(client):

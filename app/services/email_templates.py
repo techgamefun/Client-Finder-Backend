@@ -9,7 +9,7 @@ from jinja2.sandbox import SandboxedEnvironment
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Company, Contact, Website, WebsiteCrawl
+from app.models import Company, Contact, Organization, Website, WebsiteCrawl
 from app.services.normalization import normalize_domain
 from app.tenant_context import get_tenant_context
 
@@ -165,6 +165,31 @@ TEMPLATE_VARIABLES = (
         "description": "The signed-in user's organization name.",
     },
 )
+
+
+def build_sender_info(
+    db: Session,
+    *,
+    organization_id: UUID,
+    user_email: str,
+    role: str,
+    email: str | None = None,
+) -> dict[str, str | None]:
+    account_email = email or user_email
+    local_part = account_email.partition("@")[0]
+    sender_name = " ".join(
+        part
+        for part in local_part.replace(".", " ").replace("_", " ").split()
+    ).title()
+    organization_name = db.scalar(
+        select(Organization.name).where(Organization.id == organization_id)
+    )
+    return {
+        "name": sender_name or None,
+        "email": account_email,
+        "role": role,
+        "organization": organization_name,
+    }
 
 
 def build_lead_context(

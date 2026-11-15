@@ -12,7 +12,6 @@ from starlette.concurrency import run_in_threadpool
 
 from app.models import (
     Company,
-    Contact,
     PageSpeedScanJob,
     SearchKeyword,
     WebsiteCrawl,
@@ -25,6 +24,7 @@ from app.schemas.discovery import (
 )
 from app.services.application_settings import get_crawl_settings
 from app.services.discovery import search_companies
+from app.services.contact_import import add_crawl_contacts
 from app.services.normalization import normalize_company_name, normalize_domain
 from app.services.pagespeed import PAGESPEED_STRATEGIES
 from app.services.pagespeed_jobs import (
@@ -166,25 +166,13 @@ def _persist_search_results(
                             enriched_company_ids.add(company.id)
                             claimed_domains.add(domain)
 
-                    existing_emails = {
-                        contact.business_email.casefold()
-                        for contact in company.contacts
-                        if contact.business_email
-                    }
-                    for email in crawl.emails:
-                        normalized_email = email.strip().lower()
-                        if not normalized_email:
-                            continue
-                        if normalized_email in existing_emails:
-                            continue
-                        company.contacts.append(
-                            Contact(
-                                business_email=normalized_email,
-                                is_publicly_listed=True,
-                            )
-                        )
-                        existing_emails.add(normalized_email)
-                        contacts_added += 1
+                    added_contacts = add_crawl_contacts(
+                        company,
+                        crawl.emails,
+                        crawl.phones,
+                    )
+                    if added_contacts:
+                        contacts_added += added_contacts
                         enriched_company_ids.add(company.id)
 
                 if not is_listing:
@@ -267,6 +255,7 @@ def _upsert_crawl(
     record.goals_page_url = crawl.goals_page_url
     record.goals_content = crawl.goals_content
     record.emails = crawl.emails
+    record.phones = crawl.phones
     record.social_links = crawl.social_links
     record.crawled_at = datetime.now(timezone.utc)
     db.flush()

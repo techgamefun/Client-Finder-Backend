@@ -1,6 +1,6 @@
 from sqlalchemy import select
 
-from app.models import Website, WebsiteCrawl
+from app.models import Company, Contact, Website, WebsiteCrawl
 from app.schemas.website_crawl import WebsiteCrawlResponse
 from app.services.website_crawler import CrawlData, _persist_crawl
 from conftest import TestingSessionLocal
@@ -64,6 +64,46 @@ def test_persist_crawl_stores_home_blog_and_service_pages(client):
     assert website is not None
     assert website.language == "fr-CA"
     assert website.site_topic == ["real estate", "property management"]
+
+
+def test_persist_crawl_saves_phones_and_syncs_company_contacts(client):
+    with TestingSessionLocal() as db:
+        company = Company(
+            name="Example Company",
+            website="https://example.com/",
+            domain="example.com",
+        )
+        db.add(company)
+        db.commit()
+        company_id = company.id
+
+        data = CrawlData(
+            website_url="https://example.com/",
+            about_page_url=None,
+            about_content=None,
+            contact_page_url=None,
+            contact_content=None,
+            goals_page_url=None,
+            goals_content=None,
+            emails=["hello@example.com", "HELLO@example.com"],
+            phones=["+1 (555) 0100", "15550100"],
+        )
+        crawl = _persist_crawl(data, db)
+        response = WebsiteCrawlResponse.model_validate(crawl)
+        _persist_crawl(data, db)
+        contacts = db.scalars(
+            select(Contact).where(Contact.company_id == company_id)
+        ).all()
+
+    assert response.emails == ["hello@example.com", "HELLO@example.com"]
+    assert response.phones == ["+1 (555) 0100", "15550100"]
+    assert len(contacts) == 2
+    assert {contact.business_email for contact in contacts if contact.business_email} == {
+        "hello@example.com",
+    }
+    assert {contact.business_phone for contact in contacts if contact.business_phone} == {
+        "+1 (555) 0100",
+    }
 
 
 def test_persist_crawl_does_not_replace_existing_site_topics(client):

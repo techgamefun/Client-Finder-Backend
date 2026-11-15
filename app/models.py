@@ -21,6 +21,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy import inspect
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, with_loader_criteria
 
 from app.database import Base
@@ -253,6 +254,212 @@ class EmailTemplate(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+
+class EmailCampaign(Base):
+    __tablename__ = "email_campaigns"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    org_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    template_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("email_templates.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    gmail_account_ids: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=list,
+    )
+    daily_limit_per_account: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=40,
+        server_default="40",
+    )
+    min_delay_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=180,
+        server_default="180",
+    )
+    max_delay_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=420,
+        server_default="420",
+    )
+    send_window_start_hour: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=9,
+        server_default="9",
+    )
+    send_window_end_hour: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=17,
+        server_default="17",
+    )
+    timezone: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="UTC",
+        server_default="UTC",
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="draft",
+        server_default="draft",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'running', 'paused', 'completed')",
+            name="ck_email_campaigns_status_allowed",
+        ),
+        CheckConstraint(
+            "daily_limit_per_account > 0",
+            name="ck_email_campaigns_daily_limit_positive",
+        ),
+        CheckConstraint(
+            "min_delay_seconds >= 1 AND max_delay_seconds >= min_delay_seconds",
+            name="ck_email_campaigns_delay_range",
+        ),
+        CheckConstraint(
+            "send_window_start_hour >= 0 AND send_window_start_hour < send_window_end_hour "
+            "AND send_window_end_hour <= 23",
+            name="ck_email_campaigns_send_window",
+        ),
+    )
+
+
+class EmailCampaignRecipient(Base):
+    __tablename__ = "email_campaign_recipients"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    org_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    campaign_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("email_campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    company_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    contact_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("contacts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    gmail_account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("connected_gmail_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    to_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    scheduled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    gmail_message_id: Mapped[str | None] = mapped_column(String(255))
+    gmail_thread_id: Mapped[str | None] = mapped_column(String(255))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'sent', 'failed', 'cancelled')",
+            name="ck_email_campaign_recipients_status_allowed",
+        ),
+        CheckConstraint(
+            "attempts >= 0",
+            name="ck_email_campaign_recipients_attempts_nonnegative",
+        ),
+        UniqueConstraint(
+            "campaign_id",
+            "contact_id",
+            name="uq_email_campaign_recipient_contact",
+        ),
+        Index(
+            "ix_email_campaign_recipients_due",
+            "status",
+            "scheduled_at",
+        ),
+        Index(
+            "ix_email_campaign_recipients_campaign_status",
+            "campaign_id",
+            "status",
+        ),
     )
 
 
@@ -490,6 +697,12 @@ class WebsiteCrawl(TenantOwnedMixin, Base):
         server_default="[]",
     )
     emails: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    phones: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     social_links: Mapped[list[str]] = mapped_column(
         JSON,
         nullable=False,

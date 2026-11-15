@@ -37,8 +37,8 @@ The discovery and ingestion workflow runs as follows:
 7. Associate the search keyword and search timestamp with each matching
    company. Repeated searches remain separately recorded.
 8. Crawl each distinct displayed source URL with bounded concurrency. Successful
-   crawls fill missing website/domain fields and add publicly listed email
-   contacts without overwriting existing company details. Crawled page text is
+   crawls fill missing website/domain fields and add publicly listed email and
+   phone contacts without overwriting existing company details. Crawled page text is
    retained with the lead source as evidence. Industry, location, software need,
    and lead score are not inferred.
 9. Save a `web_search` lead source. Crawl failures are reported in the response,
@@ -60,10 +60,13 @@ the saved crawl result. Retry a failed job with
 `POST /api/v1/crawler/jobs/{job_id}/retry`; queued or running jobs cannot be
 retried. The worker fetches the
 homepage and up to five relevant same-site About, Blog, Services, Contact, or
-mission/goal pages, then stores their page URLs and text, email addresses, and
-social links in the `website_crawls` table. It renders JavaScript pages with
-headless Chromium and does not check `robots.txt`. It does not modify company or
-lead-source records by itself.
+mission/goal pages, then stores their page URLs and text, email addresses,
+telephone numbers, and social links in the `website_crawls` table. It renders
+JavaScript pages with headless Chromium and does not check `robots.txt`. When a
+company has the same normalized domain, extracted email addresses and telephone
+numbers are also imported as separate, publicly listed Contact records. Imports
+are deduplicated against existing contacts and do not overwrite company fields
+or existing contact details.
 It retries temporary `429` and server errors at most twice,
 respecting a short `Retry-After` delay when provided. A `403` means the site
 denied the request; the crawler reports it without attempting to defeat the refusal.
@@ -89,6 +92,11 @@ edited with `PATCH /api/v1/websites/{id}`. The **Add to Lead** action creates
 companies for the filtered crawled websites and marks their registry status as
 `lead`; listing websites are excluded. Newly created companies use the domain
 as their initial name and have lead status `new`.
+Public email addresses and telephone numbers from the linked crawl are imported
+as separate contacts for new companies and added to matching existing companies
+without overwriting their existing contact details. Company profiles use the
+Contacts section as the single place to manage email and phone values; raw crawl
+extractions remain visible on website profiles.
 The Websites page also displays the top keywords extracted from each domain's
 own saved crawl page titles and descriptions. `GET
 /api/v1/websites/corpus-words` computes these independently using the Go
@@ -220,6 +228,31 @@ is determined by the preview identity or connected Gmail account.
 domain, and `company.phone` maps to the selected contact's business phone
 because the Company model has no phone column.
 
+### Email drip campaigns
+
+Administrators can create tenant-scoped campaigns at
+`/api/v1/orgs/{org_id}/campaigns`. A campaign selects an existing email
+template and Gmail accounts assigned to its creator. Preview and start requests
+take a list of `company_ids`; the service queues each eligible contact with a
+valid business email, reports companies with no eligible contacts, and rotates
+recipients round-robin across the selected Gmail accounts.
+
+Use `POST /{campaign_id}/preview` before
+`POST /{campaign_id}/start`. The preview reports eligible contacts, skipped
+companies, per-day account capacity, and an estimated completion time.
+Campaign schedules use the configured IANA timezone, randomized per-account
+delays, the daily per-account cap, and weekday send windows. Use `POST
+/{campaign_id}/pause` and `POST /{campaign_id}/resume` to pause and recalculate
+pending delivery slots. `GET /{campaign_id}` and `GET /` include recipient
+counts; `DELETE /{campaign_id}` removes draft or paused campaigns.
+
+The existing PostgreSQL worker claims due recipients with
+`FOR UPDATE SKIP LOCKED`, renders each message with the same sandboxed template
+service as single-email sends, and sends through the assigned Gmail account.
+Campaign status changes are published through the existing
+`/api/v1/queue/events` WebSocket. The `d39a6f2c8e14` migration adds campaign
+storage and must be applied through the normal deployment migration process.
+
 Apply migrations, then open the frontend and create the first organization
 administrator. Subsequent users can sign in; anyone can create a separate
 organization, while an organization administrator can add members from
@@ -328,7 +361,7 @@ On Render's free web-service plan, the worker runs only while the web service is
 awake. Render may spin the service down after 15 minutes without inbound
 traffic; queued jobs remain in PostgreSQL and can be processed after a request
 wakes the service again. The worker's startup log says
-`Website crawl and PageSpeed worker started.` Ensure
+`Background job worker started.` Ensure
 `WEB_CRAWLER_SERVICE_URL` points to the deployed crawler service.
 
 ## API usage
@@ -437,7 +470,8 @@ queue page or with `POST /api/v1/pagespeed/jobs/{job_id}/retry`.
 The endpoint returns `202 Accepted` with a job ID and initial status. Poll
 `GET /api/v1/crawler/jobs/{job_id}`; successful responses include the saved
 homepage, About, Blog, Services, Contact, and mission/goal page text,
-extracted email addresses and social-media URLs, and the crawl timestamp.
+extracted email addresses, telephone numbers, social-media URLs, and the crawl
+timestamp.
 Re-crawling the same website
 replaces its saved crawl result. The crawler starts at the supplied URL,
 follows only same-site links, limits page count and response size, and rejects
@@ -485,6 +519,26 @@ including their saved contacts and lead sources.
 
 Missing company IDs return `404`.
 
+### Manage company contacts
+
+Authenticated organization members can manage contacts belonging to companies
+in their organization:
+
+- `GET /api/v1/companies/{company_id}/contacts` lists a company's contacts.
+- `POST /api/v1/companies/{company_id}/contacts` creates a contact. Provide at
+  least one of `name`, `role`, `business_email`, or `business_phone`.
+- `GET /api/v1/companies/{company_id}/contacts/{contact_id}` retrieves one
+  contact.
+- `PATCH /api/v1/companies/{company_id}/contacts/{contact_id}` updates supplied
+  fields; nullable text fields can be set to `null` to clear them.
+- `DELETE /api/v1/companies/{company_id}/contacts/{contact_id}` deletes the
+  contact and returns `204`.
+
+Contact reads and writes are scoped to both the company and the signed-in
+organization. A contact belonging to another company is reported as `404`.
+The Company detail page's **Contacts** tab provides the same create, edit, and
+delete actions.
+
 ### Change lead status
 
 `PATCH /api/v1/companies/{company_id}/status`
@@ -515,11 +569,13 @@ contains the updated company record, contacts, and lead sources.
 - **SearchKeyword** — a recorded discovery query and timestamp linked to the
   websites surfaced by that search.
 - **Contact** — optional company-linked contact details. Discovery currently
-  does not create contacts.
+  and crawl workflows store extracted public email addresses and telephone
+  numbers as separate contacts, deduplicated against existing contact values.
 - **WebsiteCrawl** — standalone homepage and relevant About, Blog, Services,
-  Contact, and mission/goal page content, email addresses, social
+  Contact, and mission/goal page content, email addresses, telephone numbers, social
   links, per-page classification signals, and crawl timestamp, stored
-  independently of company and lead data. The crawler runs separate website
+  independently of company detail fields. A matching company's Contact records
+  are enriched separately when crawl data is saved. The crawler runs separate website
   type and topic classifiers; inferred topics populate an empty Website
   `site_topic` list without replacing existing topic values. Classification
   signals include page

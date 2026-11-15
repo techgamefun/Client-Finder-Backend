@@ -24,6 +24,8 @@ app/main.py                 FastAPI app, router registration, health check
     |       +-- app/schemas/ Pydantic request/response contracts
     |       +-- app/api/queue_events.py
     |               WebSocket stream for database-published job changes
+    |       +-- app/api/email_campaigns.py
+    |               Organization-scoped campaign lifecycle and progress
     |       |
     |       +-- app/services/ business workflows and provider integration
     |                           |
@@ -36,8 +38,14 @@ app/main.py                 FastAPI app, router registration, health check
     +-- app/services/redis_queue.py
     |       Upstash Redis REST queue transport
     |
+    +-- app/services/campaign_service.py
+    |       Tenant validation and timezone-aware campaign scheduling
+    |
+    +-- app/services/campaign_worker.py
+    |       Locked recipient claims, sandboxed rendering, and Gmail delivery
+    |
     +-- app/worker.py
-    |       Worker for queued website crawl jobs, run separately or in the API process
+    |       Worker for crawl, PageSpeed, and email campaign jobs
     |
     +-- migrations/          Alembic-managed database schema history
 ```
@@ -63,8 +71,8 @@ app/main.py                 FastAPI app, router registration, health check
   discovery tools and Octoparse template.
 - `app/models.py` defines the `Company`, `Contact`, `SearchKeyword`,
   `PageSpeedScan`, `WebsiteCrawl`, `Website`, `WebsiteCrawlJob`,
-  `WebsiteCorpusAnalysis`, `ApplicationSettings`, and `DiscoveryProviderJob`
-  tables and their relationships.
+  `WebsiteCorpusAnalysis`, `ApplicationSettings`, `DiscoveryProviderJob`,
+  `EmailCampaign`, and `EmailCampaignRecipient` tables.
 - `WebsiteCrawl.site_type` stores the crawler's detected website type with the
   extracted crawl data. The separate topic classifier fills `Website.site_topic`
   when it is still empty. The `classification_signals` JSON column preserves
@@ -89,14 +97,18 @@ app/main.py                 FastAPI app, router registration, health check
   `DiscoveryProviderJob`. Its usage summary counts app-tracked Octoparse tasks
   for the current UTC month and all time; this is not account quota data.
 - `app/services/lead_ingestion.py` matches search results to companies, crawls
-  source URLs, fills verified website/domain and public-email details, and
-  persists source and crawl evidence.
+  source URLs, fills verified website/domain details, imports extracted public
+  email and phone values into deduplicated Contact records, and persists source
+  and crawl evidence.
 - `app/services/website_crawler.py` provides bounded public-site crawling to
   discovery ingestion and the standalone crawl endpoint using headless
-  Chromium; crawled page text, emails, social links, detected site type, and
-  detailed per-page classification signals are stored in `WebsiteCrawl`
-  records. Company profiles can retrieve the latest successful crawl for their
-  website and trigger a new crawl or re-crawl. It
+  Chromium; crawled page text, emails, phone numbers, social links, detected
+  site type, and detailed per-page classification signals are stored in
+  `WebsiteCrawl` records. When a crawled domain matches an existing company,
+  public email and phone values are imported as separate, deduplicated Contact
+  records without replacing existing contact details. Company profiles can
+  retrieve the latest successful crawl for their website and trigger a new
+  crawl or re-crawl. It
   retries temporary rate-limit and server failures a bounded number of times,
   but reports denied access without attempting to bypass it.
 - `app/services/crawl_jobs.py` creates durable PostgreSQL crawl jobs and
@@ -106,7 +118,14 @@ app/main.py                 FastAPI app, router registration, health check
   remains synchronous because its results are required by that workflow. Set
   `RUN_WORKER_IN_API=true` to run the worker in the API
   lifespan when a separate background-worker service is unavailable.
-- PostgreSQL triggers publish crawl and PageSpeed job changes on the
+- `app/services/campaign_service.py` validates assigned Gmail accounts and
+  tenant-owned companies/contacts, previews campaign capacity, and schedules
+  recipients round-robin within weekday send windows in each campaign's
+  timezone. `app/services/campaign_worker.py` claims due rows with PostgreSQL
+  `FOR UPDATE SKIP LOCKED`, reuses the sandboxed template renderer and Gmail
+  sender, and records delivery outcomes.
+- PostgreSQL triggers publish crawl, PageSpeed, and email campaign status
+  changes on the
   `queue_job_events` notification channel. `app/api/queue_events.py` forwards
   those notifications over `/api/v1/queue/events`, so the frontend can update
   active job views without periodic status polling.
@@ -134,7 +153,11 @@ record; `PATCH /api/v1/companies/{id}` updates supplied company fields while
 maintaining normalized names/domains and domain uniqueness; the dedicated
 `PATCH /api/v1/companies/{id}/status` changes lead status. `DELETE
 /api/v1/companies/{id}` deletes a company and its dependent contacts and
-sources.
+sources. Authenticated organization members can independently list, create,
+read, update, and delete company contacts through
+`/api/v1/companies/{id}/contacts`; each operation verifies both the company and
+contact belong to the active organization and scopes contacts to their parent
+company.
 
 ### Discovery search
 
@@ -183,8 +206,9 @@ Starlette's thread pool because the SQLAlchemy session is synchronous:
 4. Associate the saved search keyword and its timestamp with each matching
    website in the domain-unique registry.
 5. Use successful crawls to fill missing website/domain fields, add publicly
-   listed email addresses as contacts, and save crawled page text and extracted
-   metadata. Existing company details are not overwritten.
+   listed email and phone values as separate Contact records, and save crawled
+   page text and extracted metadata. Contact values are deduplicated without
+   overwriting existing contacts; existing company details are not overwritten.
 6. Create durable mobile and desktop PageSpeed jobs for each distinct company
    website and enqueue them for the worker. Return without waiting for Google;
    the worker saves category scores and detailed Lighthouse report history or
@@ -230,8 +254,11 @@ crawler starts at the supplied URL, then fetches up to five discovered
 same-site About, Blog, Services, Contact, and mission/goal pages. It limits
 response size, request duration, page count, and redirects; blocks non-public
 IP addresses; and does not follow cross-site links
-or redirects. Extracted page text, emails, and social URLs are upserted into
-the separate `website_crawls` table. Discovery ingestion continues using synchronous crawling.
+or redirects. Extracted page text, emails, phone numbers, and social URLs are upserted into
+the separate `website_crawls` table. When a crawl matches an existing company
+domain, its public emails and phone numbers are imported as separate Contact
+records with deduplication. Discovery ingestion continues using synchronous
+crawling.
 Company profiles, discovery results, direct crawl jobs, and successful crawls
 also upsert the `websites` registry by normalized domain. Website rows are
 never linked to companies; the crawl relation is maintained independently.

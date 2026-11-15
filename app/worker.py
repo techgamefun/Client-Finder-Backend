@@ -16,6 +16,7 @@ from app.tenant_context import (
     set_tenant_context,
 )
 from app.services.application_settings import CrawlSettings, get_crawl_settings
+from app.services.campaign_worker import process_due_campaign_recipient
 from app.services.redis_queue import (
     RedisQueueError,
     dequeue_job,
@@ -366,10 +367,18 @@ async def run_worker() -> None:
         )
         redis_enabled = False
 
-    logger.info("Website crawl and PageSpeed worker started.")
+    logger.info("Background job worker started.")
     prefer_pagespeed = False
+    prefer_campaign = False
 
     while True:
+        campaign_checked = False
+        if prefer_campaign:
+            prefer_campaign = False
+            campaign_checked = True
+            if await process_due_campaign_recipient():
+                continue
+
         job_id: UUID | None = None
         job_type: str | None = None
         queue_readers = (
@@ -427,9 +436,12 @@ async def run_worker() -> None:
                     break
 
         if job_id is None:
+            if not campaign_checked and await process_due_campaign_recipient():
+                continue
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
             continue
 
+        prefer_campaign = True
         try:
             if job_type == "pagespeed":
                 await process_pagespeed_job(job_id)
