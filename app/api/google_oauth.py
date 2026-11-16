@@ -6,6 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
 from app.api.deps import require_admin_context
+from app.api.gmail_oauth_cookie import (
+    GMAIL_CALLBACK_PATH,
+    GMAIL_OAUTH_STATE_COOKIE,
+    gmail_oauth_cookie_security,
+)
 from app.config import settings
 from app.services.gmail import validate_gmail_token_encryption_configuration
 from app.services.gmail_oauth import create_google_authorization_url
@@ -14,8 +19,6 @@ from app.tenant_context import TenantContext
 
 router = APIRouter(prefix="/auth", tags=["Gmail OAuth"])
 AdminContext = Annotated[TenantContext, Depends(require_admin_context)]
-GMAIL_OAUTH_STATE_COOKIE = "gmail_oauth_nonce"
-GMAIL_CALLBACK_PATH = "/"
 
 
 @router.get("/google/login")
@@ -42,14 +45,15 @@ def start_google_oauth(
         admin_user_id=admin_user_id,
     )
     response = RedirectResponse(authorization_url, status_code=302)
+    secure, samesite = gmail_oauth_cookie_security()
     response.set_cookie(
         key=GMAIL_OAUTH_STATE_COOKIE,
         value=nonce,
         max_age=600,
         path=GMAIL_CALLBACK_PATH,
-        secure=settings.environment == "production",
+        secure=secure,
         httponly=True,
-        samesite="none",
+        samesite=samesite,
     )
     return response
 

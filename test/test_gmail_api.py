@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app import main
 from app.api import gmail as gmail_api
+from app.api.gmail_oauth_cookie import gmail_oauth_cookie_security
 from app.config import settings
 from app.models import ConnectedGmailAccount
 from app.services import gmail, gmail_oauth
@@ -69,9 +70,10 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
     oauth_cookie = start.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE]
     set_cookie_header = start.headers["set-cookie"].lower()
     assert "path=/" in set_cookie_header
-    assert "samesite=none" in set_cookie_header
+    expected_secure = settings.environment == "production"
+    assert f"samesite={'none' if expected_secure else 'lax'}" in set_cookie_header
     assert ("secure" in set_cookie_header) == (
-        settings.environment == "production"
+        expected_secure
     )
     google_query = parse_qs(urlsplit(start.headers["location"]).query)
     state = google_query["state"][0]
@@ -120,6 +122,10 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
     assert callback.headers["location"] == (
         "http://localhost:3000/settings?gmail=connected"
     )
+    delete_cookie_header = callback.headers["set-cookie"].lower()
+    assert "path=/" in delete_cookie_header
+    assert f"samesite={'none' if expected_secure else 'lax'}" in delete_cookie_header
+    assert ("secure" in delete_cookie_header) == expected_secure
 
     async def exchange_without_refresh_token(code: str):
         assert code == "reauthorization-code"
@@ -487,3 +493,20 @@ def test_gmail_oauth_and_assignment_require_admin(client, monkeypatch):
             json={"user_id": user.json()["id"]},
         )
         assert assignment.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ("development", (False, "lax")),
+        ("production", (True, "none")),
+    ],
+)
+def test_gmail_oauth_cookie_security_matches_environment(
+    monkeypatch,
+    environment,
+    expected,
+):
+    monkeypatch.setattr(settings, "environment", environment)
+
+    assert gmail_oauth_cookie_security() == expected

@@ -15,6 +15,11 @@ from app.api.deps import (
     require_admin_context,
     require_authenticated_context,
 )
+from app.api.gmail_oauth_cookie import (
+    GMAIL_CALLBACK_PATH,
+    GMAIL_OAUTH_STATE_COOKIE,
+    gmail_oauth_cookie_security,
+)
 from app.config import settings
 from app.models import (
     ConnectedGmailAccount,
@@ -64,11 +69,9 @@ CurrentContext = Annotated[
     TenantContext,
     Depends(require_authenticated_context),
 ]
-GMAIL_OAUTH_STATE_COOKIE = "gmail_oauth_nonce"
-GMAIL_CALLBACK_PATH = "/"
 
 
-@router.get(
+@router.get(    
     "/callback",
     include_in_schema=False,
 )
@@ -429,11 +432,12 @@ def _frontend_redirect(status_value: str) -> RedirectResponse:
         f"{frontend_origin.rstrip('/')}/settings?gmail={status_value}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
+    secure, samesite = gmail_oauth_cookie_security()
     response.delete_cookie(
         key=GMAIL_OAUTH_STATE_COOKIE,
         path=GMAIL_CALLBACK_PATH,
-        secure=settings.environment == "production",
+        secure=secure,
         httponly=True,
-        samesite="none",
+        samesite=samesite,
     )
     return response
