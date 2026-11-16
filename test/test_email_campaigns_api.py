@@ -370,10 +370,71 @@ def test_campaign_worker_sends_and_completes_campaign(client, monkeypatch):
     with TestingSessionLocal() as db:
         sent_recipient = db.get(EmailCampaignRecipient, recipient_id)
         saved_campaign = db.get(EmailCampaign, campaign_id)
+        sent_company = db.get(Company, company_id)
         assert sent_recipient.status == "sent"
         assert sent_recipient.gmail_message_id == "campaign-message-id"
         assert sent_recipient.gmail_thread_id == "campaign-thread-id"
         assert saved_campaign.status == "completed"
+        assert sent_company.last_email_sent_at == sent_recipient.sent_at
+
+    company_response = client.get(f"/api/v1/companies/{company_id}")
+    assert company_response.status_code == 200
+    assert company_response.json()["last_email_sent_at"] is not None
+
+
+def test_campaign_worker_failure_does_not_mark_company_contacted(
+    client,
+    monkeypatch,
+):
+    organization_id, user_id = _session_ids(client)
+    account_id = _create_account(organization_id, user_id)
+    template_id = _create_template(client, organization_id)
+    company_id, contact_id = _create_company_with_contact(organization_id)
+
+    with TestingSessionLocal() as db:
+        campaign = EmailCampaign(
+            org_id=organization_id,
+            created_by=user_id,
+            name="Failed worker test",
+            template_id=template_id,
+            gmail_account_ids=[str(account_id)],
+            daily_limit_per_account=40,
+            min_delay_seconds=180,
+            max_delay_seconds=420,
+            send_window_start_hour=9,
+            send_window_end_hour=17,
+            timezone="UTC",
+            status="running",
+        )
+        db.add(campaign)
+        db.flush()
+        recipient = EmailCampaignRecipient(
+            org_id=organization_id,
+            campaign_id=campaign.id,
+            company_id=company_id,
+            contact_id=contact_id,
+            gmail_account_id=account_id,
+            to_email="jane@example.test",
+            scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            status="pending",
+        )
+        db.add(recipient)
+        db.commit()
+        recipient_id = recipient.id
+
+    def fail_send(*_args, **_kwargs):
+        raise RuntimeError("Gmail delivery failed.")
+
+    monkeypatch.setattr(campaign_worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(campaign_worker, "send_gmail_message", fail_send)
+
+    assert asyncio.run(campaign_worker.process_due_campaign_recipient()) is True
+
+    with TestingSessionLocal() as db:
+        failed_recipient = db.get(EmailCampaignRecipient, recipient_id)
+        failed_company = db.get(Company, company_id)
+        assert failed_recipient.status == "failed"
+        assert failed_company.last_email_sent_at is None
 
 
 def test_scheduler_respects_business_hours_weekends_and_daily_cap(monkeypatch):

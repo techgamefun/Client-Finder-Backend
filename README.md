@@ -251,7 +251,14 @@ The existing PostgreSQL worker claims due recipients with
 service as single-email sends, and sends through the assigned Gmail account.
 Campaign status changes are published through the existing
 `/api/v1/queue/events` WebSocket. The `d39a6f2c8e14` migration adds campaign
-storage and must be applied through the normal deployment migration process.
+storage, and `e6f4a1b3c9d2` adds and backfills each company's latest successful
+campaign email timestamp. Apply both through the normal deployment migration
+process.
+
+On the frontend, organization admins can select individual leads, the current
+page, or all filtered results to seed campaign setup. Successful campaign
+delivery updates `Company.last_email_sent_at`; the Leads table shows this
+separately from `lead_status`, which remains the sales pipeline status.
 
 Apply migrations, then open the frontend and create the first organization
 administrator. Subsequent users can sign in; anyone can create a separate
@@ -304,7 +311,7 @@ Keep real credentials in your local environment and out of source control.
 Apply the migrations to the configured PostgreSQL database:
 
 ```powershell
-alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
 The migration chain creates the core company, contact, and lead-source tables;
@@ -324,7 +331,7 @@ stops with an error; resolve those duplicates before rerunning the migration.
 To see the current migration revision:
 
 ```powershell
-alembic current
+.\.venv\Scripts\python.exe -m alembic current
 ```
 
 ## Start the API

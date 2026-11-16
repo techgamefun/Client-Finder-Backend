@@ -123,7 +123,9 @@ app/main.py                 FastAPI app, router registration, health check
   recipients round-robin within weekday send windows in each campaign's
   timezone. `app/services/campaign_worker.py` claims due rows with PostgreSQL
   `FOR UPDATE SKIP LOCKED`, reuses the sandboxed template renderer and Gmail
-  sender, and records delivery outcomes.
+  sender, and records delivery outcomes. Successful delivery updates
+  `Company.last_email_sent_at`; this email-contact marker is distinct from the
+  sales pipeline's `Company.lead_status`.
 - PostgreSQL triggers publish crawl, PageSpeed, and email campaign status
   changes on the
   `queue_job_events` notification channel. `app/api/queue_events.py` forwards

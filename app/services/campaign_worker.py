@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.database import SessionLocal
 from app.models import (
+    Company,
     EmailCampaign,
     EmailCampaignRecipient,
     EmailTemplate,
@@ -250,6 +251,22 @@ def _deliver_campaign_recipient(delivery: CampaignRecipientDelivery) -> None:
             recipient.error_message = None
             recipient.sent_at = now
             recipient.updated_at = now
+            company = db.scalar(
+                select(Company).where(
+                    Company.id == recipient.company_id,
+                    Company.organization_id == campaign.org_id,
+                )
+            )
+            if company is not None:
+                company.last_email_sent_at = now
+            else:
+                logger.warning(
+                    "Sent campaign recipient %s, but company %s was not found "
+                    "in organization %s.",
+                    recipient.id,
+                    recipient.company_id,
+                    campaign.org_id,
+                )
             maybe_complete_campaign(db, campaign.id, now=now)
             db.commit()
     except HTTPException as exc:

@@ -146,6 +146,7 @@ class CompanyResponse(BaseModel):
     software_need: str | None
     lead_score: int | None
     lead_status: str
+    last_email_sent_at: datetime | None
     created_at: datetime
     created_by_email: str | None = None
     contacts: list[ContactResponse]

@@ -541,6 +541,9 @@ class Company(TenantOwnedMixin, Base):
         server_default="new",
         nullable=False,
     )
+    last_email_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
