@@ -122,3 +122,19 @@ class OverviewResponse(BaseModel):
     attention: list[OverviewAttentionItem]
     onboarding: OverviewOnboarding | None
     recent_leads: list[OverviewRecentLead]
+
+
+class OverviewUserProgress(BaseModel):
+    user_id: str
+    email: str
+    role: str
+    is_active: bool
+    websites_discovered: int
+    companies_created: int
+    leads_created: int
+    crawls_completed: int
+    emails_sent: int
+
+
+class AdminOverviewResponse(OverviewResponse):
+    user_progress: list[OverviewUserProgress]

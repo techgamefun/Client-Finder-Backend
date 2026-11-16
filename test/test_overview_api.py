@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta, timezone
 
+from fastapi.testclient import TestClient
+
+from app import main
 from conftest import TestingSessionLocal
 from app.models import (
     Company,
     Contact,
     Organization,
     SearchKeyword,
+    User,
     Website,
     WebsiteCrawl,
     WebsiteCrawlJob,
@@ -167,6 +171,112 @@ def test_overview_does_not_include_another_organizations_data(client):
     assert data["kpis"]["leads_created"]["current"] == 0
     assert data["coverage"]["companies_total"] == 0
     assert data["recent_leads"] == []
+
+
+def test_personal_overview_scopes_records_and_admin_overview_shows_team(
+    client,
+):
+    now = datetime.now(timezone.utc)
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        other_user = User(
+            organization_id=context.organization_id,
+            email="member@example.test",
+            password_hash="unused-test-hash",
+            role="user",
+        )
+        db.add(other_user)
+        db.flush()
+        db.add_all(
+            [
+                Company(
+                    name="Admin-owned company",
+                    domain="admin-owned.example",
+                    created_by_user_id=context.user_id,
+                    created_at=now,
+                ),
+                Company(
+                    name="Member-owned company",
+                    domain="member-owned.example",
+                    created_by_user_id=other_user.id,
+                    created_at=now,
+                ),
+                Website(
+                    website_url="https://admin-owned.example/",
+                    domain="admin-owned.example",
+                    created_by_user_id=context.user_id,
+                    created_at=now,
+                ),
+                Website(
+                    website_url="https://member-owned.example/",
+                    domain="member-owned.example",
+                    created_by_user_id=other_user.id,
+                    created_at=now,
+                ),
+            ]
+        )
+        db.flush()
+        companies = db.query(Company).order_by(Company.name).all()
+        db.add_all(
+            [
+                Contact(
+                    company_id=company.id,
+                    created_by_user_id=company.created_by_user_id,
+                    business_email=f"hello@{company.domain}",
+                )
+                for company in companies
+            ]
+        )
+        db.commit()
+
+    personal = client.get("/api/v1/overview?range=30d&tz=UTC")
+    assert personal.status_code == 200
+    personal_data = personal.json()
+    assert personal_data["kpis"]["websites_discovered"]["current"] == 1
+    assert personal_data["kpis"]["leads_created"]["current"] == 1
+    assert personal_data["coverage"]["companies_total"] == 1
+    assert [lead["name"] for lead in personal_data["recent_leads"]] == [
+        "Admin-owned company"
+    ]
+
+    admin = client.get("/api/v1/overview/admin?range=30d&tz=UTC")
+    assert admin.status_code == 200
+    admin_data = admin.json()
+    assert admin_data["kpis"]["websites_discovered"]["current"] == 2
+    assert admin_data["kpis"]["leads_created"]["current"] == 2
+    progress_by_email = {
+        row["email"]: row for row in admin_data["user_progress"]
+    }
+    assert progress_by_email["admin@example.test"]["websites_discovered"] == 1
+    assert progress_by_email["member@example.test"]["websites_discovered"] == 1
+    assert progress_by_email["member@example.test"]["leads_created"] == 1
+
+
+def test_admin_overview_endpoint_requires_admin(client):
+    member = client.post(
+        "/api/v1/auth/users",
+        json={
+            "email": "overview-member@example.test",
+            "password": "overview-member-password",
+            "role": "user",
+        },
+    )
+    assert member.status_code == 201
+
+    with TestClient(main.app) as member_client:
+        login = member_client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "overview-member@example.test",
+                "password": "overview-member-password",
+            },
+        )
+        assert login.status_code == 200
+        response = member_client.get(
+            "/api/v1/overview/admin?range=30d&tz=UTC"
+        )
+
+    assert response.status_code == 403
 
 
 def test_overview_delta_handles_zero_previous_value():
