@@ -157,6 +157,15 @@ def get_application_settings(db: Session) -> ApplicationSettingsResponse:
             settings.crawler_service_shared_token
         ),
         selected_discovery_tools=get_selected_discovery_tools(db),
+        tavily_default_search_depth=(
+            row.tavily_default_search_depth if row else "basic"
+        ),
+        tavily_default_country=(
+            row.tavily_default_country if row else None
+        ),
+        tavily_default_exclude_domains=(
+            row.tavily_default_exclude_domains if row else []
+        ),
         octoparse_template=(
             row.octoparse_template
             if row and row.octoparse_template
@@ -188,6 +197,14 @@ def save_application_settings(
         save_user_provider_api_key(db, "pagespeed", payload.pagespeed_api_key)
     if payload.hypestat_auto_fetch_enabled is not None:
         row.hypestat_auto_fetch_enabled = payload.hypestat_auto_fetch_enabled
+    if payload.tavily_default_search_depth is not None:
+        row.tavily_default_search_depth = payload.tavily_default_search_depth
+    if "tavily_default_country" in payload.model_fields_set:
+        row.tavily_default_country = payload.tavily_default_country
+    if "tavily_default_exclude_domains" in payload.model_fields_set:
+        row.tavily_default_exclude_domains = (
+            payload.tavily_default_exclude_domains or []
+        )
     if payload.selected_discovery_tools is not None:
         row.selected_discovery_tools = [
             provider.value for provider in payload.selected_discovery_tools

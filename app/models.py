@@ -776,6 +776,7 @@ class Website(TenantOwnedMixin, Base):
         String(255),
         nullable=False,
     )
+    favicon_url: Mapped[str | None] = mapped_column(String(2000))
     crawl_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("website_crawls.id", ondelete="SET NULL"),
@@ -945,6 +946,19 @@ class ApplicationSettings(TenantOwnedMixin, Base):
         server_default="true",
     )
     selected_discovery_tools: Mapped[list[str] | None] = mapped_column(JSON)
+    tavily_default_search_depth: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="basic",
+        server_default="basic",
+    )
+    tavily_default_country: Mapped[str | None] = mapped_column(String(100))
+    tavily_default_exclude_domains: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     octoparse_template: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     crawl_max_pages: Mapped[int] = mapped_column(
         Integer,

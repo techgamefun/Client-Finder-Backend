@@ -50,6 +50,10 @@ def test_saving_discovery_results_canonicalizes_domains_and_queues_crawls(
     assert len(websites) == 1
     assert websites[0].website_url == "https://example.com/"
     assert websites[0].domain == "example.com"
+    assert websites[0].favicon_url == (
+        "https://www.google.com/s2/favicons?"
+        "domain_url=https%3A%2F%2Fexample.com%2F&sz=64"
+    )
     assert websites[0].status == "new"
     assert websites[0].site_topic == []
     assert websites[0].crawl_id is None
@@ -60,6 +64,7 @@ def test_saving_discovery_results_canonicalizes_domains_and_queues_crawls(
     website_response = client.get("/api/v1/websites")
     assert website_response.status_code == 200
     assert website_response.json()[0]["crawl_job_status"] == "queued"
+    assert website_response.json()[0]["favicon_url"] == websites[0].favicon_url
 
 
 def test_repeat_discovery_reuses_domain_and_does_not_queue_another_job(

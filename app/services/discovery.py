@@ -12,6 +12,7 @@ from app.schemas.discovery import (
     DiscoveryProviderFailure,
     DiscoveryResult,
     DiscoverySearchResponse,
+    TavilyDiscoverySearchRequest,
 )
 from app.schemas.settings import TavilyUsageResponse
 from app.services.application_settings import (
@@ -29,6 +30,8 @@ async def search_companies(
     query: str,
     db: Session,
     max_results: int = 20,
+    *,
+    options: TavilyDiscoverySearchRequest | None = None,
 ) -> DiscoverySearchResponse:
     api_key = get_tavily_api_key(db)
     if not api_key:
@@ -37,13 +40,39 @@ async def search_companies(
             detail="Search provider is not configured.",
         )
 
-    payload = {
+    search_options = options or TavilyDiscoverySearchRequest(
+        query=query,
+        max_results=max_results,
+    )
+    payload: dict[str, object] = {
         "api_key": api_key,
         "query": query,
-        "search_depth": "basic",
-        "max_results": max_results,
-        "include_answer": False,
+        "search_depth": search_options.search_depth,
+        "topic": search_options.topic,
+        "max_results": search_options.max_results,
+        "include_answer": search_options.include_answer,
+        "include_favicon": search_options.include_favicon,
+        "auto_parameters": search_options.auto_parameters,
+        "include_usage": True,
+        "include_raw_content": False,
+        "filter_by_published_date": search_options.filter_by_published_date,
     }
+    if search_options.search_depth in {"basic", "fast", "advanced"}:
+        payload["chunks_per_source"] = search_options.chunks_per_source
+    if search_options.topic == "general" and search_options.country:
+        payload["country"] = search_options.country
+    if search_options.time_range:
+        payload["time_range"] = search_options.time_range
+    if search_options.start_date:
+        payload["start_date"] = search_options.start_date.isoformat()
+    if search_options.end_date:
+        payload["end_date"] = search_options.end_date.isoformat()
+    if search_options.include_domains:
+        payload["include_domains"] = search_options.include_domains
+    if search_options.include_domains_mode:
+        payload["include_domains_mode"] = search_options.include_domains_mode
+    if search_options.exclude_domains:
+        payload["exclude_domains"] = search_options.exclude_domains
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -75,24 +104,61 @@ async def search_companies(
     results = []
 
     for item in data.get("results", []):
-        try:
-            results.append(
-                DiscoveryResult(
-                    title=item["title"],
-                    url=item["url"],
-                    content=item.get("content", ""),
-                    score=item.get("score", 0.0),
-                    provider=DiscoveryProvider.TAVILY,
-                )
-            )
-        except (KeyError, ValueError, TypeError):
-            # Skip malformed results rather than returning
-            # unvalidated source data.
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("title"), str)
+            or not isinstance(item.get("url"), str)
+        ):
             continue
+        result_data = {
+            "title": item["title"],
+            "url": item["url"],
+            "content": item.get("content", ""),
+            "score": item.get("score", 0.0),
+            "provider": DiscoveryProvider.TAVILY,
+            "favicon": item.get("favicon"),
+            "published_date": item.get("published_date"),
+        }
+        try:
+            result = DiscoveryResult(**result_data)
+        except (KeyError, ValueError, TypeError):
+            if not item.get("favicon"):
+                continue
+            result_data["favicon"] = None
+            try:
+                result = DiscoveryResult(**result_data)
+            except (KeyError, ValueError, TypeError):
+                continue
+        if (
+            search_options.min_score is not None
+            and result.score < search_options.min_score
+        ):
+            continue
+        results.append(result)
+
+    answer = data.get("answer") if search_options.include_answer else None
+    if not isinstance(answer, str):
+        answer = None
+    usage = data.get("usage")
+    credits_value = (
+        usage.get("credits", usage.get("credits_used"))
+        if isinstance(usage, dict)
+        else None
+    )
+    if credits_value is None:
+        credits_value = data.get("credits_used")
+    credits_used = (
+        float(credits_value)
+        if isinstance(credits_value, (int, float))
+        and not isinstance(credits_value, bool)
+        else None
+    )
 
     return DiscoverySearchResponse(
         query=query,
         results=results,
+        answer=answer,
+        credits_used=credits_used,
     )
 
 
@@ -109,6 +175,8 @@ class StartedProviderJob:
 class ProviderSearchOutcome:
     results: list[DiscoveryResult]
     job: StartedProviderJob | None = None
+    answer: str | None = None
+    credits_used: float | None = None
 
 
 class LeadDiscoveryTool(Protocol):
@@ -119,6 +187,7 @@ class LeadDiscoveryTool(Protocol):
         query: str,
         max_results: int,
         db: Session,
+        options: TavilyDiscoverySearchRequest | None = None,
     ) -> ProviderSearchOutcome: ...
 
 
@@ -130,9 +199,19 @@ class TavilyDiscoveryTool:
         query: str,
         max_results: int,
         db: Session,
+        options: TavilyDiscoverySearchRequest | None = None,
     ) -> ProviderSearchOutcome:
-        response = await search_companies(query, db, max_results)
-        return ProviderSearchOutcome(results=response.results)
+        response = await search_companies(
+            query,
+            db,
+            max_results,
+            options=options,
+        )
+        return ProviderSearchOutcome(
+            results=response.results,
+            answer=response.answer,
+            credits_used=response.credits_used,
+        )
 
 
 class OctoparseDiscoveryTool:
@@ -143,6 +222,7 @@ class OctoparseDiscoveryTool:
         query: str,
         max_results: int,
         db: Session,
+        options: TavilyDiscoverySearchRequest | None = None,
     ) -> ProviderSearchOutcome:
         task_id, lot_no, result_mapping = await start_octoparse_search(
             query,
@@ -171,8 +251,20 @@ async def search_with_selected_tools(
     query: str,
     max_results: int,
     db: Session,
-) -> tuple[list[DiscoveryResult], list[StartedProviderJob], list[DiscoveryProviderFailure]]:
-    selected_tools = get_selected_discovery_tools(db)
+    *,
+    options: TavilyDiscoverySearchRequest | None = None,
+) -> tuple[
+    list[DiscoveryResult],
+    list[StartedProviderJob],
+    list[DiscoveryProviderFailure],
+    str | None,
+    float | None,
+]:
+    selected_tools = (
+        options.providers
+        if options is not None and options.providers is not None
+        else get_selected_discovery_tools(db)
+    )
 
     async def run_tool(
         provider: DiscoveryProvider,
@@ -186,6 +278,7 @@ async def search_with_selected_tools(
                 query,
                 max_results,
                 db,
+                options=options if provider == DiscoveryProvider.TAVILY else None,
             )
         except HTTPException as exc:
             return (
@@ -204,11 +297,16 @@ async def search_with_selected_tools(
     results: list[DiscoveryResult] = []
     jobs: list[StartedProviderJob] = []
     failures: list[DiscoveryProviderFailure] = []
+    answer: str | None = None
+    credits_used: float | None = None
     for _, outcome, failure in outcomes:
         if failure is not None:
             failures.append(failure)
         elif outcome is not None:
             results.extend(outcome.results)
+            answer = outcome.answer or answer
+            if outcome.credits_used is not None:
+                credits_used = (credits_used or 0) + outcome.credits_used
             if outcome.job is not None:
                 jobs.append(outcome.job)
 
@@ -222,7 +320,7 @@ async def search_with_selected_tools(
             detail=f"All selected discovery tools failed. {detail}",
         )
 
-    return results, jobs, failures
+    return results, jobs, failures, answer, credits_used
 
 
 async def get_tavily_usage(db: Session) -> TavilyUsageResponse:

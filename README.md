@@ -133,6 +133,14 @@ Insights scans. The frontend discovery workflow instead creates domain
 registry rows and queues crawls without creating companies. Users configure
 their own Google PageSpeed API key from **Settings → PageSpeed**.
 
+`POST /api/v1/discovery/search` accepts Tavily search depth, topic, country,
+date range, domain filters, minimum relevance score, and optional AI summary
+settings. It returns Tavily usage credits and result favicon and publication
+metadata when available. Organization admins can set the default search depth,
+country, and excluded domains from **Settings → Tavily**; these defaults
+prefill the Discover Leads filters. Apply pending database changes with
+`.\.venv\Scripts\python.exe -m alembic upgrade head` from the `Agent` directory.
+
 ## Requirements
 
 - Python 3.10 or newer

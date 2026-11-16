@@ -1,10 +1,18 @@
 
-from datetime import datetime
+import re
+from datetime import date, datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import (
+    BaseModel,
+    Field,
+    HttpUrl,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from app.schemas.pagespeed import PageSpeedScanJobResponse
 
@@ -30,12 +38,121 @@ class DiscoverySearchRequest(BaseModel):
     max_results: int = Field(default=20, ge=1, le=20)
 
 
+TavilySearchDepth = Literal["basic", "fast", "ultra-fast", "advanced"]
+TavilyTopic = Literal["general", "news", "finance"]
+TavilyTimeRange = Literal["day", "week", "month", "year"]
+
+
+_DOMAIN_PATTERN = re.compile(
+    r"^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+
+
+class TavilyDiscoverySearchRequest(DiscoverySearchRequest):
+    search_depth: TavilySearchDepth = "basic"
+    topic: TavilyTopic = "general"
+    chunks_per_source: int = Field(default=3, ge=1, le=3)
+    country: str | None = Field(default=None, min_length=1, max_length=100)
+    time_range: TavilyTimeRange | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    filter_by_published_date: bool = False
+    include_domains: list[str] | None = Field(default=None, max_length=300)
+    include_domains_mode: Literal["restrict", "prefer"] | None = None
+    exclude_domains: list[str] | None = Field(default=None, max_length=150)
+    include_answer: bool | Literal["basic", "advanced"] = False
+    include_favicon: bool = True
+    auto_parameters: bool = False
+    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    providers: list[DiscoveryProvider] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2,
+    )
+
+    @field_validator("country")
+    @classmethod
+    def country_must_be_lowercase(cls, value: str | None) -> str | None:
+        if value is not None:
+            normalized = value.strip()
+            if not normalized or normalized != normalized.casefold():
+                raise ValueError("Country must be a lowercase country name.")
+            if not re.fullmatch(r"[a-z]+(?:[ -][a-z]+)*", normalized):
+                raise ValueError("Country must be a lowercase country name.")
+            return normalized
+        return value
+
+    @field_validator("start_date", "end_date", mode="before")
+    @classmethod
+    def dates_must_use_iso_format(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}",
+            value,
+        ):
+            raise ValueError("Dates must use YYYY-MM-DD format.")
+        return value
+
+    @field_validator("include_domains", "exclude_domains")
+    @classmethod
+    def domains_must_be_valid(
+        cls,
+        value: list[str] | None,
+        info: ValidationInfo,
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        allow_wildcards = info.field_name == "include_domains"
+        normalized_domains: list[str] = []
+        for domain in value:
+            normalized = domain.strip().casefold()
+            if not _DOMAIN_PATTERN.fullmatch(normalized):
+                raise ValueError(
+                    "Domains must be hostnames"
+                    + (" or wildcard hostnames." if allow_wildcards else ".")
+                )
+            if not allow_wildcards and normalized.startswith("*."):
+                raise ValueError("Excluded domains cannot contain wildcards.")
+            if normalized not in normalized_domains:
+                normalized_domains.append(normalized)
+        return normalized_domains
+
+    @field_validator("providers")
+    @classmethod
+    def providers_must_be_unique(
+        cls,
+        value: list[DiscoveryProvider] | None,
+    ) -> list[DiscoveryProvider] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("Search providers must be unique.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_date_filters(self) -> "TavilyDiscoverySearchRequest":
+        if self.time_range is not None and (
+            self.start_date is not None or self.end_date is not None
+        ):
+            raise ValueError(
+                "Choose a time_range or custom start_date/end_date, not both."
+            )
+        if (
+            self.start_date is not None
+            and self.end_date is not None
+            and self.start_date > self.end_date
+        ):
+            raise ValueError("start_date cannot be after end_date.")
+        return self
+
+
 class DiscoveryResult(BaseModel):
     title: str
     url: HttpUrl
     content: str
     score: float
     provider: DiscoveryProvider = DiscoveryProvider.TAVILY
+    favicon: HttpUrl | None = None
+    published_date: str | None = None
 
 
 class DiscoveryProviderFailure(BaseModel):
@@ -56,6 +173,8 @@ class DiscoverySearchResponse(BaseModel):
     query: str
     results: list[DiscoveryResult]
     search_id: UUID | None = None
+    answer: str | None = None
+    credits_used: float | None = None
     provider_jobs: list[DiscoveryProviderJobResponse] = Field(
         default_factory=list,
     )

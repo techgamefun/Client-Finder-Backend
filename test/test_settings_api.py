@@ -66,6 +66,9 @@ def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
         "pagespeed_configured": False,
         "pagespeed_key_source": "unset",
         "selected_discovery_tools": ["tavily"],
+        "tavily_default_search_depth": "basic",
+        "tavily_default_country": None,
+        "tavily_default_exclude_domains": [],
         "octoparse_template": None,
     }
     assert TAVILY_API_KEY not in saved.text
@@ -166,6 +169,51 @@ def test_octoparse_key_template_and_tool_preference_are_persisted(
         assert credential.api_key == octoparse_key
         assert row.selected_discovery_tools == ["tavily", "octoparse"]
         assert row.octoparse_template["template_name"] == "directory_search"
+
+
+def test_tavily_default_search_preferences_are_persisted(client):
+    response = client.put(
+        "/api/v1/settings",
+        json={
+            "tavily_default_search_depth": "advanced",
+            "tavily_default_country": "united states",
+            "tavily_default_exclude_domains": [
+                "JustDial.com",
+                "linkedin.com",
+                "justdial.com",
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tavily_default_search_depth"] == "advanced"
+    assert data["tavily_default_country"] == "united states"
+    assert data["tavily_default_exclude_domains"] == [
+        "justdial.com",
+        "linkedin.com",
+    ]
+
+    with TestingSessionLocal() as db:
+        row = db.get(ApplicationSettings, 1)
+        assert row is not None
+        assert row.tavily_default_search_depth == "advanced"
+        assert row.tavily_default_country == "united states"
+        assert row.tavily_default_exclude_domains == [
+            "justdial.com",
+            "linkedin.com",
+        ]
+
+
+def test_tavily_default_search_preferences_validate_country_and_domains(client):
+    response = client.put(
+        "/api/v1/settings",
+        json={
+            "tavily_default_country": "United States",
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_hypestat_key_is_saved_and_auto_fetch_setting_is_saved(client):

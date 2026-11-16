@@ -22,6 +22,7 @@ from app.services.application_settings import get_hypestat_settings
 from app.services.website_registry import (
     canonical_website_url,
     upsert_website,
+    website_favicon_url,
 )
 
 
@@ -70,6 +71,7 @@ async def save_discovered_websites(
             canonical_url,
             discovery_source=result.provider.value,
             discovery_provider=result.provider.value,
+            favicon_url=website_favicon_url(canonical_url),
         )
         if all(
             keyword.id != search_keyword.id

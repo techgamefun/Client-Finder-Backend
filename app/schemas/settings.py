@@ -1,9 +1,15 @@
 from datetime import datetime
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.schemas.discovery import DiscoveryProvider
+from app.schemas.discovery import DiscoveryProvider, TavilySearchDepth
+
+
+_DOMAIN_PATTERN = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
 
 
 class OctoparseTemplateConfiguration(BaseModel):
@@ -44,6 +50,16 @@ class ApplicationSettingsUpdate(BaseModel):
     hypestat_api_key: str | None = Field(default=None, max_length=512)
     pagespeed_api_key: str | None = Field(default=None, max_length=512)
     hypestat_auto_fetch_enabled: bool | None = None
+    tavily_default_search_depth: TavilySearchDepth | None = None
+    tavily_default_country: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+    )
+    tavily_default_exclude_domains: list[str] | None = Field(
+        default=None,
+        max_length=150,
+    )
     selected_discovery_tools: list[DiscoveryProvider] | None = Field(
         default=None,
         min_length=1,
@@ -61,6 +77,35 @@ class ApplicationSettingsUpdate(BaseModel):
             raise ValueError("Selected discovery tools must be unique.")
         return value
 
+    @field_validator("tavily_default_country")
+    @classmethod
+    def country_must_be_lowercase(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or normalized != normalized.casefold():
+            raise ValueError("Country must be a lowercase country name.")
+        if not re.fullmatch(r"[a-z]+(?:[ -][a-z]+)*", normalized):
+            raise ValueError("Country must be a lowercase country name.")
+        return normalized
+
+    @field_validator("tavily_default_exclude_domains")
+    @classmethod
+    def excluded_domains_must_be_valid(
+        cls,
+        value: list[str] | None,
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        normalized_domains: list[str] = []
+        for domain in value:
+            normalized = domain.strip().casefold()
+            if not _DOMAIN_PATTERN.fullmatch(normalized):
+                raise ValueError("Excluded domains must be hostnames.")
+            if normalized not in normalized_domains:
+                normalized_domains.append(normalized)
+        return normalized_domains
+
 
 class ApplicationSettingsResponse(BaseModel):
     crawl_max_pages: int
@@ -75,6 +120,9 @@ class ApplicationSettingsResponse(BaseModel):
     pagespeed_configured: bool
     pagespeed_key_source: str
     selected_discovery_tools: list[DiscoveryProvider]
+    tavily_default_search_depth: TavilySearchDepth = "basic"
+    tavily_default_country: str | None = None
+    tavily_default_exclude_domains: list[str] = Field(default_factory=list)
     octoparse_template: OctoparseTemplateConfiguration | None = None
 
 

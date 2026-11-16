@@ -12,9 +12,9 @@ from app.models import DiscoveryProviderJob, SearchKeyword
 from app.schemas.discovery import (
     DiscoveryIngestRequest,
     DiscoveryIngestResponse,
-    DiscoverySearchRequest,
     DiscoverySearchResponse,
     DiscoveryProviderJobResponse,
+    TavilyDiscoverySearchRequest,
     DiscoveryWebsiteSaveRequest,
     DiscoveryWebsiteSaveResponse,
     SearchKeywordResponse,
@@ -35,13 +35,16 @@ router = APIRouter(
     response_model=DiscoverySearchResponse,
 )
 async def discover_companies(
-    payload: DiscoverySearchRequest,
+    payload: TavilyDiscoverySearchRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> DiscoverySearchResponse:
-    results, started_jobs, provider_failures = await search_with_selected_tools(
-        query=payload.query,
-        max_results=payload.max_results,
-        db=db,
+    results, started_jobs, provider_failures, answer, credits_used = (
+        await search_with_selected_tools(
+            query=payload.query,
+            max_results=payload.max_results,
+            db=db,
+            options=payload,
+        )
     )
     search = SearchKeyword(
         keyword=payload.query,
@@ -74,6 +77,8 @@ async def discover_companies(
         query=payload.query,
         results=results,
         search_id=search.id,
+        answer=answer,
+        credits_used=credits_used,
         provider_jobs=[
             {
                 "id": job.id,

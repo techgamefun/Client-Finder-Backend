@@ -1,4 +1,5 @@
 from uuid import UUID
+from urllib.parse import urlencode
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -48,6 +49,13 @@ def canonical_website_url(value: str) -> str:
     return f"https://{host}/"
 
 
+def website_favicon_url(website_url: str) -> str:
+    canonical_url = canonical_website_url(website_url)
+    return "https://www.google.com/s2/favicons?" + urlencode(
+        {"domain_url": canonical_url, "sz": "64"}
+    )
+
+
 def upsert_website(
     db: Session,
     website_url: str,
@@ -57,6 +65,7 @@ def upsert_website(
     category: str | None = None,
     crawl_id: UUID | None = None,
     language: str | None = None,
+    favicon_url: str | None = None,
 ) -> Website:
     domain = normalize_domain(website_url)
     if domain is None:
@@ -77,6 +86,8 @@ def upsert_website(
 
     website.website_url = canonical_url
     website.domain = domain
+    if favicon_url and not website.favicon_url:
+        website.favicon_url = favicon_url
     if language and not website.language:
         website.language = language.strip()[:35] or None
     if discovery_source and website.discovery_source in {

@@ -261,6 +261,7 @@ def _website_response(
         id=website.id,
         website_url=website.website_url,
         domain=website.domain,
+        favicon_url=website.favicon_url,
         crawl_id=website.crawl_id,
         is_crawled=website.crawl_id is not None,
         crawl_job_status=(

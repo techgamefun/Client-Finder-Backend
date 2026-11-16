@@ -51,6 +51,9 @@ def update_settings(
         "hypestat_auto_fetch_enabled",
         "selected_discovery_tools",
         "octoparse_template",
+        "tavily_default_search_depth",
+        "tavily_default_country",
+        "tavily_default_exclude_domains",
     }
     if (
         context is not None

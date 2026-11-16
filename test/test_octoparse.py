@@ -195,6 +195,8 @@ def test_octoparse_search_starts_and_polls_configured_template(
             "content": "Independent bicycle retailer",
             "score": 0.5,
             "provider": "octoparse",
+            "favicon": None,
+            "published_date": None,
         }
     ]
 

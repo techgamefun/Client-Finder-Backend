@@ -19,6 +19,7 @@ class WebsiteResponse(BaseModel):
     id: UUID
     website_url: str
     domain: str
+    favicon_url: str | None
     crawl_id: UUID | None
     is_crawled: bool
     crawl_job_status: Literal["queued", "running", "succeeded", "failed"] | None
