@@ -121,11 +121,12 @@ website/domain values are filled only when the source provides a credible
 company association. The API endpoint is
 `POST /api/v1/companies/{id}/sources/crawl` with a `source_url` field.
 
-The crawler and PageSpeed queue pages and active crawl-status views receive job
-updates over the WebSocket endpoint `/api/v1/queue/events`. PostgreSQL publishes
-an event after a job is created or updated, including when a separate worker
-process changes it. The frontend reconnects and refreshes the affected job data
-when it receives an event; it does not continuously poll those job statuses.
+The Jobs page combines the Crawler and PageSpeed queues in separate tabs. The
+Jobs page and active crawl-status views receive job updates over the WebSocket
+endpoint `/api/v1/queue/events`. PostgreSQL publishes an event after a job is
+created or updated, including when a separate worker process changes it. The
+frontend reconnects and refreshes the affected job data when it receives an
+event; it does not continuously poll those job statuses.
 
 The legacy `POST /api/v1/discovery/ingest` endpoint continues to create and
 enrich companies directly and queues mobile and desktop Google PageSpeed
