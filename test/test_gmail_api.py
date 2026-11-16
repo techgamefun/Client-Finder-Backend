@@ -69,7 +69,7 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
     assert start.status_code == 302
     oauth_cookie = start.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE]
     set_cookie_header = start.headers["set-cookie"].lower()
-    assert "path=/" in set_cookie_header
+    assert "path=/api/v1/gmail/callback" in set_cookie_header
     expected_secure = settings.environment == "production"
     assert f"samesite={'none' if expected_secure else 'lax'}" in set_cookie_header
     assert ("secure" in set_cookie_header) == (
@@ -123,7 +123,7 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         "http://localhost:3000/settings?gmail=connected"
     )
     delete_cookie_header = callback.headers["set-cookie"].lower()
-    assert "path=/" in delete_cookie_header
+    assert "path=/api/v1/gmail/callback" in delete_cookie_header
     assert f"samesite={'none' if expected_secure else 'lax'}" in delete_cookie_header
     assert ("secure" in delete_cookie_header) == expected_secure
 
