@@ -65,7 +65,7 @@ CurrentContext = Annotated[
     Depends(require_authenticated_context),
 ]
 GMAIL_OAUTH_STATE_COOKIE = "gmail_oauth_nonce"
-GMAIL_CALLBACK_PATH = "/api/v1/gmail/callback"
+GMAIL_CALLBACK_PATH = "/"
 
 
 @router.get(
@@ -434,6 +434,6 @@ def _frontend_redirect(status_value: str) -> RedirectResponse:
         path=GMAIL_CALLBACK_PATH,
         secure=settings.environment == "production",
         httponly=True,
-        samesite="lax",
+        samesite="none",
     )
     return response

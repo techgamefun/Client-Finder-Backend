@@ -15,7 +15,7 @@ from app.tenant_context import TenantContext
 router = APIRouter(prefix="/auth", tags=["Gmail OAuth"])
 AdminContext = Annotated[TenantContext, Depends(require_admin_context)]
 GMAIL_OAUTH_STATE_COOKIE = "gmail_oauth_nonce"
-GMAIL_CALLBACK_PATH = "/api/v1/gmail/callback"
+GMAIL_CALLBACK_PATH = "/"
 
 
 @router.get("/google/login")
@@ -49,7 +49,6 @@ def start_google_oauth(
         path=GMAIL_CALLBACK_PATH,
         secure=settings.environment == "production",
         httponly=True,
-        # samesite="lax",
         samesite="none",
     )
     return response

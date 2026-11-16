@@ -66,6 +66,13 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         follow_redirects=False,
     )
     assert start.status_code == 302
+    oauth_cookie = start.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE]
+    set_cookie_header = start.headers["set-cookie"].lower()
+    assert "path=/" in set_cookie_header
+    assert "samesite=none" in set_cookie_header
+    assert ("secure" in set_cookie_header) == (
+        settings.environment == "production"
+    )
     google_query = parse_qs(urlsplit(start.headers["location"]).query)
     state = google_query["state"][0]
     decoded_state = gmail_oauth.decode_google_oauth_state(state)
@@ -103,6 +110,7 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         "fetch_google_profile",
         fetch_profile,
     )
+    client.cookies.set(gmail_api.GMAIL_OAUTH_STATE_COOKIE, oauth_cookie)
     callback = client.get(
         "/api/v1/gmail/callback",
         params={"code": "authorization-code", "state": state},
@@ -137,6 +145,8 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
     reconnect_state = parse_qs(
         urlsplit(reconnect.headers["location"]).query
     )["state"][0]
+    reconnect_cookie = reconnect.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE]
+    client.cookies.set(gmail_api.GMAIL_OAUTH_STATE_COOKIE, reconnect_cookie)
     reconnected = client.get(
         "/api/v1/gmail/callback",
         params={"code": "reauthorization-code", "state": reconnect_state},
