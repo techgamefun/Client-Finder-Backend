@@ -49,7 +49,8 @@ def start_google_oauth(
         path=GMAIL_CALLBACK_PATH,
         secure=settings.environment == "production",
         httponly=True,
-        samesite="lax",
+        # samesite="lax",
+        samesite="none",
     )
     return response
 
