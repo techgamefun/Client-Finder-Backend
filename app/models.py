@@ -460,6 +460,12 @@ class EmailCampaignRecipient(Base):
             "campaign_id",
             "status",
         ),
+        Index(
+            "ix_email_campaign_recipients_org_status_sent_at",
+            "org_id",
+            "status",
+            "sent_at",
+        ),
     )
 
 
@@ -581,6 +587,11 @@ class Company(TenantOwnedMixin, Base):
         ),
         Index("ix_companies_name", "name"),
         Index("ix_companies_industry", "industry"),
+        Index(
+            "ix_companies_organization_created_at",
+            "organization_id",
+            "created_at",
+        ),
     )
 
 
@@ -613,6 +624,14 @@ class Contact(TenantOwnedMixin, Base):
 
     company: Mapped["Company"] = relationship(
         back_populates="contacts",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_contacts_company_organization",
+            "company_id",
+            "organization_id",
+        ),
     )
 
 
@@ -854,6 +873,11 @@ class Website(TenantOwnedMixin, Base):
         ),
         Index("ix_websites_page_type", "page_type"),
         Index("ix_websites_created_at", "created_at"),
+        Index(
+            "ix_websites_organization_created_at",
+            "organization_id",
+            "created_at",
+        ),
     )
 
 
@@ -929,6 +953,19 @@ class WebsiteCrawlJob(TenantOwnedMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     crawl: Mapped[WebsiteCrawl | None] = relationship()
+
+    __table_args__ = (
+        Index(
+            "ix_website_crawl_jobs_organization_created_at",
+            "organization_id",
+            "created_at",
+        ),
+        Index(
+            "ix_website_crawl_jobs_organization_completed_at",
+            "organization_id",
+            "completed_at",
+        ),
+    )
 
 
 class ApplicationSettings(TenantOwnedMixin, Base):
@@ -1076,6 +1113,11 @@ class PageSpeedScanJob(TenantOwnedMixin, Base):
         Index(
             "ix_pagespeed_scan_jobs_status",
             "status",
+            "created_at",
+        ),
+        Index(
+            "ix_pagespeed_scan_jobs_organization_created_at",
+            "organization_id",
             "created_at",
         ),
     )

@@ -19,6 +19,7 @@ from app.api.email_campaigns import router as email_campaigns_router
 from app.api.email_templates import router as email_templates_router
 from app.api.pagespeed import router as pagespeed_router
 from app.api.queue_events import router as queue_events_router
+from app.api.overview import router as overview_router
 from app.api.settings import router as settings_router
 from app.api.google_oauth import router as google_oauth_router
 from app.api.websites import router as websites_router
@@ -140,6 +141,11 @@ app.include_router(
 
 app.include_router(
     pagespeed_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    overview_router,
     prefix="/api/v1",
 )
 
