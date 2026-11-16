@@ -126,6 +126,8 @@ app/main.py                 FastAPI app, router registration, health check
   sender, and records delivery outcomes. Successful delivery updates
   `Company.last_email_sent_at`; this email-contact marker is distinct from the
   sales pipeline's `Company.lead_status`.
+- `app/services/gmail.py` uses assigned-account checks for Gmail message reads,
+  replies, composed sends, label listing, and label-filtered message lists.
 - PostgreSQL triggers publish crawl, PageSpeed, and email campaign status
   changes on the
   `queue_job_events` notification channel. `app/api/queue_events.py` forwards

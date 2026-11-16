@@ -272,13 +272,15 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
 
         def send(self, *, userId, body):
             del userId
-            api_calls["thread_id"] = body["threadId"]
+            api_calls["thread_id"] = body.get("threadId")
             raw = body["raw"]
             raw += "=" * (-len(raw) % 4)
             sent_message = BytesParser(policy=policy.default).parsebytes(
                 base64.urlsafe_b64decode(raw)
             )
             api_calls["sent_to"] = sent_message["To"]
+            api_calls["sent_cc"] = sent_message.get("Cc")
+            api_calls["sent_bcc"] = sent_message.get("Bcc")
             api_calls["sent_subject"] = sent_message["Subject"]
             api_calls["sent_in_reply_to"] = sent_message["In-Reply-To"]
             api_calls["sent_body"] = sent_message.get_content()
@@ -286,9 +288,29 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
                 {"id": "sent-message-1", "threadId": "gmail-thread-1"}
             )
 
+    class FakeLabels:
+        def list(self, **parameters):
+            api_calls["labels_parameters"] = parameters
+            return FakeRequest(
+                {
+                    "labels": [
+                        {"id": "INBOX", "name": "INBOX", "type": "system"},
+                        {"id": "SPAM", "name": "SPAM", "type": "system"},
+                        {
+                            "id": "Label_123",
+                            "name": "Customers",
+                            "type": "user",
+                        },
+                    ]
+                }
+            )
+
     class FakeUsers:
         def messages(self):
             return FakeMessages()
+
+        def labels(self):
+            return FakeLabels()
 
     class FakeService:
         def users(self):
@@ -300,6 +322,15 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         f"/api/v1/gmail/accounts/{gmail_account_id}/messages"
     )
     assert denied_inbox.status_code == 403
+    denied_compose = client.post(
+        f"/api/v1/gmail/accounts/{gmail_account_id}/messages",
+        json={
+            "to": ["recipient@example.test"],
+            "subject": "Hello",
+            "body_text": "Message",
+        },
+    )
+    assert denied_compose.status_code == 403
 
     with TestClient(main.app) as member_client:
         login = member_client.post(
@@ -314,6 +345,13 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         assert assigned_accounts.status_code == 200
         assert assigned_accounts.json()[0]["id"] == str(gmail_account_id)
 
+        labels = member_client.get(
+            f"/api/v1/gmail/accounts/{gmail_account_id}/labels"
+        )
+        assert labels.status_code == 200
+        assert labels.json()[-1]["name"] == "Customers"
+        assert api_calls["labels_parameters"] == {"userId": "me"}
+
         inbox = member_client.get(
             f"/api/v1/gmail/accounts/{gmail_account_id}/messages",
             params={"q": "from:sender@example.com", "max_results": 5},
@@ -321,6 +359,14 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         assert inbox.status_code == 200
         assert inbox.json()["messages"][0]["is_unread"] is True
         assert api_calls["list_parameters"]["q"] == "from:sender@example.com"
+        assert api_calls["list_parameters"]["labelIds"] == ["INBOX"]
+
+        spam = member_client.get(
+            f"/api/v1/gmail/accounts/{gmail_account_id}/messages",
+            params={"label_id": "SPAM"},
+        )
+        assert spam.status_code == 200
+        assert api_calls["list_parameters"]["labelIds"] == ["SPAM"]
 
         detail = member_client.get(
             f"/api/v1/gmail/accounts/{gmail_account_id}/messages/gmail-message-1"
@@ -341,6 +387,39 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         assert api_calls["sent_subject"] == "Re: A question"
         assert api_calls["sent_in_reply_to"] == "<original@example.com>"
         assert api_calls["sent_body"] == "Thanks for reaching out.\r\n"
+
+        composed = member_client.post(
+            f"/api/v1/gmail/accounts/{gmail_account_id}/messages",
+            json={
+                "to": ["jane@example.test", "alex@example.test"],
+                "cc": ["copy@example.test"],
+                "bcc": ["hidden@example.test"],
+                "subject": "A new message",
+                "body_text": "Hello there",
+            },
+        )
+        assert composed.status_code == 201
+        assert composed.json() == {
+            "id": "sent-message-1",
+            "thread_id": "gmail-thread-1",
+        }
+        assert api_calls["sent_to"] == (
+            "jane@example.test, alex@example.test"
+        )
+        assert api_calls["sent_cc"] == "copy@example.test"
+        assert api_calls["sent_bcc"] == "hidden@example.test"
+        assert api_calls["sent_subject"] == "A new message"
+        assert api_calls["sent_body"] == "Hello there\r\n"
+
+        invalid_compose = member_client.post(
+            f"/api/v1/gmail/accounts/{gmail_account_id}/messages",
+            json={
+                "to": ["not an email"],
+                "subject": "Invalid",
+                "body_text": "Message",
+            },
+        )
+        assert invalid_compose.status_code == 422
 
     accounts = client.get("/api/v1/gmail/accounts")
     assert accounts.status_code == 200

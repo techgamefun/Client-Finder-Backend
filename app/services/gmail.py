@@ -26,9 +26,11 @@ from app.models import (
     UserGmailAssignment,
 )
 from app.schemas.gmail import (
+    GmailLabelResponse,
     GmailMessageDetailResponse,
     GmailMessageSummary,
     GmailMessagesResponse,
+    GmailComposeInput,
     GmailReplyResponse,
 )
 from app.tenant_context import get_tenant_context
@@ -199,6 +201,7 @@ def list_gmail_messages(
     db: Session,
     gmail_account_id: UUID,
     *,
+    label_id: str,
     query: str | None,
     page_token: str | None,
     max_results: int,
@@ -206,7 +209,7 @@ def list_gmail_messages(
     service = get_gmail_service(db, gmail_account_id)
     parameters: dict[str, Any] = {
         "userId": "me",
-        "labelIds": ["INBOX"],
+        "labelIds": [label_id],
         "maxResults": max_results,
     }
     if query:
@@ -216,7 +219,7 @@ def list_gmail_messages(
 
     response = _execute_google_request(
         service.users().messages().list(**parameters),
-        missing_message_detail="The Gmail inbox could not be loaded.",
+        missing_message_detail="Gmail messages could not be loaded.",
     )
     message_items = response.get("messages", [])
     if not isinstance(message_items, list):
@@ -256,6 +259,37 @@ def list_gmail_messages(
         next_page_token=next_page_token,
         result_size_estimate=result_size,
     )
+
+
+def list_gmail_labels(
+    db: Session,
+    gmail_account_id: UUID,
+) -> list[GmailLabelResponse]:
+    service = get_gmail_service(db, gmail_account_id)
+    response = _execute_google_request(
+        service.users().labels().list(userId="me"),
+        missing_message_detail="Gmail labels could not be loaded.",
+    )
+    labels = response.get("labels", [])
+    if not isinstance(labels, list):
+        raise _invalid_gmail_response()
+
+    result: list[GmailLabelResponse] = []
+    for label in labels:
+        if not isinstance(label, dict):
+            raise _invalid_gmail_response()
+        label_id = label.get("id")
+        name = label.get("name")
+        label_type = label.get("type")
+        if not all(
+            isinstance(value, str) and value
+            for value in (label_id, name, label_type)
+        ):
+            raise _invalid_gmail_response()
+        result.append(
+            GmailLabelResponse(id=label_id, name=name, type=label_type)
+        )
+    return result
 
 
 def get_gmail_message(
@@ -348,6 +382,45 @@ def reply_to_gmail_message(
             body={"raw": raw_message, "threadId": thread_id},
         ),
         missing_message_detail="The reply could not be sent.",
+    )
+    return GmailReplyResponse(
+        id=_required_string(sent, "id"),
+        thread_id=_required_string(sent, "threadId"),
+    )
+
+
+def compose_gmail_message(
+    db: Session,
+    gmail_account_id: UUID,
+    payload: GmailComposeInput,
+) -> GmailReplyResponse:
+    account = _get_assigned_gmail_account(db, gmail_account_id)
+    message = EmailMessage(policy=policy.SMTP)
+    message["To"] = ", ".join(
+        str(Address(addr_spec=address)) for address in payload.to
+    )
+    if payload.cc:
+        message["Cc"] = ", ".join(
+            str(Address(addr_spec=address)) for address in payload.cc
+        )
+    if payload.bcc:
+        message["Bcc"] = ", ".join(
+            str(Address(addr_spec=address)) for address in payload.bcc
+        )
+    message["From"] = account.email_address
+    message["Subject"] = _safe_header(payload.subject)
+    message.set_content(payload.body_text)
+    raw_message = (
+        base64.urlsafe_b64encode(message.as_bytes())
+        .decode("ascii")
+        .rstrip("=")
+    )
+    sent = _execute_google_request(
+        _build_gmail_service(account)
+        .users()
+        .messages()
+        .send(userId="me", body={"raw": raw_message}),
+        missing_message_detail="The email could not be sent.",
     )
     return GmailReplyResponse(
         id=_required_string(sent, "id"),

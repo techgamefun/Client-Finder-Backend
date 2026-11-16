@@ -24,6 +24,8 @@ from app.models import (
 from app.schemas.gmail import (
     AssignedGmailAccountResponse,
     ConnectedGmailAccountResponse,
+    GmailComposeInput,
+    GmailLabelResponse,
     GmailMessageDetailResponse,
     GmailMessagesResponse,
     GmailReplyInput,
@@ -33,8 +35,10 @@ from app.schemas.gmail import (
     UserGmailAssignmentResponse,
 )
 from app.services.gmail import (
+    compose_gmail_message,
     encrypt_refresh_token,
     get_gmail_message,
+    list_gmail_labels,
     list_gmail_messages,
     reply_to_gmail_message,
 )
@@ -241,6 +245,18 @@ def list_assigned_gmail_accounts(
 
 
 @router.get(
+    "/accounts/{gmail_account_id}/labels",
+    response_model=list[GmailLabelResponse],
+)
+def read_gmail_labels(
+    gmail_account_id: UUID,
+    _context: CurrentContext,
+    db: DatabaseSession,
+) -> list[GmailLabelResponse]:
+    return list_gmail_labels(db, gmail_account_id)
+
+
+@router.get(
     "/accounts/{gmail_account_id}/messages",
     response_model=GmailMessagesResponse,
 )
@@ -248,6 +264,7 @@ def read_gmail_inbox(
     gmail_account_id: UUID,
     _context: CurrentContext,
     db: DatabaseSession,
+    label_id: str = Query(default="INBOX", min_length=1, max_length=225),
     q: str | None = Query(default=None, max_length=200),
     page_token: str | None = Query(default=None, max_length=4096),
     max_results: int = Query(default=25, ge=1, le=50),
@@ -255,10 +272,25 @@ def read_gmail_inbox(
     return list_gmail_messages(
         db,
         gmail_account_id,
+        label_id=label_id,
         query=q,
         page_token=page_token,
         max_results=max_results,
     )
+
+
+@router.post(
+    "/accounts/{gmail_account_id}/messages",
+    response_model=GmailReplyResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def compose_message(
+    gmail_account_id: UUID,
+    payload: GmailComposeInput,
+    _context: CurrentContext,
+    db: DatabaseSession,
+) -> GmailReplyResponse:
+    return compose_gmail_message(db, gmail_account_id, payload)
 
 
 @router.get(

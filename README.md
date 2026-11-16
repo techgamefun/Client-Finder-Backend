@@ -208,9 +208,10 @@ organization administrator.
 
 After connecting an account, administrators can assign it to members under
 **Settings → Gmail accounts**. Assigned members open **Gmail** in the workspace
-navigation to search and page through the inbox, read messages, and send
-threaded replies. Message HTML is shown as plain text; the inbox does not expose
-message content from accounts that are not assigned to the signed-in member.
+navigation to search and page through the inbox, open Spam and custom labels,
+read messages, send new messages, and send threaded replies. Message HTML is
+shown as plain text; the inbox does not expose message content from accounts
+that are not assigned to the signed-in member.
 
 Organization email templates are available under
 `/api/v1/orgs/{org_id}/templates`. Administrators can create, update, and
