@@ -2,11 +2,14 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
+import pytest
+
 from app.models import (
     Company,
     ConnectedGmailAccount,
     Contact,
     EmailCampaign,
+    EmailCampaignDelivery,
     EmailCampaignRecipient,
     EmailTemplate,
     UserGmailAssignment,
@@ -203,6 +206,68 @@ def test_campaign_preview_and_start_round_robin_accounts(client):
     }
 
 
+def test_campaign_preview_excludes_suppressed_contacts(client):
+    organization_id, user_id = _session_ids(client)
+    account_id = _create_account(organization_id, user_id)
+    template_id = _create_template(client, organization_id)
+    company_id, _ = _create_company_with_contact(
+        organization_id,
+        email="blocked@example.test",
+    )
+    created = _create_campaign(
+        client,
+        organization_id,
+        template_id,
+        [account_id],
+    )
+    assert created.status_code == 201, created.text
+
+    suppressed = client.post(
+        "/api/v1/email-suppressions",
+        json={
+            "target_type": "email",
+            "value": "BLOCKED@EXAMPLE.TEST",
+            "reason": "manual_dnc",
+        },
+    )
+    assert suppressed.status_code == 201, suppressed.text
+
+    preview = client.post(
+        f"/api/v1/orgs/{organization_id}/campaigns/{created.json()['id']}/preview",
+        json={"company_ids": [str(company_id)]},
+    )
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["eligible_contact_count"] == 0
+    assert preview.json()["skipped_suppressed_contacts"] == 1
+    assert preview.json()["skipped_companies_without_email"] == 0
+    assert preview.json()["skipped_company_ids"] == []
+
+
+def test_campaign_accepts_configured_follow_up_steps(client):
+    organization_id, user_id = _session_ids(client)
+    account_id = _create_account(organization_id, user_id)
+    first_template = _create_template(client, organization_id)
+    follow_up_template = _create_template(client, organization_id)
+
+    created = _create_campaign(
+        client,
+        organization_id,
+        first_template,
+        [account_id],
+        follow_up_steps=[
+            {"template_id": str(follow_up_template), "delay_days": 4}
+        ],
+        verify_mx=False,
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["follow_up_steps"] == [
+        {"template_id": str(follow_up_template), "delay_days": 4}
+    ]
+    assert created.json()["verify_mx"] is False
+
+
 def test_campaign_gmail_assignment_is_required(client):
     organization_id, user_id = _session_ids(client)
     unassigned_account = _create_account(
@@ -316,9 +381,10 @@ def test_campaign_worker_sends_and_completes_campaign(client, monkeypatch):
             daily_limit_per_account=40,
             min_delay_seconds=180,
             max_delay_seconds=420,
-            send_window_start_hour=9,
-            send_window_end_hour=17,
+            send_window_start_hour=0,
+            send_window_end_hour=23,
             timezone="UTC",
+            verify_mx=False,
             status="running",
         )
         db.add(campaign)
@@ -382,6 +448,112 @@ def test_campaign_worker_sends_and_completes_campaign(client, monkeypatch):
     assert company_response.json()["last_email_sent_at"] is not None
 
 
+def test_campaign_worker_schedules_and_sends_follow_up_steps(client, monkeypatch):
+    organization_id, user_id = _session_ids(client)
+    account_id = _create_account(organization_id, user_id)
+    template_id = _create_template(client, organization_id)
+    follow_up_template_response = client.post(
+        f"/api/v1/orgs/{organization_id}/templates",
+        json={
+            "name": "Follow-up",
+            "subject": "Follow-up {{ contact.first_name }}",
+            "body_content": "Following up.",
+        },
+    )
+    assert follow_up_template_response.status_code == 201
+    follow_up_template_id = UUID(follow_up_template_response.json()["id"])
+    company_id, contact_id = _create_company_with_contact(organization_id)
+
+    with TestingSessionLocal() as db:
+        campaign = EmailCampaign(
+            org_id=organization_id,
+            created_by=user_id,
+            name="Sequence worker test",
+            template_id=template_id,
+            follow_up_steps=[
+                {"template_id": str(follow_up_template_id), "delay_days": 3}
+            ],
+            gmail_account_ids=[str(account_id)],
+            daily_limit_per_account=40,
+            min_delay_seconds=180,
+            max_delay_seconds=420,
+            send_window_start_hour=0,
+            send_window_end_hour=23,
+            timezone="UTC",
+            verify_mx=False,
+            status="running",
+        )
+        db.add(campaign)
+        db.flush()
+        recipient = EmailCampaignRecipient(
+            org_id=organization_id,
+            campaign_id=campaign.id,
+            company_id=company_id,
+            contact_id=contact_id,
+            gmail_account_id=account_id,
+            to_email="jane@example.test",
+            scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            status="pending",
+        )
+        db.add(recipient)
+        db.commit()
+        recipient_id = recipient.id
+        campaign_id = campaign.id
+
+    sends = []
+
+    def fake_send(db, gmail_account_id, *, recipient_email, subject, body_content):
+        sends.append(subject)
+        return GmailSendResult(
+            message_id=f"sequence-message-{len(sends)}",
+            thread_id=f"sequence-thread-{len(sends)}",
+            sender_email="sender@example.test",
+        )
+
+    monkeypatch.setattr(campaign_worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(campaign_worker, "send_gmail_message", fake_send)
+
+    assert asyncio.run(campaign_worker.process_due_campaign_recipient()) is True
+    with TestingSessionLocal() as db:
+        recipient = db.get(EmailCampaignRecipient, recipient_id)
+        first_sent_at = recipient.sent_at.replace(tzinfo=timezone.utc)
+        assert recipient.status == "pending"
+        assert recipient.current_step == 1
+        assert recipient.sent_count == 1
+        assert recipient.scheduled_at.replace(tzinfo=timezone.utc) >= (
+            first_sent_at + timedelta(days=2)
+        )
+        recipient.scheduled_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.commit()
+
+    assert asyncio.run(campaign_worker.process_due_campaign_recipient()) is True
+    with TestingSessionLocal() as db:
+        recipient = db.get(EmailCampaignRecipient, recipient_id)
+        campaign = db.get(EmailCampaign, campaign_id)
+        deliveries = db.query(EmailCampaignDelivery).filter_by(
+            recipient_id=recipient_id
+        ).order_by(EmailCampaignDelivery.step_index).all()
+        assert recipient.status == "sent"
+        assert recipient.current_step == 2
+        assert recipient.sent_count == 2
+        assert campaign.status == "completed"
+        assert [delivery.step_index for delivery in deliveries] == [0, 1]
+
+    assert sends == ["Hello Jane", "Follow-up Jane"]
+    campaign_detail = client.get(
+        f"/api/v1/orgs/{organization_id}/campaigns/{campaign_id}"
+    )
+    assert campaign_detail.status_code == 200
+    assert campaign_detail.json()["recipient_counts"]["sent_messages"] == 2
+    assert campaign_detail.json()["recipient_counts"]["sent"] == 1
+    account_health = client.get("/api/v1/gmail/accounts/health")
+    assert account_health.status_code == 200, account_health.text
+    account_metrics = next(
+        item for item in account_health.json() if item["id"] == str(account_id)
+    )
+    assert account_metrics["sent_30d"] == 2
+
+
 def test_campaign_worker_failure_does_not_mark_company_contacted(
     client,
     monkeypatch,
@@ -401,9 +573,10 @@ def test_campaign_worker_failure_does_not_mark_company_contacted(
             daily_limit_per_account=40,
             min_delay_seconds=180,
             max_delay_seconds=420,
-            send_window_start_hour=9,
-            send_window_end_hour=17,
+            send_window_start_hour=0,
+            send_window_end_hour=23,
             timezone="UTC",
+            verify_mx=False,
             status="running",
         )
         db.add(campaign)
@@ -435,6 +608,91 @@ def test_campaign_worker_failure_does_not_mark_company_contacted(
         failed_company = db.get(Company, company_id)
         assert failed_recipient.status == "failed"
         assert failed_company.last_email_sent_at is None
+
+
+@pytest.mark.parametrize(
+    ("verification_status", "expected_status"),
+    [("no_mx", "failed"), ("dns_error", "pending")],
+)
+def test_campaign_worker_handles_unverified_mail_routes(
+    client,
+    monkeypatch,
+    verification_status,
+    expected_status,
+):
+    organization_id, user_id = _session_ids(client)
+    account_id = _create_account(organization_id, user_id)
+    template_id = _create_template(client, organization_id)
+    company_id, contact_id = _create_company_with_contact(organization_id)
+
+    with TestingSessionLocal() as db:
+        campaign = EmailCampaign(
+            org_id=organization_id,
+            created_by=user_id,
+            name="MX verification test",
+            template_id=template_id,
+            gmail_account_ids=[str(account_id)],
+            daily_limit_per_account=40,
+            min_delay_seconds=180,
+            max_delay_seconds=420,
+            send_window_start_hour=0,
+            send_window_end_hour=23,
+            timezone="UTC",
+            verify_mx=True,
+            status="running",
+        )
+        db.add(campaign)
+        db.flush()
+        recipient = EmailCampaignRecipient(
+            org_id=organization_id,
+            campaign_id=campaign.id,
+            company_id=company_id,
+            contact_id=contact_id,
+            gmail_account_id=account_id,
+            to_email="jane@example.test",
+            scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            status="pending",
+        )
+        db.add(recipient)
+        db.commit()
+        recipient_id = recipient.id
+        campaign_id = campaign.id
+
+    send_called = False
+
+    def fake_send(*_args, **_kwargs):
+        nonlocal send_called
+        send_called = True
+        raise AssertionError("An unverified address must not be sent.")
+
+    monkeypatch.setattr(campaign_worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(
+        campaign_worker,
+        "verify_email_mx",
+        lambda _email: (verification_status, None),
+    )
+    monkeypatch.setattr(campaign_worker, "send_gmail_message", fake_send)
+
+    assert asyncio.run(campaign_worker.process_due_campaign_recipient()) is True
+    with TestingSessionLocal() as db:
+        recipient = db.get(EmailCampaignRecipient, recipient_id)
+        assert recipient.status == expected_status
+        assert recipient.email_verification_status == verification_status
+        assert recipient.email_verification_checked_at is not None
+        if verification_status == "dns_error":
+            assert recipient.scheduled_at.replace(
+                tzinfo=timezone.utc
+            ) > datetime.now(timezone.utc)
+    campaign_detail = client.get(
+        f"/api/v1/orgs/{organization_id}/campaigns/{campaign_id}"
+    )
+    assert campaign_detail.json()["recipient_counts"]["unverified"] == 1
+    account_health = client.get("/api/v1/gmail/accounts/health")
+    account_metrics = next(
+        item for item in account_health.json() if item["id"] == str(account_id)
+    )
+    assert account_metrics["unverified_30d"] == 1
+    assert send_called is False
 
 
 def test_scheduler_respects_business_hours_weekends_and_daily_cap(monkeypatch):

@@ -1,5 +1,6 @@
 import base64
 import binascii
+import html
 import re
 from dataclasses import dataclass
 from email import policy
@@ -34,6 +35,11 @@ from app.schemas.gmail import (
     GmailReplyResponse,
 )
 from app.tenant_context import get_tenant_context
+from app.services.email_suppression import (
+    build_unsubscribe_url,
+    email_suppression_reasons,
+    normalize_email,
+)
 
 
 GMAIL_API_SCOPES = (
@@ -112,13 +118,26 @@ def send_gmail_message(
             detail="The selected contact does not have a valid email address.",
         ) from exc
 
+    normalized_recipient = normalize_email(str(recipient))
+    _ensure_recipients_not_suppressed(
+        db,
+        account.org_id,
+        [normalized_recipient],
+    )
+    unsubscribe_urls, one_click_urls = _build_unsubscribe_links(
+        account.org_id,
+        [normalized_recipient],
+    )
     plain_text = _html_to_plain_text(body_content)
+    plain_text = _append_unsubscribe_text(plain_text, unsubscribe_urls)
+    html_content = _append_unsubscribe_html(body_content, unsubscribe_urls)
     message = EmailMessage(policy=policy.SMTP)
     message["To"] = recipient
     message["From"] = account.email_address
     message["Subject"] = subject
+    _add_unsubscribe_headers(message, unsubscribe_urls, one_click_urls)
     message.set_content(plain_text)
-    message.add_alternative(body_content, subtype="html")
+    message.add_alternative(html_content, subtype="html")
     raw_message = (
         base64.urlsafe_b64encode(message.as_bytes())
         .decode("ascii")
@@ -327,7 +346,8 @@ def reply_to_gmail_message(
     message_id: str,
     body_text: str,
 ) -> GmailReplyResponse:
-    service = get_gmail_service(db, gmail_account_id)
+    account = _get_assigned_gmail_account(db, gmail_account_id)
+    service = _build_gmail_service(account)
     original = _get_message_metadata(service, message_id)
     thread_id = _required_string(original, "threadId")
     recipient_header = (
@@ -345,6 +365,20 @@ def reply_to_gmail_message(
             detail="The original message does not have a valid reply address.",
         )
 
+    normalized_recipients = [
+        normalize_email(address)
+        for address in recipients
+    ]
+    _ensure_recipients_not_suppressed(
+        db,
+        account.org_id,
+        normalized_recipients,
+    )
+    unsubscribe_urls, one_click_urls = _build_unsubscribe_links(
+        account.org_id,
+        normalized_recipients,
+    )
+
     subject = _message_header(original, "Subject")
     subject = _safe_header(subject or "")
     if subject and re.match(r"^\s*re\s*:", subject, flags=re.IGNORECASE) is None:
@@ -352,7 +386,7 @@ def reply_to_gmail_message(
 
     reply = EmailMessage(policy=policy.SMTP)
     reply["To"] = recipients[0]
-    reply["From"] = _assigned_account_email(db, gmail_account_id)
+    reply["From"] = account.email_address
     if subject:
         reply["Subject"] = subject
     original_message_id = _safe_header(
@@ -369,7 +403,8 @@ def reply_to_gmail_message(
             if part
         )
         reply["References"] = references
-    reply.set_content(body_text)
+    _add_unsubscribe_headers(reply, unsubscribe_urls, one_click_urls)
+    reply.set_content(_append_unsubscribe_text(body_text, unsubscribe_urls))
     raw_message = (
         base64.urlsafe_b64encode(reply.as_bytes())
         .decode("ascii")
@@ -395,6 +430,13 @@ def compose_gmail_message(
     payload: GmailComposeInput,
 ) -> GmailReplyResponse:
     account = _get_assigned_gmail_account(db, gmail_account_id)
+    recipients = [*payload.to, *payload.cc, *payload.bcc]
+    normalized_recipients = [normalize_email(address) for address in recipients]
+    _ensure_recipients_not_suppressed(db, account.org_id, normalized_recipients)
+    unsubscribe_urls, one_click_urls = _build_unsubscribe_links(
+        account.org_id,
+        normalized_recipients,
+    )
     message = EmailMessage(policy=policy.SMTP)
     message["To"] = ", ".join(
         str(Address(addr_spec=address)) for address in payload.to
@@ -409,7 +451,10 @@ def compose_gmail_message(
         )
     message["From"] = account.email_address
     message["Subject"] = _safe_header(payload.subject)
-    message.set_content(payload.body_text)
+    _add_unsubscribe_headers(message, unsubscribe_urls, one_click_urls)
+    message.set_content(
+        _append_unsubscribe_text(payload.body_text, unsubscribe_urls)
+    )
     raw_message = (
         base64.urlsafe_b64encode(message.as_bytes())
         .decode("ascii")
@@ -536,6 +581,75 @@ def _html_to_plain_text(html_content: str) -> str:
     parser.feed(html_content)
     parser.close()
     return parser.text()
+
+
+def _ensure_recipients_not_suppressed(
+    db: Session,
+    organization_id: UUID,
+    recipients: list[str],
+) -> None:
+    suppressions = email_suppression_reasons(db, organization_id, recipients)
+    if suppressions:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Sending is blocked because this address is on the "
+                "platform-wide do-not-contact list."
+            ),
+        )
+
+
+def _build_unsubscribe_links(
+    organization_id: UUID,
+    recipients: list[str],
+) -> tuple[list[str], list[str]]:
+    unique_recipients = list(dict.fromkeys(recipients))
+    if len(unique_recipients) == 1:
+        recipient = unique_recipients[0]
+        return (
+            [build_unsubscribe_url(organization_id, recipient)],
+            [build_unsubscribe_url(organization_id, recipient, one_click=True)],
+        )
+    return [
+        build_unsubscribe_url(
+            organization_id,
+            permitted_emails=unique_recipients,
+        )
+    ], []
+
+
+def _add_unsubscribe_headers(
+    message: EmailMessage,
+    unsubscribe_urls: list[str],
+    one_click_urls: list[str],
+) -> None:
+    header_urls = one_click_urls or unsubscribe_urls
+    message["List-Unsubscribe"] = ", ".join(
+        f"<{url}>" for url in dict.fromkeys(header_urls)
+    )
+    if one_click_urls:
+        message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+
+
+def _append_unsubscribe_text(body: str, urls: list[str]) -> str:
+    links = "\n".join(
+        f"Unsubscribe: {url}"
+        for url in dict.fromkeys(urls)
+    )
+    return f"{body.rstrip()}\n\n--\nTo stop receiving emails, use this link:\n{links}"
+
+
+def _append_unsubscribe_html(body: str, urls: list[str]) -> str:
+    links = " ".join(
+        f'<a href="{html.escape(url, quote=True)}">Unsubscribe</a>'
+        for url in dict.fromkeys(urls)
+    )
+    return (
+        f"{body}\n"
+        '<hr><p style="font-size:12px;color:#666">'
+        "To stop receiving emails, "
+        f"{links}.</p>"
+    )
 
 
 def _collect_mime_text(payload: dict[str, Any], target_mime_type: str) -> str:

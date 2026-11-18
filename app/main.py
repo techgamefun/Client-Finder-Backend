@@ -16,6 +16,7 @@ from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
 from app.api.gmail import router as gmail_router
 from app.api.email_campaigns import router as email_campaigns_router
+from app.api.email_suppression import router as email_suppression_router
 from app.api.email_templates import router as email_templates_router
 from app.api.pagespeed import router as pagespeed_router
 from app.api.queue_events import router as queue_events_router
@@ -113,6 +114,11 @@ app.include_router(
 
 app.include_router(
     email_campaigns_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    email_suppression_router,
     prefix="/api/v1",
 )
 

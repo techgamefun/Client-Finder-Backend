@@ -15,9 +15,14 @@ from app.models import (
     ConnectedGmailAccount,
     Contact,
     EmailCampaign,
+    EmailCampaignDelivery,
     EmailCampaignRecipient,
     EmailTemplate,
     UserGmailAssignment,
+)
+from app.services.email_suppression import (
+    email_suppression_reasons,
+    normalize_email,
 )
 
 
@@ -34,18 +39,20 @@ def validate_campaign_resources(
     org_id: UUID,
     user_id: UUID,
     template_id: UUID,
+    follow_up_template_ids: Sequence[UUID] = (),
     gmail_account_ids: Sequence[UUID],
 ) -> None:
-    template = db.scalar(
-        select(EmailTemplate).where(
-            EmailTemplate.id == template_id,
+    template_ids = [template_id, *follow_up_template_ids]
+    templates = db.scalars(
+        select(EmailTemplate.id).where(
+            EmailTemplate.id.in_(template_ids),
             EmailTemplate.org_id == org_id,
         )
-    )
-    if template is None:
+    ).all()
+    if len(templates) != len(set(template_ids)):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Email template not found.",
+            detail="One or more campaign email templates were not found.",
         )
 
     validate_gmail_account_access(
@@ -116,7 +123,7 @@ def get_eligible_contacts(
     *,
     org_id: UUID,
     company_ids: Sequence[UUID],
-) -> tuple[list[tuple[UUID, UUID, str]], list[UUID]]:
+) -> tuple[list[tuple[UUID, UUID, str]], list[UUID], int]:
     companies = db.scalars(
         select(Company).where(
             Company.organization_id == org_id,
@@ -143,21 +150,34 @@ def get_eligible_contacts(
         )
     )
 
-    eligible: list[tuple[UUID, UUID, str]] = []
+    candidates: list[tuple[UUID, UUID, str]] = []
     companies_with_email: set[UUID] = set()
     for contact in contacts:
         email = _normalize_recipient_email(contact.business_email)
         if email is None:
             continue
-        eligible.append((contact.company_id, contact.id, email))
+        candidates.append((contact.company_id, contact.id, email))
         companies_with_email.add(contact.company_id)
 
+    suppression_reasons = email_suppression_reasons(
+        db,
+        org_id,
+        [email for _, _, email in candidates],
+    )
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate[2].lower() not in suppression_reasons
+    ]
     skipped_company_ids = [
         company_id
         for company_id in company_ids
         if company_id not in companies_with_email
     ]
-    return eligible, skipped_company_ids
+    skipped_suppressed_contacts = sum(
+        candidate[2] in suppression_reasons for candidate in candidates
+    )
+    return eligible, skipped_company_ids, skipped_suppressed_contacts
 
 
 def preview_campaign(
@@ -173,7 +193,7 @@ def preview_campaign(
         user_id=campaign.created_by,
         gmail_account_ids=_campaign_account_ids(campaign),
     )
-    contacts, skipped_company_ids = get_eligible_contacts(
+    contacts, skipped_company_ids, skipped_suppressed_contacts = get_eligible_contacts(
         db,
         org_id=campaign.org_id,
         company_ids=company_ids,
@@ -191,6 +211,7 @@ def preview_campaign(
         "eligible_contact_count": len(contacts),
         "skipped_companies_without_email": len(skipped_company_ids),
         "skipped_company_ids": skipped_company_ids,
+        "skipped_suppressed_contacts": skipped_suppressed_contacts,
         "daily_capacity_per_day": (
             len(campaign.gmail_account_ids) * campaign.daily_limit_per_account
         ),
@@ -216,7 +237,7 @@ def start_campaign(
         user_id=campaign.created_by,
         gmail_account_ids=_campaign_account_ids(campaign),
     )
-    contacts, _ = get_eligible_contacts(
+    contacts, _, _ = get_eligible_contacts(
         db,
         org_id=campaign.org_id,
         company_ids=company_ids,
@@ -376,6 +397,10 @@ def campaign_recipient_counts(
             "sent": 0,
             "failed": 0,
             "cancelled": 0,
+            "replied": 0,
+            "bounced": 0,
+            "sent_messages": 0,
+            "unverified": 0,
         }
         for campaign_id in campaign_ids
     }
@@ -396,6 +421,31 @@ def campaign_recipient_counts(
     for campaign_id, recipient_status, count in rows:
         if recipient_status in result[campaign_id]:
             result[campaign_id][recipient_status] = count
+    delivery_counts = db.execute(
+        select(
+            EmailCampaignDelivery.campaign_id,
+            func.count(),
+        )
+        .where(EmailCampaignDelivery.campaign_id.in_(campaign_ids))
+        .group_by(EmailCampaignDelivery.campaign_id)
+    ).all()
+    for campaign_id, count in delivery_counts:
+        result[campaign_id]["sent_messages"] = count
+    verification_counts = db.execute(
+        select(
+            EmailCampaignRecipient.campaign_id,
+            func.count(),
+        )
+        .where(
+            EmailCampaignRecipient.campaign_id.in_(campaign_ids),
+            EmailCampaignRecipient.email_verification_status.in_(
+                ("no_mx", "dns_error", "invalid")
+            ),
+        )
+        .group_by(EmailCampaignRecipient.campaign_id)
+    ).all()
+    for campaign_id, count in verification_counts:
+        result[campaign_id]["unverified"] = count
     return result
 
 
@@ -532,7 +582,10 @@ def _normalize_recipient_email(value: str | None) -> str | None:
         return None
     if not address.username or not address.domain:
         return None
-    return email
+    try:
+        return normalize_email(email)
+    except HTTPException:
+        return None
 
 
 def _business_day_start(
@@ -564,16 +617,15 @@ def _sent_counts_today(
     local_end = local_start + timedelta(days=1)
     rows = db.execute(
         select(
-            EmailCampaignRecipient.gmail_account_id,
+            EmailCampaignDelivery.gmail_account_id,
             func.count(),
         )
         .where(
-            EmailCampaignRecipient.campaign_id == campaign.id,
-            EmailCampaignRecipient.status == "sent",
-            EmailCampaignRecipient.sent_at >= local_start.astimezone(timezone.utc),
-            EmailCampaignRecipient.sent_at < local_end.astimezone(timezone.utc),
+            EmailCampaignDelivery.campaign_id == campaign.id,
+            EmailCampaignDelivery.sent_at >= local_start.astimezone(timezone.utc),
+            EmailCampaignDelivery.sent_at < local_end.astimezone(timezone.utc),
         )
-        .group_by(EmailCampaignRecipient.gmail_account_id)
+        .group_by(EmailCampaignDelivery.gmail_account_id)
     ).all()
     return {account_id: count for account_id, count in rows}
 

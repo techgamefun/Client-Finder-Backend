@@ -68,6 +68,9 @@ def create_email_campaign(
         org_id=org_id,
         user_id=context.user_id,
         template_id=payload.template_id,
+        follow_up_template_ids=[
+            step.template_id for step in payload.follow_up_steps
+        ],
         gmail_account_ids=payload.gmail_account_ids,
     )
     campaign = EmailCampaign(
@@ -75,6 +78,14 @@ def create_email_campaign(
         created_by=context.user_id,
         name=payload.name,
         template_id=payload.template_id,
+        follow_up_steps=[
+            {
+                "template_id": str(step.template_id),
+                "delay_days": step.delay_days,
+            }
+            for step in payload.follow_up_steps
+        ],
+        verify_mx=payload.verify_mx,
         gmail_account_ids=[str(account_id) for account_id in payload.gmail_account_ids],
         daily_limit_per_account=payload.daily_limit_per_account,
         min_delay_seconds=payload.min_delay_seconds,
@@ -265,6 +276,8 @@ def _campaign_response(
         created_by=campaign.created_by,
         name=campaign.name,
         template_id=campaign.template_id,
+        follow_up_steps=campaign.follow_up_steps,
+        verify_mx=campaign.verify_mx,
         gmail_account_ids=campaign.gmail_account_ids,
         daily_limit_per_account=campaign.daily_limit_per_account,
         min_delay_seconds=campaign.min_delay_seconds,

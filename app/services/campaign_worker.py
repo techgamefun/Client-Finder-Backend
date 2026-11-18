@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import timedelta, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -10,18 +10,25 @@ from starlette.concurrency import run_in_threadpool
 from app.database import SessionLocal
 from app.models import (
     Company,
+    EmailCampaignDelivery,
     EmailCampaign,
     EmailCampaignRecipient,
     EmailTemplate,
     User,
 )
-from app.services.campaign_service import maybe_complete_campaign, utc_now
+from app.services.campaign_service import (
+    _sent_counts_today,
+    maybe_complete_campaign,
+    schedule_account_assignments,
+    utc_now,
+)
 from app.services.email_templates import (
     build_lead_context,
     build_sender_info,
     render_email_template,
 )
 from app.services.gmail import get_gmail_account_email, send_gmail_message
+from app.services.email_verification import verify_email_mx
 from app.tenant_context import TenantContext, reset_tenant_context, set_tenant_context
 
 
@@ -111,6 +118,18 @@ def _claim_due_campaign_recipient() -> CampaignRecipientDelivery | None:
             return None
 
         campaign = db.get(EmailCampaign, recipient.campaign_id)
+        if campaign is not None:
+            eligible_slot = schedule_account_assignments(
+                [recipient.gmail_account_id],
+                campaign,
+                start_at=now,
+                daily_sent_by_account=_sent_counts_today(db, campaign, now),
+            )[0][1]
+            if eligible_slot > now:
+                recipient.scheduled_at = eligible_slot
+                recipient.updated_at = now
+                db.commit()
+                return None
         user = (
             db.scalar(
                 select(User).where(
@@ -191,9 +210,18 @@ def _deliver_campaign_recipient(delivery: CampaignRecipientDelivery) -> None:
                     User.organization_id == campaign.org_id,
                 )
             )
+            step_template_id = (
+                campaign.template_id
+                if recipient.current_step == 0
+                else UUID(
+                    campaign.follow_up_steps[recipient.current_step - 1][
+                        "template_id"
+                    ]
+                )
+            )
             template = db.scalar(
                 select(EmailTemplate).where(
-                    EmailTemplate.id == campaign.template_id,
+                    EmailTemplate.id == step_template_id,
                     EmailTemplate.org_id == campaign.org_id,
                 )
             )
@@ -231,6 +259,49 @@ def _deliver_campaign_recipient(delivery: CampaignRecipientDelivery) -> None:
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail="The selected contact no longer has a business email address.",
                 )
+            if campaign.verify_mx:
+                verification_checked_at = recipient.email_verification_checked_at
+                if (
+                    verification_checked_at is not None
+                    and verification_checked_at.tzinfo is None
+                ):
+                    verification_checked_at = verification_checked_at.replace(
+                        tzinfo=timezone.utc
+                    )
+                cached_verification = (
+                    recipient.email_verification_status == "valid"
+                    and verification_checked_at is not None
+                    and verification_checked_at >= utc_now() - timedelta(days=30)
+                )
+                verification_status = (
+                    "valid"
+                    if cached_verification
+                    else verify_email_mx(recipient_email)[0]
+                )
+                recipient.email_verification_status = verification_status
+                recipient.email_verification_checked_at = utc_now()
+                if verification_status != "valid":
+                    retry_dns = (
+                        verification_status == "dns_error"
+                        and recipient.attempts < 3
+                    )
+                    detail = (
+                        "The recipient domain has no MX or fallback address records."
+                        if verification_status == "no_mx"
+                        else (
+                            "DNS verification was unavailable; retrying shortly."
+                            if retry_dns
+                            else "DNS could not verify the recipient mail domain."
+                        )
+                    )
+                    recipient.status = "pending" if retry_dns else "failed"
+                    if retry_dns:
+                        recipient.scheduled_at = utc_now() + timedelta(minutes=15)
+                    recipient.error_message = detail
+                    recipient.updated_at = utc_now()
+                    maybe_complete_campaign(db, campaign.id)
+                    db.commit()
+                    return
             subject, body_content = render_email_template(
                 template.subject,
                 template.body_content,
@@ -245,12 +316,43 @@ def _deliver_campaign_recipient(delivery: CampaignRecipientDelivery) -> None:
             )
             now = utc_now()
             recipient.to_email = recipient_email.strip()
-            recipient.status = "sent"
             recipient.gmail_message_id = sent.message_id
             recipient.gmail_thread_id = sent.thread_id
             recipient.error_message = None
             recipient.sent_at = now
             recipient.updated_at = now
+            db.add(
+                EmailCampaignDelivery(
+                    org_id=campaign.org_id,
+                    campaign_id=campaign.id,
+                    recipient_id=recipient.id,
+                    gmail_account_id=recipient.gmail_account_id,
+                    step_index=recipient.current_step,
+                    to_email=recipient_email.strip(),
+                    gmail_message_id=sent.message_id,
+                    gmail_thread_id=sent.thread_id,
+                    sent_at=now,
+                )
+            )
+            recipient.sent_count += 1
+            recipient.current_step += 1
+            if recipient.current_step <= len(campaign.follow_up_steps):
+                step = campaign.follow_up_steps[recipient.current_step - 1]
+                due_at = now + timedelta(days=int(step["delay_days"]))
+                next_slot = schedule_account_assignments(
+                    [recipient.gmail_account_id],
+                    campaign,
+                    start_at=due_at,
+                    daily_sent_by_account=_sent_counts_today(
+                        db,
+                        campaign,
+                        due_at,
+                    ),
+                )[0][1]
+                recipient.scheduled_at = next_slot
+                recipient.status = "pending"
+            else:
+                recipient.status = "sent"
             company = db.scalar(
                 select(Company).where(
                     Company.id == recipient.company_id,

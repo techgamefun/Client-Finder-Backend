@@ -5,9 +5,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+class EmailCampaignFollowUpStep(BaseModel):
+    template_id: UUID
+    delay_days: int = Field(ge=1, le=365)
+
+
 class EmailCampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     template_id: UUID
+    follow_up_steps: list[EmailCampaignFollowUpStep] = Field(
+        default_factory=list,
+        max_length=10,
+    )
+    verify_mx: bool = True
     gmail_account_ids: list[UUID] = Field(min_length=1, max_length=50)
     daily_limit_per_account: int = Field(default=40, ge=1, le=1000)
     min_delay_seconds: int = Field(default=180, ge=1, le=86_400)
@@ -65,6 +75,10 @@ class EmailCampaignRecipientCounts(BaseModel):
     sent: int = 0
     failed: int = 0
     cancelled: int = 0
+    replied: int = 0
+    bounced: int = 0
+    sent_messages: int = 0
+    unverified: int = 0
 
 
 class EmailCampaignResponse(BaseModel):
@@ -75,6 +89,8 @@ class EmailCampaignResponse(BaseModel):
     created_by: UUID
     name: str
     template_id: UUID
+    follow_up_steps: list[EmailCampaignFollowUpStep]
+    verify_mx: bool
     gmail_account_ids: list[UUID]
     daily_limit_per_account: int
     min_delay_seconds: int
@@ -91,6 +107,7 @@ class EmailCampaignResponse(BaseModel):
 class EmailCampaignPreviewResponse(BaseModel):
     eligible_contact_count: int
     skipped_companies_without_email: int
+    skipped_suppressed_contacts: int = 0
     skipped_company_ids: list[UUID]
     daily_capacity_per_day: int
     estimated_completion_at: datetime | None

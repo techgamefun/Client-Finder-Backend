@@ -28,10 +28,14 @@ async def authenticate_request(request: Request, call_next):
                 content={"detail": "Request origin is not allowed."},
             )
 
+    is_public_unsubscribe_path = path in {
+        "/api/v1/unsubscribe",
+        "/api/v1/unsubscribe/one-click",
+    }
     token = request.cookies.get(ACCESS_TOKEN_COOKIE)
     tenant_token = None
     context = None
-    if token:
+    if token and not is_public_unsubscribe_path:
         session_factory: sessionmaker = getattr(
             request.app.state,
             "session_factory",
@@ -47,6 +51,7 @@ async def authenticate_request(request: Request, call_next):
         and request.method != "OPTIONS"
         and not is_auth_path
         and not is_google_oauth_callback
+        and not is_public_unsubscribe_path
         and context is None
     ):
         return JSONResponse(

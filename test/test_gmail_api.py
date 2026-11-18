@@ -300,6 +300,10 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
             api_calls["sent_subject"] = sent_message["Subject"]
             api_calls["sent_in_reply_to"] = sent_message["In-Reply-To"]
             api_calls["sent_body"] = sent_message.get_content()
+            api_calls["list_unsubscribe"] = sent_message["List-Unsubscribe"]
+            api_calls["list_unsubscribe_post"] = sent_message[
+                "List-Unsubscribe-Post"
+            ]
             return FakeRequest(
                 {"id": "sent-message-1", "threadId": "gmail-thread-1"}
             )
@@ -402,7 +406,13 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         assert api_calls["sent_to"] == "reply@example.com"
         assert api_calls["sent_subject"] == "Re: A question"
         assert api_calls["sent_in_reply_to"] == "<original@example.com>"
-        assert api_calls["sent_body"] == "Thanks for reaching out.\r\n"
+        assert api_calls["sent_body"].startswith("Thanks for reaching out.")
+        assert "/unsubscribe?token=" in api_calls["sent_body"]
+        assert "/unsubscribe/one-click?token=" in api_calls["list_unsubscribe"]
+        assert (
+            api_calls["list_unsubscribe_post"]
+            == "List-Unsubscribe=One-Click"
+        )
 
         composed = member_client.post(
             f"/api/v1/gmail/accounts/{gmail_account_id}/messages",
@@ -425,7 +435,10 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         assert api_calls["sent_cc"] == "copy@example.test"
         assert api_calls["sent_bcc"] == "hidden@example.test"
         assert api_calls["sent_subject"] == "A new message"
-        assert api_calls["sent_body"] == "Hello there\r\n"
+        assert api_calls["sent_body"].startswith("Hello there")
+        assert "/unsubscribe?token=" in api_calls["sent_body"]
+        assert "/unsubscribe/one-click?token=" not in api_calls["list_unsubscribe"]
+        assert api_calls["list_unsubscribe_post"] is None
 
         invalid_compose = member_client.post(
             f"/api/v1/gmail/accounts/{gmail_account_id}/messages",

@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     google_oauth_client_secret: str | None = None
     google_oauth_redirect_uri: str | None = None
     google_oauth_state_secret: str | None = None
+    email_unsubscribe_secret: str | None = None
+    email_monitor_interval_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=86_400,
+        validation_alias="EMAIL_MONITOR_INTERVAL_SECONDS",
+    )
     gmail_token_encryption_key: str | None = None
     crawler_service_url: str = Field(
         default="http://localhost:8001",
@@ -92,6 +99,13 @@ class Settings(BaseSettings):
         if access_secret.casefold() == refresh_secret.casefold():
             raise ValueError(
                 "ACCESS_TOKEN_SECRET and REFRESH_TOKEN_SECRET must be different."
+            )
+        if (
+            self.email_unsubscribe_secret
+            and len(self.email_unsubscribe_secret) < 32
+        ):
+            raise ValueError(
+                "EMAIL_UNSUBSCRIBE_SECRET must contain at least 32 characters."
             )
         return self
 

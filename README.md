@@ -186,6 +186,7 @@ GOOGLE_OAUTH_CLIENT_SECRET=your-google-oauth-client-secret
 GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
 GOOGLE_OAUTH_STATE_SECRET=generate-a-random-64-character-hex-secret
 GMAIL_TOKEN_ENCRYPTION_KEY=replace-with-generated-Fernet-key
+EMAIL_UNSUBSCRIBE_SECRET=generate-a-random-64-character-hex-secret
 ```
 
 `DATABASE_URL` is required when the application starts. The access and refresh
@@ -249,21 +250,73 @@ recipients round-robin across the selected Gmail accounts.
 
 Use `POST /{campaign_id}/preview` before
 `POST /{campaign_id}/start`. The preview reports eligible contacts, skipped
-companies, per-day account capacity, and an estimated completion time.
+companies and suppressed contacts, per-day account capacity, and an estimated
+completion time.
 Campaign schedules use the configured IANA timezone, randomized per-account
 delays, the daily per-account cap, and weekday send windows. Use `POST
 /{campaign_id}/pause` and `POST /{campaign_id}/resume` to pause and recalculate
 pending delivery slots. `GET /{campaign_id}` and `GET /` include recipient
 counts; `DELETE /{campaign_id}` removes draft or paused campaigns.
 
+Campaign creation accepts `follow_up_steps`, an ordered list of
+`{"template_id": "...", "delay_days": 3}` entries, and `verify_mx` (default
+`true`). Each follow-up selects an organization template and a 1–365 day wait
+after the previous step; up to ten follow-ups may be configured. Replies and
+recognized hard bounces stop queued follow-ups. When enabled, DNS mail routing
+is checked immediately before sending (MX, with the standard A/AAAA fallback).
+This does not validate that a specific mailbox exists; SMTP recipient probing
+is not performed.
+
 The existing PostgreSQL worker claims due recipients with
 `FOR UPDATE SKIP LOCKED`, renders each message with the same sandboxed template
 service as single-email sends, and sends through the assigned Gmail account.
+The background worker also periodically checks Gmail threads for contact
+replies and recent bounce notices from mail delivery agents. Reply detection
+looks for the recipient in the Gmail thread of a campaign message; replies
+sent as unrelated new threads may not be associated. It recognizes hard-bounce
+reports containing common permanent-failure signals; this is not a general
+Gmail webhook or complaint feed. Detected hard bounces are added to the
+platform-wide suppression list. Monitoring defaults to every five minutes;
+configure `EMAIL_MONITOR_INTERVAL_SECONDS` (30–86400 seconds) to change it.
+`GET /api/v1/gmail/accounts/health` reports per-account send, reply, bounce,
+failure, unverified-address, and monitor status metrics for the last 30 days.
+Campaign response counts include completed recipients, sent messages, replies,
+bounces, and verification failures. Open and click tracking are not collected.
 Campaign status changes are published through the existing
 `/api/v1/queue/events` WebSocket. The `d39a6f2c8e14` migration adds campaign
-storage, and `e6f4a1b3c9d2` adds and backfills each company's latest successful
-campaign email timestamp. Apply both through the normal deployment migration
-process.
+storage, `e6f4a1b3c9d2` adds and backfills each company's latest successful
+campaign email timestamp, and `c62e8f4a1b37` adds sequence, verification,
+monitoring, and delivery-event storage. Apply all through the normal deployment
+migration process.
+
+### Email opt-outs and suppression
+
+Every Gmail send path adds a visible unsubscribe link. Individual-recipient
+messages also include RFC one-click `List-Unsubscribe` headers; group messages
+use a recipient-bound public confirmation link. The public unsubscribe page
+requires no login; a valid request creates a platform-wide suppression record.
+Campaign previews omit suppressed contacts. Every send rechecks the list
+immediately before contacting Gmail, so re-importing a contact cannot bypass
+an opt-out.
+Organization administrators can review entries created by their organization
+and add address- or domain-level entries under **Settings → Email suppression**.
+These entries, including opt-outs, are platform-wide and apply across all
+organizations.
+Domain entries also cover subdomains. The admin API is `GET` and `POST
+/api/v1/email-suppressions`; the public opt-out API is `GET` and `POST
+/api/v1/unsubscribe`, with RFC one-click requests handled by
+`POST /api/v1/unsubscribe/one-click`. Admin entries accept `email` or `domain`
+targets and `manual_dnc`, `hard_bounce`, or `complaint` reasons. Entries are
+intentionally not removable through the UI.
+
+Set `EMAIL_UNSUBSCRIBE_SECRET` to a stable, private random value in production.
+If omitted, the application derives a signing key from `ACCESS_TOKEN_SECRET`;
+changing either key invalidates outstanding unsubscribe links. Unsubscribe
+tokens do not expire. The `c51a7d2e9f40` migration creates the suppression
+table and indexes; apply it through the normal deployment migration process.
+Recognized hard-bounce notices from monitored Gmail accounts are recorded
+automatically. Other hard bounces and spam complaints can still be added by an
+administrator; complaints are not automatically detected.
 
 On the frontend, organization admins can select individual leads, the current
 page, or all filtered results to seed campaign setup. Successful campaign

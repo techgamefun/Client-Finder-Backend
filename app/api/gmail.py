@@ -1,12 +1,12 @@
 import hmac
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,8 @@ from app.api.gmail_oauth_cookie import (
 from app.config import settings
 from app.models import (
     ConnectedGmailAccount,
+    EmailCampaignDelivery,
+    EmailCampaignRecipient,
     User,
     UserGmailAssignment,
 )
@@ -32,6 +34,7 @@ from app.schemas.gmail import (
     GmailComposeInput,
     GmailLabelResponse,
     GmailMessageDetailResponse,
+    GmailAccountHealthResponse,
     GmailMessagesResponse,
     GmailReplyInput,
     GmailReplyResponse,
@@ -245,6 +248,118 @@ def list_assigned_gmail_accounts(
             .order_by(ConnectedGmailAccount.email_address)
         ).all()
     )
+
+
+@router.get(
+    "/accounts/health",
+    response_model=list[GmailAccountHealthResponse],
+)
+def list_assigned_gmail_account_health(
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> list[GmailAccountHealthResponse]:
+    accounts = list_assigned_gmail_accounts(context, db)
+    if not accounts:
+        return []
+    account_ids = [account.id for account in accounts]
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    sent_rows = db.execute(
+        select(
+            EmailCampaignDelivery.gmail_account_id,
+            func.count(),
+        )
+        .where(
+            EmailCampaignDelivery.org_id == context.organization_id,
+            EmailCampaignDelivery.gmail_account_id.in_(account_ids),
+            EmailCampaignDelivery.sent_at >= cutoff,
+        )
+        .group_by(EmailCampaignDelivery.gmail_account_id)
+    ).all()
+    sent_counts = {account_id: int(count) for account_id, count in sent_rows}
+    activity_rows = db.execute(
+        select(
+            EmailCampaignRecipient.gmail_account_id,
+            func.sum(
+                case(
+                    (
+                        and_(
+                            EmailCampaignRecipient.status == "replied",
+                            EmailCampaignRecipient.replied_at >= cutoff,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("replies"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            EmailCampaignRecipient.status == "bounced",
+                            EmailCampaignRecipient.bounced_at >= cutoff,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("bounces"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            EmailCampaignRecipient.status == "failed",
+                            EmailCampaignRecipient.updated_at >= cutoff,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("failures"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            EmailCampaignRecipient.email_verification_status.in_(
+                                ("no_mx", "dns_error", "invalid")
+                            ),
+                            EmailCampaignRecipient.email_verification_checked_at
+                            >= cutoff,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("unverified"),
+        )
+        .where(
+            EmailCampaignRecipient.org_id == context.organization_id,
+            EmailCampaignRecipient.gmail_account_id.in_(account_ids),
+        )
+        .group_by(EmailCampaignRecipient.gmail_account_id)
+    ).all()
+    activity = {
+        account_id: (
+            int(replies or 0),
+            int(bounces or 0),
+            int(failures or 0),
+            int(unverified or 0),
+        )
+        for account_id, replies, bounces, failures, unverified in activity_rows
+    }
+    return [
+        GmailAccountHealthResponse(
+            id=account.id,
+            email_address=account.email_address,
+            sent_30d=sent_counts.get(account.id, 0),
+            replies_30d=activity.get(account.id, (0, 0, 0, 0))[0],
+            bounces_30d=activity.get(account.id, (0, 0, 0, 0))[1],
+            failures_30d=activity.get(account.id, (0, 0, 0, 0))[2],
+            unverified_30d=activity.get(account.id, (0, 0, 0, 0))[3],
+            last_monitor_at=account.last_monitor_at,
+            last_monitor_error=account.last_monitor_error,
+        )
+        for account in accounts
+    ]
 
 
 @router.get(

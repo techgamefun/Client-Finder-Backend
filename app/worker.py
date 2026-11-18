@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from app.tenant_context import (
 )
 from app.services.application_settings import CrawlSettings, get_crawl_settings
 from app.services.campaign_worker import process_due_campaign_recipient
+from app.services.campaign_monitor import process_due_gmail_monitoring
 from app.services.redis_queue import (
     RedisQueueError,
     dequeue_job,
@@ -370,8 +372,13 @@ async def run_worker() -> None:
     logger.info("Background job worker started.")
     prefer_pagespeed = False
     prefer_campaign = False
+    last_monitor_poll = 0.0
 
     while True:
+        if time.monotonic() - last_monitor_poll >= 10:
+            last_monitor_poll = time.monotonic()
+            await process_due_gmail_monitoring()
+
         campaign_checked = False
         if prefer_campaign:
             prefer_campaign = False

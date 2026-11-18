@@ -172,6 +172,11 @@ class ConnectedGmailAccount(Base):
         DateTime(timezone=True),
         nullable=False,
     )
+    last_monitor_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    last_monitor_error: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         UniqueConstraint(
@@ -257,6 +262,69 @@ class EmailTemplate(Base):
     )
 
 
+class SuppressedContact(Base):
+    __tablename__ = "suppressed_contacts"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    normalized_value: Mapped[str] = mapped_column(String(320), nullable=False)
+    reason: Mapped[str] = mapped_column(String(20), nullable=False)
+    global_dnc: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('email', 'domain')",
+            name="ck_suppressed_contacts_target_type",
+        ),
+        CheckConstraint(
+            "reason IN ('unsubscribe', 'hard_bounce', 'complaint', 'manual_dnc')",
+            name="ck_suppressed_contacts_reason",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "target_type",
+            "normalized_value",
+            "reason",
+            name="uq_suppressed_contacts_entry",
+        ),
+        Index(
+            "ix_suppressed_contacts_lookup",
+            "organization_id",
+            "target_type",
+            "normalized_value",
+        ),
+        Index(
+            "ix_suppressed_contacts_global_lookup",
+            "global_dnc",
+            "target_type",
+            "normalized_value",
+        ),
+    )
+
+
 class EmailCampaign(Base):
     __tablename__ = "email_campaigns"
 
@@ -283,6 +351,17 @@ class EmailCampaign(Base):
         ForeignKey("email_templates.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
+    )
+    follow_up_steps: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=list,
+    )
+    verify_mx: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
     )
     gmail_account_ids: Mapped[list[str]] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"),
@@ -424,6 +503,25 @@ class EmailCampaignRecipient(Base):
         server_default="0",
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_step: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    sent_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bounced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reply_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_verification_status: Mapped[str | None] = mapped_column(String(20))
+    email_verification_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -438,12 +536,17 @@ class EmailCampaignRecipient(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'processing', 'sent', 'failed', 'cancelled')",
+            "status IN ('pending', 'processing', 'sent', 'failed', 'cancelled', "
+            "'replied', 'bounced')",
             name="ck_email_campaign_recipients_status_allowed",
         ),
         CheckConstraint(
             "attempts >= 0",
             name="ck_email_campaign_recipients_attempts_nonnegative",
+        ),
+        CheckConstraint(
+            "current_step >= 0 AND sent_count >= 0",
+            name="ck_email_campaign_recipients_sequence_counters_nonnegative",
         ),
         UniqueConstraint(
             "campaign_id",
@@ -465,6 +568,12 @@ class EmailCampaignRecipient(Base):
             "org_id",
             "status",
             "sent_at",
+        ),
+        Index(
+            "ix_email_campaign_recipients_reply_monitor",
+            "gmail_account_id",
+            "status",
+            "reply_checked_at",
         ),
     )
 
@@ -516,6 +625,66 @@ pagespeed_scan_job_companies = Table(
         primary_key=True,
     ),
 )
+
+
+class EmailCampaignDelivery(Base):
+    __tablename__ = "email_campaign_deliveries"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    org_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    campaign_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("email_campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    recipient_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("email_campaign_recipients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    gmail_account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("connected_gmail_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    to_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    gmail_message_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    gmail_thread_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "recipient_id",
+            "step_index",
+            name="uq_email_campaign_delivery_recipient_step",
+        ),
+        CheckConstraint(
+            "step_index >= 0",
+            name="ck_email_campaign_deliveries_step_nonnegative",
+        ),
+        Index(
+            "ix_email_campaign_deliveries_account_sent",
+            "gmail_account_id",
+            "sent_at",
+        ),
+    )
 
 
 class Company(TenantOwnedMixin, Base):

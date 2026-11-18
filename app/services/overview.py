@@ -206,10 +206,7 @@ def build_overview(
             ),
         )
     )
-    sent_recipient = and_(
-        EmailCampaignRecipient.status == "sent",
-        EmailCampaignRecipient.sent_at.is_not(None),
-    )
+    sent_recipient = EmailCampaignRecipient.sent_at.is_not(None)
     has_email = exists(
         select(Contact.id).where(
             Contact.company_id == Company.id,
@@ -517,7 +514,7 @@ def build_overview(
                 organization_id,
                 owner_user_id,
             ),
-            EmailCampaignRecipient.status == "sent",
+            EmailCampaignRecipient.sent_at.is_not(None),
         )
     )
     funnel_row = db.execute(
@@ -838,7 +835,7 @@ def build_overview(
                 organization_id,
                 owner_user_id,
             ),
-            EmailCampaignRecipient.status == "sent",
+            EmailCampaignRecipient.sent_at.is_not(None),
         )
     )
     attention_row = db.execute(
@@ -1094,7 +1091,7 @@ def build_admin_overview(
             EmailCampaign.org_id == organization_id,
             EmailCampaign.created_by == User.id,
             EmailCampaignRecipient.org_id == organization_id,
-            EmailCampaignRecipient.status == "sent",
+            EmailCampaignRecipient.sent_at.is_not(None),
             EmailCampaignRecipient.sent_at >= current_start,
             EmailCampaignRecipient.sent_at < current_end,
         )

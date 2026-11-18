@@ -29,6 +29,18 @@ class AssignedGmailAccountResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class GmailAccountHealthResponse(BaseModel):
+    id: UUID
+    email_address: str
+    sent_30d: int
+    replies_30d: int
+    bounces_30d: int
+    failures_30d: int
+    unverified_30d: int
+    last_monitor_at: datetime | None
+    last_monitor_error: str | None
+
+
 class UserGmailAssignmentCreate(BaseModel):
     user_id: UUID
 
