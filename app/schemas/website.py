@@ -142,6 +142,17 @@ class WebsiteAddToLeadsResponse(BaseModel):
     not_found_count: int
 
 
+class WebsiteBatchStatusUpdateRequest(BaseModel):
+    website_ids: list[UUID] = Field(min_length=1, max_length=500)
+    status: Literal["new", "lead", "checked"]
+
+
+class WebsiteBatchStatusUpdateResponse(BaseModel):
+    requested_count: int
+    updated_count: int
+    not_found_count: int
+
+
 class WebsiteUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

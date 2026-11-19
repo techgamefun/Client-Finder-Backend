@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 from urllib.parse import urlencode
 
@@ -115,3 +116,20 @@ def upsert_website(
 
     db.flush()
     return website
+
+
+def update_websites_status(
+    db: Session,
+    website_ids: list[UUID],
+    status: Literal["new", "lead", "checked"],
+) -> tuple[int, int]:
+    unique_ids = list(dict.fromkeys(website_ids))
+    websites = db.scalars(
+        select(Website).where(Website.id.in_(unique_ids))
+    ).all()
+    updated_count = 0
+    for website in websites:
+        if website.status != status:
+            website.status = status
+            updated_count += 1
+    return updated_count, len(unique_ids) - len(websites)

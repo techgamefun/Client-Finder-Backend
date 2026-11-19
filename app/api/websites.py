@@ -17,6 +17,8 @@ from app.schemas.website import (
     WebsiteDetailResponse,
     WebsiteDiscoveryKeywordResponse,
     WebsiteHypeStatProfileResponse,
+    WebsiteBatchStatusUpdateRequest,
+    WebsiteBatchStatusUpdateResponse,
     WebsiteReclassificationBatchResponse,
     WebsiteResponse,
     WebsiteUpdate,
@@ -31,6 +33,7 @@ from app.services.website_classification import (
     reclassify_unclassified_websites,
 )
 from app.services.website_leads import add_websites_to_leads
+from app.services.website_registry import update_websites_status
 from app.services.website_hypestat import refetch_website_hypestat_profile
 
 
@@ -105,6 +108,27 @@ def add_to_leads(
             ),
         ) from exc
     return result
+
+
+@router.patch(
+    "/batch-status",
+    response_model=WebsiteBatchStatusUpdateResponse,
+)
+def batch_update_status(
+    payload: WebsiteBatchStatusUpdateRequest,
+    db: WebsiteSession,
+) -> WebsiteBatchStatusUpdateResponse:
+    updated_count, not_found_count = update_websites_status(
+        db,
+        payload.website_ids,
+        payload.status,
+    )
+    db.commit()
+    return WebsiteBatchStatusUpdateResponse(
+        requested_count=len(set(payload.website_ids)),
+        updated_count=updated_count,
+        not_found_count=not_found_count,
+    )
 
 
 @router.post(

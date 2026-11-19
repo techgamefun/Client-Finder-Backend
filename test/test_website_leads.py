@@ -174,3 +174,70 @@ def test_website_status_can_be_updated_to_checked(client):
     assert response.status_code == 200
     assert response.json()["status"] == "checked"
     assert invalid_response.status_code == 422
+
+
+def test_batch_website_status_update_changes_selected_rows(client):
+    with TestingSessionLocal() as db:
+        websites = [
+            Website(
+                website_url=f"https://batch-{index}.example/",
+                domain=f"batch-{index}.example",
+            )
+            for index in range(2)
+        ]
+        db.add_all(websites)
+        db.commit()
+        website_ids = [website.id for website in websites]
+
+    response = client.patch(
+        "/api/v1/websites/batch-status",
+        json={
+            "website_ids": [
+                str(website_ids[0]),
+                str(website_ids[0]),
+                str(website_ids[1]),
+                str(uuid4()),
+            ],
+            "status": "checked",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "requested_count": 3,
+        "updated_count": 2,
+        "not_found_count": 1,
+    }
+
+    with TestingSessionLocal() as db:
+        assert all(
+            db.get(Website, website_id).status == "checked"
+            for website_id in website_ids
+        )
+
+    repeated = client.patch(
+        "/api/v1/websites/batch-status",
+        json={
+            "website_ids": [str(website_id) for website_id in website_ids],
+            "status": "checked",
+        },
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["updated_count"] == 0
+
+    invalid_status = client.patch(
+        "/api/v1/websites/batch-status",
+        json={
+            "website_ids": [str(website_ids[0])],
+            "status": "ready",
+        },
+    )
+    oversized_selection = client.patch(
+        "/api/v1/websites/batch-status",
+        json={
+            "website_ids": [str(website_ids[0])] * 501,
+            "status": "new",
+        },
+    )
+    assert invalid_status.status_code == 422
+    assert oversized_selection.status_code == 422
