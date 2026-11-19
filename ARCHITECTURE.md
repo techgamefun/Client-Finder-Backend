@@ -257,10 +257,9 @@ successful crawls, asks the stateless Go crawler service to analyze each
 domain independently, and caches each domain's top 50 keywords in
 `WebsiteCorpusAnalysis` until that site's crawl or analyzer version changes.
 The Websites page displays each site's own keyword phrases and scores; words
-are not ranked or counted across domains. It supports selecting up to 500
-websites across pages to update their registry status in one
-`PATCH /api/v1/websites/batch-status` request, or add them to Leads in one
-`POST /api/v1/websites/add-to-leads` request. Batch status updates accept
+are not ranked or counted across domains. Its select-all control selects every
+website matching the active filters across all pages. Bulk status and Leads
+actions process the selection in batches of 500. Batch status updates accept
 `new`, `lead`, or `checked` and report changed and missing records separately;
 websites already at the requested status are not counted as changed. Adding
 selected websites to Leads creates companies with their website URL/domain
