@@ -77,7 +77,9 @@ app/main.py                 FastAPI app, router registration, health check
   extracted crawl data. The separate topic classifier fills `Website.site_topic`
   when it is still empty. The `classification_signals` JSON column preserves
   bounded, per-page metadata, schema types, DOM counts, navigation/CTA text,
-  URL patterns, and matched metadata, URL, and body classification terms.
+  URL patterns, matched metadata, URL, and body classification terms, plus
+  each attempted page's HTTP status and error detail when available. Pages
+  without classification signals are retained when they have crawl diagnostics.
 - `Website` is the all-sites registry. It tracks discovery source/provider,
   detected crawl category, page type, site topic, and an optional crawl link.
   Listing sites are identified by `page_type="business_listing"`; discovery

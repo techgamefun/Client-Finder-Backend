@@ -62,7 +62,11 @@ retried. The worker fetches the
 homepage and up to five relevant same-site About, Blog, Services, Contact, or
 mission/goal pages, then stores their page URLs and text, email addresses,
 telephone numbers, and social links in the `website_crawls` table. It renders
-JavaScript pages with headless Chromium and does not check `robots.txt`. When a
+JavaScript pages with headless Chromium and does not check `robots.txt`. Each
+attempted page's HTTP status and error detail are also stored in the crawl's
+per-page classification data, including failed pages without classification
+signals. Fatal homepage failures are saved on the crawl job with the upstream
+HTTP status when one was received. When a
 company has the same normalized domain, extracted email addresses and telephone
 numbers are also imported as separate, publicly listed Contact records. Imports
 are deduplicated against existing contacts and do not overwrite company fields

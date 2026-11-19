@@ -217,6 +217,51 @@ def test_persist_crawl_stores_classification_signals(client):
     )
 
 
+def test_persist_crawl_keeps_http_diagnostics_for_pages_without_signals(client):
+    data = CrawlData.model_validate(
+        {
+            "website_url": "https://example.com/",
+            "about_page_url": None,
+            "about_content": None,
+            "contact_page_url": None,
+            "contact_content": None,
+            "goals_page_url": None,
+            "goals_content": None,
+            "pages": [
+                {
+                    "url": "https://example.com/",
+                    "status_code": 200,
+                    "rendering_mode": "http_only",
+                    "classification_signals": {"page_title": "Example"},
+                },
+                {
+                    "url": "https://example.com/contact",
+                    "status_code": 404,
+                    "error": "The server returned HTTP 404 (Not Found).",
+                },
+                {
+                    "url": "https://example.com/private",
+                    "status_code": 0,
+                    "error": "The request timed out.",
+                },
+            ],
+        }
+    )
+
+    with TestingSessionLocal() as db:
+        crawl = _persist_crawl(data, db)
+        response = WebsiteCrawlResponse.model_validate(crawl)
+
+    assert response.classification_signals[0].status_code == 200
+    assert response.classification_signals[1].status_code == 404
+    assert response.classification_signals[1].error == (
+        "The server returned HTTP 404 (Not Found)."
+    )
+    assert response.classification_signals[1].classification_signals is None
+    assert response.classification_signals[2].status_code is None
+    assert response.classification_signals[2].error == "The request timed out."
+
+
 def test_persist_crawl_preserves_site_type_if_older_crawler_omits_it(client):
     data = CrawlData(
         website_url="https://example.com/",

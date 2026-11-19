@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 class PageClassificationSignals(BaseModel):
@@ -36,8 +36,15 @@ class CrawlPageClassification(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     url: str
+    status_code: int | None = None
+    error: str | None = None
     rendering_mode: str | None = None
     classification_signals: PageClassificationSignals | None = None
+
+    @field_validator("status_code")
+    @classmethod
+    def omit_missing_http_status(cls, value: int | None) -> int | None:
+        return None if value == 0 else value
 
 
 class WebsiteCrawlRequest(BaseModel):

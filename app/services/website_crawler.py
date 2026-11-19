@@ -130,12 +130,11 @@ def _persist_crawl(
             crawl.contact_content = data.contact_content
             crawl.goals_page_url = data.goals_page_url
             crawl.goals_content = data.goals_content
-            page_signals = [
-                page.model_dump(mode="json")
-                for page in data.pages
-                if page.classification_signals is not None
-            ]
-            if page_signals:
+            if data.pages:
+                page_signals = [
+                    page.model_dump(mode="json", exclude_none=True)
+                    for page in data.pages
+                ]
                 crawl.classification_signals = page_signals
             crawl.emails = data.emails
             crawl.phones = data.phones
