@@ -150,6 +150,7 @@ def get_application_settings(db: Session) -> ApplicationSettingsResponse:
             if get_user_provider_api_key(db, "pagespeed")
             else "unset"
         ),
+        gemini_configured=bool(get_user_provider_api_key(db, "gemini")),
         hypestat_auto_fetch_enabled=(
             row.hypestat_auto_fetch_enabled if row is not None else True
         ),
@@ -195,6 +196,8 @@ def save_application_settings(
         save_user_provider_api_key(db, "hypestat", payload.hypestat_api_key)
     if payload.pagespeed_api_key is not None:
         save_user_provider_api_key(db, "pagespeed", payload.pagespeed_api_key)
+    if payload.gemini_api_key is not None:
+        save_user_provider_api_key(db, "gemini", payload.gemini_api_key)
     if payload.hypestat_auto_fetch_enabled is not None:
         row.hypestat_auto_fetch_enabled = payload.hypestat_auto_fetch_enabled
     if payload.tavily_default_search_depth is not None:

@@ -49,6 +49,7 @@ class ApplicationSettingsUpdate(BaseModel):
     octoparse_api_key: str | None = Field(default=None, max_length=512)
     hypestat_api_key: str | None = Field(default=None, max_length=512)
     pagespeed_api_key: str | None = Field(default=None, max_length=512)
+    gemini_api_key: str | None = Field(default=None, max_length=512)
     hypestat_auto_fetch_enabled: bool | None = None
     tavily_default_search_depth: TavilySearchDepth | None = None
     tavily_default_country: str | None = Field(
@@ -119,6 +120,7 @@ class ApplicationSettingsResponse(BaseModel):
     hypestat_service_auth_configured: bool
     pagespeed_configured: bool
     pagespeed_key_source: str
+    gemini_configured: bool
     selected_discovery_tools: list[DiscoveryProvider]
     tavily_default_search_depth: TavilySearchDepth = "basic"
     tavily_default_country: str | None = None

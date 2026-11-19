@@ -40,6 +40,7 @@ def test_settings_read_and_edit_are_public(client):
 def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
     monkeypatch.setattr(settings, "tavily_api_key", None)
     monkeypatch.setattr(settings, "octoparse_api_key", None)
+    gemini_api_key = "test-gemini-api-key"
 
     saved = client.put(
         "/api/v1/settings",
@@ -47,6 +48,7 @@ def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
             "crawl_max_pages": 4,
             "crawl_max_depth": 1,
             "tavily_api_key": TAVILY_API_KEY,
+            "gemini_api_key": gemini_api_key,
         },
     )
 
@@ -65,6 +67,7 @@ def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
         ),
         "pagespeed_configured": False,
         "pagespeed_key_source": "unset",
+        "gemini_configured": True,
         "selected_discovery_tools": ["tavily"],
         "tavily_default_search_depth": "basic",
         "tavily_default_country": None,
@@ -72,6 +75,7 @@ def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
         "octoparse_template": None,
     }
     assert TAVILY_API_KEY not in saved.text
+    assert gemini_api_key not in saved.text
 
     with TestingSessionLocal() as db:
         context = db.info["tenant_context"]
@@ -83,6 +87,21 @@ def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
         )
         assert credential is not None
         assert credential.api_key == TAVILY_API_KEY
+        gemini_credential = db.scalar(
+            select(UserProviderCredential).where(
+                UserProviderCredential.user_id == context.user_id,
+                UserProviderCredential.provider == "gemini",
+            )
+        )
+        assert gemini_credential is not None
+        assert gemini_credential.api_key == gemini_api_key
+
+    removed_gemini_key = client.put(
+        "/api/v1/settings",
+        json={"gemini_api_key": ""},
+    )
+    assert removed_gemini_key.status_code == 200
+    assert removed_gemini_key.json()["gemini_configured"] is False
 
     class FakeAsyncClient:
         def __init__(self, timeout: float):

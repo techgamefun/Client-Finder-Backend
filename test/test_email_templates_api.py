@@ -18,6 +18,7 @@ from app.models import (
     WebsiteCrawl,
 )
 from app.services import gmail
+from app.api import email_templates as email_templates_api
 from conftest import TestingSessionLocal
 
 
@@ -152,9 +153,68 @@ def test_email_template_crud_and_organization_scoping(client):
                 "body_content": "Body",
             },
         ).status_code == 403
+        assert member_client.post(
+            f"{endpoint}/generate-draft",
+            json={"prompt": "A concise introduction for a new prospect"},
+        ).status_code == 403
 
     assert client.delete(f"{endpoint}/{template['id']}").status_code == 204
     assert client.get(f"{endpoint}/{template['id']}").status_code == 404
+
+
+def test_generate_email_template_draft_uses_personal_key_without_saving(
+    client,
+    monkeypatch,
+):
+    organization_id, user_id = _session_ids(client)
+    endpoint = f"/api/v1/orgs/{organization_id}/templates"
+    api_key = "test-gemini-api-key"
+    saved_settings = client.put(
+        "/api/v1/settings",
+        json={"gemini_api_key": api_key},
+    )
+    assert saved_settings.status_code == 200
+
+    async def fake_generate(prompt, received_key):
+        assert prompt == "Write a friendly introductory message"
+        assert received_key == api_key
+        return email_templates_api.EmailTemplateDraftResponse(
+            name="Friendly introduction",
+            subject="A quick introduction",
+            body_content="<p>Hello {{ contact.first_name }}</p>",
+        )
+
+    monkeypatch.setattr(
+        email_templates_api,
+        "generate_email_template_draft",
+        fake_generate,
+    )
+    response = client.post(
+        f"{endpoint}/generate-draft",
+        json={"prompt": "Write a friendly introductory message"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "name": "Friendly introduction",
+        "subject": "A quick introduction",
+        "body_content": "<p>Hello {{ contact.first_name }}</p>",
+    }
+    assert client.get(endpoint).json() == []
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        assert context.user_id == user_id
+
+
+def test_generate_email_template_draft_requires_personal_key(client):
+    organization_id, _ = _session_ids(client)
+    response = client.post(
+        f"/api/v1/orgs/{organization_id}/templates/generate-draft",
+        json={"prompt": "Write a concise introduction for a prospect"},
+    )
+
+    assert response.status_code == 422
+    assert "Gemini API key" in response.json()["detail"]
 
 
 def test_email_template_preview_builds_context_and_escapes_values(client):

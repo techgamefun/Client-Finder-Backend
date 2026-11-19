@@ -14,6 +14,8 @@ from app.api.deps import (
 from app.models import EmailCampaign, EmailTemplate
 from app.schemas.email_templates import (
     EmailTemplateCreate,
+    EmailTemplateDraftRequest,
+    EmailTemplateDraftResponse,
     EmailTemplatePreviewRequest,
     EmailTemplatePreviewResponse,
     EmailTemplateResponse,
@@ -29,6 +31,8 @@ from app.services.email_templates import (
     render_email_template,
     validate_email_template_syntax,
 )
+from app.services.application_settings import get_user_provider_api_key
+from app.services.gemini_template_generator import generate_email_template_draft
 from app.services.gmail import (
     get_gmail_account_email,
     send_gmail_message,
@@ -92,6 +96,26 @@ def create_email_template(
     db.commit()
     db.refresh(template)
     return template
+
+
+@router.post(
+    "/generate-draft",
+    response_model=EmailTemplateDraftResponse,
+)
+async def generate_template_draft(
+    org_id: UUID,
+    payload: EmailTemplateDraftRequest,
+    context: AdminContext,
+    db: DatabaseSession,
+) -> EmailTemplateDraftResponse:
+    _require_matching_organization(org_id, context)
+    api_key = get_user_provider_api_key(db, "gemini", user_id=context.user_id)
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Add your Gemini API key in Settings before generating a draft.",
+        )
+    return await generate_email_template_draft(payload.prompt, api_key)
 
 
 @router.get("", response_model=list[EmailTemplateResponse])

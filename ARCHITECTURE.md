@@ -5,7 +5,8 @@
 The application is a synchronous-persistence, asynchronous-provider FastAPI
 service. It exposes versioned HTTP routes, validates their inputs and outputs
 with Pydantic, uses SQLAlchemy for relational storage, and calls Tavily for web
-search and Octoparse for template-based search. Website crawl requests use
+search, Octoparse for template-based search, and Gemini for email-template
+draft generation. Website crawl requests use
 Upstash Redis to dispatch jobs to a
 separately run worker; PostgreSQL stores durable job state and crawl results.
 PostgreSQL is the configured application database; tests use an in-memory
@@ -60,15 +61,18 @@ app/main.py                 FastAPI app, router registration, health check
 - `app/api/deps.py` provides a database session per request and closes it when
   the request is complete.
 - `app/api/settings.py` exposes public settings operations, Tavily usage, and
-  Octoparse template search. Tavily and Octoparse keys saved through this API
-  are stored as plaintext in the per-user `UserProviderCredential` table.
+  Octoparse template search. Provider keys saved through this API, including
+  Gemini, are stored as plaintext in the per-user `UserProviderCredential` table.
   Provider selections, Octoparse template configuration, and per-crawl
   page/depth preferences are persisted in the organization's
   `ApplicationSettings` row. API responses never include key values; database
   access must be restricted because keys are not encrypted at rest.
 - `app/services/application_settings.py` resolves database preferences and
-  per-user provider keys for Tavily and Octoparse, including the selected
-  discovery tools and Octoparse template.
+  per-user provider keys, including the selected discovery tools and Octoparse
+  template.
+- `app/services/gemini_template_generator.py` requests an email-template draft
+  from Gemini, validates the response schema, Jinja syntax, and available
+  placeholder paths, and returns it without persistence.
 - `app/models.py` defines the `Company`, `Contact`, `SearchKeyword`,
   `PageSpeedScan`, `WebsiteCrawl`, `Website`, `WebsiteCrawlJob`,
   `WebsiteCorpusAnalysis`, `ApplicationSettings`, `DiscoveryProviderJob`,
@@ -135,6 +139,9 @@ app/main.py                 FastAPI app, router registration, health check
   sales pipeline's `Company.lead_status`.
 - `app/services/gmail.py` uses assigned-account checks for Gmail message reads,
   replies, composed sends, label listing, and label-filtered message lists.
+- `POST /api/v1/orgs/{org_id}/templates/generate-draft` is admin-only and uses
+  the authenticated user's Gemini credential. The generated draft is returned
+  for review in the editor; it is not saved or sent automatically.
 - PostgreSQL triggers publish crawl, PageSpeed, and email campaign status
   changes on the
   `queue_job_events` notification channel. `app/api/queue_events.py` forwards

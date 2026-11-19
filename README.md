@@ -255,6 +255,10 @@ is determined by the preview identity or connected Gmail account.
 `company.crawled_text` aggregates available crawl-page text for the company
 domain, and `company.phone` maps to the selected contact's business phone
 because the Company model has no phone column.
+Administrators can generate an editable draft with
+`POST /api/v1/orgs/{org_id}/templates/generate-draft`. The request uses the
+signed-in administrator's Gemini key from **Settings → Gemini**; generated
+drafts are validated and returned without being saved or sent.
 
 ### Email drip campaigns
 
@@ -345,7 +349,8 @@ administrator. Subsequent users can sign in; anyone can create a separate
 organization, while an organization administrator can add members from
 **Settings → Organization users**. Roles are `admin` and `user`. Members share
 their organization's companies, websites, and jobs; provider API keys are
-personal to each user and stored as plaintext in the database. Restrict
+personal to each user and stored as plaintext in the database, including the
+Gemini key used for template drafts. Restrict
 database access and use dedicated provider keys: anyone with database access
 can read them. Existing records are assigned to one default organization by
 the migration. Previously saved encrypted provider keys are removed by the
@@ -401,8 +406,8 @@ preserving existing records and relationships; adds durable crawl and scan
 jobs, discovery preferences, and Octoparse provider jobs; creates and
 backfills the website registry; and adds per-website HypeStat profiles with
 the full provider response, lookup status, errors, and timestamps. The latest
-migration adds organizations, users, roles, encrypted per-user provider
-credentials, creator attribution, and organization ownership for existing
+migration adds organizations, users, roles, per-user provider credential
+records, creator attribution, and organization ownership for existing
 business data and queued jobs; it assigns pre-existing records to the default
 organization.
 If the unique source-URL migration detects duplicates in existing data, it

@@ -32,6 +32,22 @@ class EmailTemplateCreate(BaseModel):
         return value
 
 
+class EmailTemplateDraftRequest(BaseModel):
+    prompt: str = Field(min_length=8, max_length=4_000)
+
+    @field_validator("prompt")
+    @classmethod
+    def trim_prompt(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 8:
+            raise ValueError("Describe the email you want in at least 8 characters.")
+        return normalized
+
+
+class EmailTemplateDraftResponse(EmailTemplateCreate):
+    pass
+
+
 class EmailTemplateUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     subject: str | None = Field(default=None, min_length=1, max_length=998)
