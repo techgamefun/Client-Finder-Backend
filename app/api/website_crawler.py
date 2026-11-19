@@ -6,13 +6,22 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.schemas.website_crawl import (
+    WebsiteCrawlBatchJobResponse,
+    WebsiteCrawlBatchRequest,
+    WebsiteCrawlBatchResponse,
     WebsiteCrawlJobResponse,
     WebsiteCrawlRequest,
 )
+from app.schemas.job_queue import (
+    BatchJobRetryRequest,
+    BatchJobRetryResponse,
+)
 from app.services.crawl_jobs import (
     create_website_crawl_job,
+    create_website_crawl_jobs,
     get_website_crawl_job,
     list_website_crawl_jobs,
+    retry_failed_website_crawl_jobs,
     retry_website_crawl_job,
 )
 
@@ -21,6 +30,30 @@ router = APIRouter(
     prefix="/crawler",
     tags=["Website Crawler"],
 )
+
+
+@router.post(
+    "/crawl/batch",
+    response_model=WebsiteCrawlBatchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def crawl_websites(
+    payload: WebsiteCrawlBatchRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> WebsiteCrawlBatchResponse:
+    jobs = await create_website_crawl_jobs(
+        [str(website_url) for website_url in payload.website_urls],
+        db,
+    )
+    return WebsiteCrawlBatchResponse(
+        jobs=[
+            WebsiteCrawlBatchJobResponse(
+                id=job.id,
+                website_url=job.website_url,
+            )
+            for job in jobs
+        ]
+    )
 
 
 @router.post(
@@ -42,6 +75,18 @@ def list_crawl_jobs(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[WebsiteCrawlJobResponse]:
     return list_website_crawl_jobs(db, limit)
+
+
+@router.post(
+    "/jobs/retry-batch",
+    response_model=BatchJobRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_crawl_jobs_batch(
+    payload: BatchJobRetryRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> BatchJobRetryResponse:
+    return await retry_failed_website_crawl_jobs(payload.job_ids, db)
 
 
 @router.post(

@@ -51,6 +51,10 @@ class WebsiteCrawlRequest(BaseModel):
     website_url: HttpUrl
 
 
+class WebsiteCrawlBatchRequest(BaseModel):
+    website_urls: list[HttpUrl] = Field(min_length=1, max_length=100)
+
+
 class WebsiteCrawlResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -89,3 +93,12 @@ class WebsiteCrawlJobResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     result: WebsiteCrawlResponse | None
+
+
+class WebsiteCrawlBatchJobResponse(BaseModel):
+    id: UUID
+    website_url: str
+
+
+class WebsiteCrawlBatchResponse(BaseModel):
+    jobs: list[WebsiteCrawlBatchJobResponse]

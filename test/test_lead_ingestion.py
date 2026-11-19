@@ -17,10 +17,12 @@ from app.models import (
     SearchKeyword,
     Website,
     WebsiteCrawl,
+    WebsiteCrawlJob,
 )
 from app.schemas.discovery import DiscoveryResult, DiscoverySearchResponse
 from app.services import lead_ingestion
 from app.services.pagespeed import PageSpeedError, PageSpeedScanData
+from app.services.application_settings import CrawlSettings
 from app.services.website_crawler import CrawlData
 
 
@@ -548,6 +550,168 @@ def test_ingestion_queues_pagespeed_jobs_and_worker_saves_results(
         assert status_response.json()["completed_at"] is not None
 
 
+def test_website_only_pagespeed_job_saves_scan_result(client, monkeypatch):
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "SessionLocal",
+        TestingSessionLocal,
+    )
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "_get_pagespeed_api_key",
+        lambda: None,
+    )
+
+    async def fake_pagespeed_scan(
+        website_url: str,
+        strategy: str,
+        _api_key: str | None = None,
+    ):
+        return PageSpeedScanData(
+            website_url=website_url,
+            strategy=strategy,
+            category_scores={"performance": 91},
+            report={"lighthouseResult": {"audits": {}}},
+        )
+
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "scan_pagespeed",
+        fake_pagespeed_scan,
+    )
+    with TestingSessionLocal() as db:
+        website = Website(
+            website_url="https://standalone.example/",
+            domain="standalone.example",
+        )
+        db.add(website)
+        db.flush()
+        job = PageSpeedScanJob(
+            website_id=website.id,
+            company_id=None,
+            website_url=website.website_url,
+            strategy="mobile",
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+        website_id = website.id
+
+    asyncio.run(pagespeed_worker.process_pagespeed_job(job_id))
+
+    with TestingSessionLocal() as db:
+        saved_job = db.get(PageSpeedScanJob, job_id)
+        scan = db.scalar(
+            select(PageSpeedScan).where(
+                PageSpeedScan.website_id == website_id
+            )
+        )
+        assert saved_job is not None
+        assert scan is not None
+        assert saved_job.status == "succeeded"
+        assert saved_job.scan_id == scan.id
+        assert scan.company_id is None
+        assert scan.website_id == website_id
+
+
+def test_successful_crawl_queues_website_pagespeed_jobs(client, monkeypatch):
+    enqueued_job_ids: list[UUID] = []
+
+    async def capture_pagespeed_jobs(job_ids: list[UUID]) -> None:
+        enqueued_job_ids.extend(job_ids)
+
+    async def fake_crawl_website(
+        website_url: str,
+        **_options,
+    ) -> CrawlData:
+        return CrawlData(
+            website_url="https://crawled.example/",
+            home_page_url=website_url,
+            home_content="Example home page",
+            about_page_url=None,
+            about_content=None,
+            contact_page_url=None,
+            contact_content=None,
+            goals_page_url=None,
+            goals_content=None,
+        )
+
+    monkeypatch.setattr(pagespeed_worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "_get_crawl_settings",
+        lambda: CrawlSettings(max_pages=4, max_depth=1),
+    )
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "crawl_website",
+        fake_crawl_website,
+    )
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "enqueue_pagespeed_jobs",
+        capture_pagespeed_jobs,
+    )
+    with TestingSessionLocal() as db:
+        job = WebsiteCrawlJob(website_url="https://crawled.example/")
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    asyncio.run(pagespeed_worker.process_job(job_id))
+
+    with TestingSessionLocal() as db:
+        crawl_job = db.get(WebsiteCrawlJob, job_id)
+        jobs = db.scalars(select(PageSpeedScanJob)).all()
+        assert crawl_job is not None
+        assert crawl_job.status == "succeeded"
+        assert len(jobs) == 2
+        assert {job.strategy for job in jobs} == {"mobile", "desktop"}
+        assert all(job.company_id is None for job in jobs)
+        assert all(job.website_id is not None for job in jobs)
+        assert set(enqueued_job_ids) == {job.id for job in jobs}
+        website_ids = {job.website_id for job in jobs}
+
+    response = client.get("/api/v1/pagespeed/jobs")
+    assert response.status_code == 200
+    assert {job["website_id"] for job in response.json()} == {
+        str(website_id) for website_id in website_ids
+    }
+
+
+def test_failed_crawl_does_not_queue_pagespeed_jobs(client, monkeypatch):
+    async def fail_crawl_website(
+        _website_url: str,
+        **_options,
+    ) -> CrawlData:
+        raise HTTPException(status_code=502, detail="Crawler unavailable.")
+
+    monkeypatch.setattr(pagespeed_worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "_get_crawl_settings",
+        lambda: CrawlSettings(max_pages=4, max_depth=1),
+    )
+    monkeypatch.setattr(
+        pagespeed_worker,
+        "crawl_website",
+        fail_crawl_website,
+    )
+    with TestingSessionLocal() as db:
+        job = WebsiteCrawlJob(website_url="https://failed.example/")
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    asyncio.run(pagespeed_worker.process_job(job_id))
+
+    with TestingSessionLocal() as db:
+        crawl_job = db.get(WebsiteCrawlJob, job_id)
+        assert crawl_job is not None
+        assert crawl_job.status == "failed"
+        assert db.scalars(select(PageSpeedScanJob)).all() == []
+
+
 def test_failed_pagespeed_job_exposes_reason_and_timestamps(
     client,
     monkeypatch,
@@ -676,6 +840,77 @@ def test_failed_pagespeed_job_can_be_retried(client, monkeypatch):
     assert retried["started_at"] is None
     assert retried["completed_at"] is None
     assert enqueued_ids == [job_id]
+
+
+def test_batch_retry_pagespeed_jobs_updates_and_dispatches_once(
+    client,
+    monkeypatch,
+):
+    dispatch_calls: list[list[UUID]] = []
+
+    async def capture_enqueue(job_ids: list[UUID]) -> None:
+        dispatch_calls.append(job_ids)
+
+    monkeypatch.setattr(
+        "app.services.pagespeed_jobs.enqueue_pagespeed_jobs",
+        capture_enqueue,
+    )
+    now = datetime.now(timezone.utc)
+    with TestingSessionLocal() as db:
+        website = Website(
+            website_url="https://example.com/",
+            domain="example.com",
+        )
+        db.add(website)
+        db.flush()
+        failed_jobs = [
+            PageSpeedScanJob(
+                website_id=website.id,
+                website_url=website.website_url,
+                strategy=strategy,
+                status="failed",
+                attempts=2,
+                error="PageSpeed request failed.",
+                started_at=now,
+                completed_at=now,
+            )
+            for strategy in ("mobile", "desktop")
+        ]
+        queued_job = PageSpeedScanJob(
+            website_id=website.id,
+            website_url=website.website_url,
+            strategy="mobile",
+            status="queued",
+        )
+        db.add_all([*failed_jobs, queued_job])
+        db.commit()
+        failed_ids = [job.id for job in failed_jobs]
+        queued_id = queued_job.id
+
+    response = client.post(
+        "/api/v1/pagespeed/jobs/retry-batch",
+        json={"job_ids": [str(job_id) for job_id in [*failed_ids, queued_id]]},
+    )
+
+    assert response.status_code == 202
+    result = response.json()
+    assert result["retried_job_ids"] == [str(job_id) for job_id in failed_ids]
+    assert result["failures"] == [
+        {
+            "job_id": str(queued_id),
+            "message": "Only failed PageSpeed scan jobs can be retried.",
+        }
+    ]
+    assert dispatch_calls == [failed_ids]
+
+    with TestingSessionLocal() as db:
+        retried_jobs = [db.get(PageSpeedScanJob, job_id) for job_id in failed_ids]
+        assert all(job is not None for job in retried_jobs)
+        assert all(job.status == "queued" for job in retried_jobs)
+        assert all(job.attempts == 0 for job in retried_jobs)
+        assert all(job.error is None for job in retried_jobs)
+        assert all(job.started_at is None for job in retried_jobs)
+        assert all(job.completed_at is None for job in retried_jobs)
 
 
 def test_worker_recovers_queued_pagespeed_job_without_redis_delivery(

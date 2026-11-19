@@ -5,9 +5,14 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
+from app.schemas.job_queue import (
+    BatchJobRetryRequest,
+    BatchJobRetryResponse,
+)
 from app.schemas.pagespeed import PageSpeedScanJobResponse
 from app.services.pagespeed_jobs import (
     list_pagespeed_scan_jobs,
+    retry_failed_pagespeed_scan_jobs,
     retry_pagespeed_scan_job,
 )
 
@@ -24,6 +29,18 @@ def list_pagespeed_jobs(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[PageSpeedScanJobResponse]:
     return list_pagespeed_scan_jobs(db, limit)
+
+
+@router.post(
+    "/jobs/retry-batch",
+    response_model=BatchJobRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_pagespeed_jobs_batch(
+    payload: BatchJobRetryRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> BatchJobRetryResponse:
+    return await retry_failed_pagespeed_scan_jobs(payload.job_ids, db)
 
 
 @router.post(

@@ -30,6 +30,10 @@ from app.services.pagespeed import (
     PageSpeedScanData,
     scan_pagespeed,
 )
+from app.services.pagespeed_jobs import (
+    create_website_pagespeed_jobs,
+    enqueue_pagespeed_jobs,
+)
 from app.services.website_crawler import (
     CrawlData,
     _persist_crawl,
@@ -128,12 +132,16 @@ def _find_recoverable_job() -> UUID | None:
         )
 
 
-def _save_success(job_id: UUID, crawl_data: CrawlData) -> None:
+def _save_success(job_id: UUID, crawl_data: CrawlData) -> list[UUID]:
     with SessionLocal() as db:
         crawl = _persist_crawl(crawl_data, db)
         job = db.get(WebsiteCrawlJob, job_id)
         if job is None:
             raise RuntimeError(f"Website crawl job {job_id} no longer exists.")
+        pagespeed_job_ids = create_website_pagespeed_jobs(
+            crawl_data.website_url,
+            db,
+        )
         now = datetime.now(timezone.utc)
         job.status = "succeeded"
         job.crawl_id = crawl.id
@@ -141,6 +149,7 @@ def _save_success(job_id: UUID, crawl_data: CrawlData) -> None:
         job.updated_at = now
         job.completed_at = now
         db.commit()
+        return pagespeed_job_ids
 
 
 def _get_crawl_settings() -> CrawlSettings:
@@ -180,7 +189,19 @@ async def process_job(job_id: UUID) -> None:
             max_pages=crawl_settings.max_pages,
             max_depth=crawl_settings.max_depth,
         )
-        await run_in_threadpool(_save_success, job_id, crawl_data)
+        pagespeed_job_ids = await run_in_threadpool(
+            _save_success,
+            job_id,
+            crawl_data,
+        )
+        try:
+            await enqueue_pagespeed_jobs(pagespeed_job_ids)
+        except Exception:
+            logger.exception(
+                "Could not dispatch PageSpeed scans after successful website "
+                "crawl job %s; queued jobs remain available for recovery.",
+                job_id,
+            )
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         await run_in_threadpool(_save_failure, job_id, detail)
@@ -197,7 +218,7 @@ async def process_job(job_id: UUID) -> None:
 
 def _claim_pagespeed_job(
     job_id: UUID,
-) -> tuple[list[UUID], str, str, TenantContext] | None:
+) -> tuple[list[UUID], UUID | None, str, str, TenantContext] | None:
     started_at = datetime.now(timezone.utc)
     with SessionLocal() as db:
         result = db.execute(
@@ -224,6 +245,7 @@ def _claim_pagespeed_job(
             return None
         job_data = (
             [company.id for company in job.companies],
+            job.website_id,
             job.website_url,
             job.strategy,
             TenantContext(
@@ -286,6 +308,7 @@ def _find_recoverable_pagespeed_job() -> UUID | None:
 def _save_pagespeed_success(
     job_id: UUID,
     company_ids: list[UUID],
+    website_id: UUID | None,
     scan_data: PageSpeedScanData,
 ) -> None:
     with SessionLocal() as db:
@@ -295,6 +318,7 @@ def _save_pagespeed_success(
         scans = [
             PageSpeedScan(
                 company_id=company_id,
+                website_id=website_id,
                 website_url=scan_data.website_url,
                 strategy=scan_data.strategy,
                 category_scores=scan_data.category_scores,
@@ -302,6 +326,17 @@ def _save_pagespeed_success(
             )
             for company_id in company_ids
         ]
+        if not scans and website_id is not None:
+            scans.append(
+                PageSpeedScan(
+                    company_id=None,
+                    website_id=website_id,
+                    website_url=scan_data.website_url,
+                    strategy=scan_data.strategy,
+                    category_scores=scan_data.category_scores,
+                    report=scan_data.report,
+                )
+            )
         db.add_all(scans)
         db.flush()
 
@@ -332,7 +367,7 @@ async def process_pagespeed_job(job_id: UUID) -> None:
     if job_data is None:
         return
 
-    company_ids, website_url, strategy, context = job_data
+    company_ids, website_id, website_url, strategy, context = job_data
     tenant_token = set_tenant_context(context)
     try:
         if strategy not in ("mobile", "desktop"):
@@ -343,6 +378,7 @@ async def process_pagespeed_job(job_id: UUID) -> None:
             _save_pagespeed_success,
             job_id,
             company_ids,
+            website_id,
             scan_data,
         )
     except PageSpeedError as exc:

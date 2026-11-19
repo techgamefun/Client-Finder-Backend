@@ -52,6 +52,11 @@ async def enqueue_job(job_id: str) -> None:
     await _execute("LPUSH", QUEUE_KEY, job_id)
 
 
+async def enqueue_crawl_jobs(job_ids: list[str]) -> None:
+    if job_ids:
+        await _execute("LPUSH", QUEUE_KEY, *job_ids)
+
+
 async def enqueue_pagespeed_jobs(job_ids: list[str]) -> None:
     if job_ids:
         await _execute("LPUSH", PAGESPEED_QUEUE_KEY, *job_ids)

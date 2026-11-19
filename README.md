@@ -81,6 +81,11 @@ Use `GET /api/v1/companies/{id}/website-crawl` to load that result and
 company's website (or domain when no website URL is set). Discovery ingestion
 and research-source enrichment remain synchronous because they need crawl
 results before those workflows can finish.
+Each successful queued website crawl also creates mobile and desktop PageSpeed
+jobs without delaying the crawl response. Jobs are linked to the website and,
+when a company with the same normalized domain exists, to that company as well.
+The worker processes the scans separately; configure a Google PageSpeed API key
+in **Settings → PageSpeed** for them to succeed.
 
 The website registry at `GET /api/v1/websites` stores one row per normalized
 domain. Discovery saves only the provider and canonical HTTPS origin; it does
@@ -89,9 +94,12 @@ website statuses can be `new`, `lead`, or `checked`. Rows have no company link.
 The save operation sends the origin to the existing crawl
 job queue; crawl progress remains on `website_crawl_jobs`. The Websites page
 links each domain to `GET /api/v1/websites/{id}`, which returns the website
-record, crawl page content, classification signals, contact/social links, and
-crawl-job history. The list API supports bounded `limit`/`offset`, page type,
-and search filters. Website type, site topic, and language can be
+record, crawl page content, classification signals, contact/social links, the
+ten most recent PageSpeed score summaries, and crawl-job history. Full
+Lighthouse audits are loaded on demand from
+`GET /api/v1/websites/{id}/pagespeed-scans/{scan_id}`. The list API supports
+bounded `limit`/`offset`, page type, and search filters. Website type, site
+topic, and language can be
 edited with `PATCH /api/v1/websites/{id}`. The **Add to Lead** action creates
 companies for the filtered crawled websites and marks their registry status as
 `lead`; listing websites are excluded. Newly created companies use the domain
@@ -130,7 +138,12 @@ Jobs page and active crawl-status views receive job updates over the WebSocket
 endpoint `/api/v1/queue/events`. PostgreSQL publishes an event after a job is
 created or updated, including when a separate worker process changes it. The
 frontend reconnects and refreshes the affected job data when it receives an
-event; it does not continuously poll those job statuses.
+event; it does not continuously poll those job statuses. The Indexing tab can
+queue up to 100 websites from a CSV with a `website_url` or `url` column; the
+CSV is parsed in the browser and all valid URLs are submitted in one batch
+request. Jobs are committed together and dispatched through one Redis request.
+The Crawler and PageSpeed tabs can also retry all recent failed jobs in one
+batch request; eligible jobs are updated together and dispatched once.
 
 The legacy `POST /api/v1/discovery/ingest` endpoint continues to create and
 enrich companies directly and queues mobile and desktop Google PageSpeed
@@ -152,7 +165,7 @@ prefill the Discover Leads filters. Apply pending database changes with
 - PostgreSQL
 - Upstash Redis for queued website crawl jobs
 - A Tavily API key for the discovery endpoints
-- A Google PageSpeed API key for PageSpeed scans during discovery ingestion
+- A Google PageSpeed API key for PageSpeed scans after crawls or discovery ingestion
 
 The dependency file is named `requirements.txt` and includes Alembic for schema
 migrations.

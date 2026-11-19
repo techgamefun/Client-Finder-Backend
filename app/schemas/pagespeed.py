@@ -31,6 +31,7 @@ class PageSpeedScanJobResponse(BaseModel):
 
     id: UUID
     company_ids: list[UUID]
+    website_id: UUID | None = None
     website_url: str
     strategy: PageSpeedStrategy
     status: Literal["queued", "running", "succeeded", "failed"]

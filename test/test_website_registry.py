@@ -6,6 +6,7 @@ from sqlalchemy import select
 from conftest import TestingSessionLocal
 from app.models import (
     Company,
+    PageSpeedScan,
     PageSpeedScanJob,
     SearchKeyword,
     Website,
@@ -237,6 +238,75 @@ def test_website_detail_returns_404_for_unknown_id(client):
     response = client.get(f"/api/v1/websites/{uuid4()}")
 
     assert response.status_code == 404
+
+
+def test_website_detail_includes_pagespeed_summaries_and_report(client):
+    with TestingSessionLocal() as db:
+        website = Website(
+            website_url="https://speed.example/",
+            domain="speed.example",
+        )
+        other_website = Website(
+            website_url="https://other-speed.example/",
+            domain="other-speed.example",
+        )
+        db.add(website)
+        db.add(other_website)
+        db.flush()
+        scan = PageSpeedScan(
+            website_id=website.id,
+            website_url=website.website_url,
+            strategy="mobile",
+            category_scores={
+                "performance": 87,
+                "accessibility": 96,
+                "best-practices": 100,
+                "seo": 91,
+            },
+            report={
+                "lighthouseResult": {
+                    "lighthouseVersion": "12.0.0",
+                    "audits": {
+                        "first-contentful-paint": {
+                            "title": "First Contentful Paint",
+                            "score": 0.9,
+                            "displayValue": "1.2 s",
+                        },
+                    },
+                },
+            },
+            scanned_at=datetime(2026, 1, 4, tzinfo=timezone.utc),
+        )
+        db.add(scan)
+        db.commit()
+        website_id = website.id
+        other_website_id = other_website.id
+        scan_id = scan.id
+
+    response = client.get(f"/api/v1/websites/{website_id}")
+
+    assert response.status_code == 200
+    summaries = response.json()["pagespeed_scans"]
+    assert len(summaries) == 1
+    assert summaries[0]["id"] == str(scan_id)
+    assert summaries[0]["strategy"] == "mobile"
+    assert summaries[0]["category_scores"]["performance"] == 87
+
+    report_response = client.get(
+        f"/api/v1/websites/{website_id}/pagespeed-scans/{scan_id}"
+    )
+    assert report_response.status_code == 200
+    assert (
+        report_response.json()["report"]["lighthouseResult"]["audits"][
+            "first-contentful-paint"
+        ]["displayValue"]
+        == "1.2 s"
+    )
+
+    unrelated_scan_response = client.get(
+        f"/api/v1/websites/{other_website_id}/pagespeed-scans/{scan_id}"
+    )
+    assert unrelated_scan_response.status_code == 404
 
 
 def test_company_domain_is_added_to_website_registry(client):

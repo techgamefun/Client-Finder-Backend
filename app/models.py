@@ -1194,10 +1194,18 @@ class PageSpeedScan(TenantOwnedMixin, Base):
         primary_key=True,
         default=uuid4,
     )
-    company_id: Mapped[UUID] = mapped_column(
+    company_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("companies.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+    )
+    website_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "websites.id",
+            ondelete="CASCADE",
+            name="fk_pagespeed_scans_website_id_websites",
+        ),
     )
     website_url: Mapped[str] = mapped_column(String(2000), nullable=False)
     strategy: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -1212,14 +1220,24 @@ class PageSpeedScan(TenantOwnedMixin, Base):
         nullable=False,
     )
 
-    company: Mapped["Company"] = relationship(
+    company: Mapped["Company | None"] = relationship(
         back_populates="pagespeed_scans",
     )
+    website: Mapped["Website | None"] = relationship()
 
     __table_args__ = (
+        CheckConstraint(
+            "company_id IS NOT NULL OR website_id IS NOT NULL",
+            name="ck_pagespeed_scans_has_owner",
+        ),
         Index(
             "ix_pagespeed_scans_company_scanned_at",
             "company_id",
+            "scanned_at",
+        ),
+        Index(
+            "ix_pagespeed_scans_website_scanned_at",
+            "website_id",
             "scanned_at",
         ),
     )
@@ -1233,10 +1251,18 @@ class PageSpeedScanJob(TenantOwnedMixin, Base):
         primary_key=True,
         default=uuid4,
     )
-    company_id: Mapped[UUID] = mapped_column(
+    company_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("companies.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+    )
+    website_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "websites.id",
+            ondelete="CASCADE",
+            name="fk_pagespeed_scan_jobs_website_id_websites",
+        ),
     )
     website_url: Mapped[str] = mapped_column(String(2000), nullable=False)
     strategy: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -1276,9 +1302,14 @@ class PageSpeedScanJob(TenantOwnedMixin, Base):
     companies: Mapped[list[Company]] = relationship(
         secondary=pagespeed_scan_job_companies,
     )
+    website: Mapped["Website | None"] = relationship()
     scan: Mapped[PageSpeedScan | None] = relationship()
 
     __table_args__ = (
+        CheckConstraint(
+            "company_id IS NOT NULL OR website_id IS NOT NULL",
+            name="ck_pagespeed_scan_jobs_has_owner",
+        ),
         Index(
             "ix_pagespeed_scan_jobs_status",
             "status",
@@ -1287,6 +1318,11 @@ class PageSpeedScanJob(TenantOwnedMixin, Base):
         Index(
             "ix_pagespeed_scan_jobs_organization_created_at",
             "organization_id",
+            "created_at",
+        ),
+        Index(
+            "ix_pagespeed_scan_jobs_website_created_at",
+            "website_id",
             "created_at",
         ),
     )

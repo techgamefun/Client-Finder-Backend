@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.pagespeed import PageSpeedScanSummary
 from app.schemas.website_crawl import (
     CrawlPageClassification,
     WebsiteCrawlResponse,
@@ -85,6 +86,7 @@ class WebsiteHypeStatProfileResponse(BaseModel):
 class WebsiteDetailResponse(BaseModel):
     website: WebsiteResponse
     crawl: WebsiteCrawlResponse | None
+    pagespeed_scans: list[PageSpeedScanSummary] = Field(default_factory=list)
     hypestat_profile: WebsiteHypeStatProfileResponse | None = None
     crawl_jobs: list[WebsiteCrawlJobHistoryResponse] = Field(
         default_factory=list,

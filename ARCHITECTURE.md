@@ -114,9 +114,14 @@ app/main.py                 FastAPI app, router registration, health check
   retries temporary rate-limit and server failures a bounded number of times,
   but reports denied access without attempting to bypass it.
 - `app/services/crawl_jobs.py` creates durable PostgreSQL crawl jobs and
-  dispatches their IDs through Upstash Redis when available. `app/worker.py`
-  consumes jobs, persists crawl results, records failures, and recovers queued
-  jobs from PostgreSQL when Redis dispatch is unavailable. Discovery ingestion
+  dispatches their IDs through Upstash Redis when available. CSV imports use a
+  batch endpoint that commits jobs together and dispatches IDs in one Redis
+  request. Batch retry endpoints update eligible crawl or PageSpeed jobs
+  together and dispatch their IDs once. `app/worker.py` consumes jobs, persists
+  crawl results, records failures, and recovers queued jobs from PostgreSQL
+  when Redis dispatch is unavailable. Every successful
+  queued crawl creates mobile and desktop PageSpeed jobs linked to its Website
+  registry record and, when present, a matching company. Discovery ingestion
   remains synchronous because its results are required by that workflow. Set
   `RUN_WORKER_IN_API=true` to run the worker in the API
   lifespan when a separate background-worker service is unavailable.
@@ -233,7 +238,9 @@ review status, page type, site topic, language, discovery source/provider, and c
 status. It supports bounded `limit`/`offset` pagination, page type, and search
 filters. `GET /api/v1/websites/{id}` returns the website record, associated discovery
 keywords, stored crawl page content, classification signals, contact/social
-links, and crawl-job history for the website detail page. `GET
+links, crawl-job history, and the ten most recent PageSpeed score summaries for
+the website detail page. Lighthouse audit reports are loaded on demand from
+`/api/v1/websites/{id}/pagespeed-scans/{scan_id}`. `GET
 /api/v1/websites/corpus-words` gathers saved page titles and descriptions from
 successful crawls, asks the stateless Go crawler service to analyze each
 domain independently, and caches each domain's top 50 keywords in
@@ -292,8 +299,10 @@ convert entity primary keys and their foreign keys to UUIDs while preserving
 existing relationships, add durable website crawl jobs, persist discovery
 tool preferences and Octoparse provider jobs, and backfill the website
 registry from existing crawl, company, lead-source, and crawl-job records.
-The latest registry migration removes the redundant `Website.site_type` field
-while preserving listing classification in `page_type`.
+Later revisions allow PageSpeed jobs and reports to belong to Website registry
+rows as well as companies. The latest registry migration removes the redundant
+`Website.site_type` field while preserving listing classification in
+`page_type`.
 A migration that backfills or constrains existing data must account for
 incompatible existing rows and fail clearly rather than silently discarding
 data.
@@ -303,7 +312,9 @@ data.
 - Search results are returned for review; the query and timestamp are recorded
   immediately, while company associations are saved when results are ingested.
 - PageSpeed reports are saved during discovery ingestion and loaded in full on
-  demand from the company pipeline.
+  demand from the company pipeline. Successful queued crawls also enqueue
+  independent scans, which are associated with their Website and any matching
+  company.
 - Services own the workflow and provider-specific behavior; route handlers
   handle HTTP input/output and dependency wiring.
 - Ingestion only fills company values explicitly discovered by the bounded

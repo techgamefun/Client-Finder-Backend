@@ -7,12 +7,62 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import WebsiteCrawlJob
-from app.schemas.website_crawl import WebsiteCrawlJobResponse
-from app.services.redis_queue import RedisQueueError, enqueue_job
+from app.schemas.job_queue import (
+    BatchJobRetryFailure,
+    BatchJobRetryResponse,
+)
+from app.schemas.website_crawl import (
+    WebsiteCrawlJobResponse,
+)
+from app.services.normalization import normalize_domain
+from app.services.redis_queue import (
+    RedisQueueError,
+    enqueue_crawl_jobs,
+    enqueue_job,
+)
 from app.services.website_registry import upsert_website
 
 
 logger = logging.getLogger(__name__)
+
+
+async def create_website_crawl_jobs(
+    website_urls: list[str],
+    db: Session,
+) -> list[WebsiteCrawlJob]:
+    jobs = []
+    seen_domains: set[str] = set()
+
+    for website_url in website_urls:
+        domain = normalize_domain(website_url)
+        if domain is None:
+            raise ValueError(
+                f"Could not determine a website domain from {website_url!r}."
+            )
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+
+        website = upsert_website(
+            db,
+            website_url,
+            discovery_source="manual",
+        )
+        job = WebsiteCrawlJob(website_url=website.website_url, status="queued")
+        db.add(job)
+        jobs.append(job)
+
+    db.commit()
+    job_ids = [str(job.id) for job in jobs]
+    try:
+        await enqueue_crawl_jobs(job_ids)
+    except RedisQueueError:
+        logger.exception(
+            "Could not dispatch %s website crawl jobs; they remain queued "
+            "for worker recovery.",
+            len(job_ids),
+        )
+    return jobs
 
 
 async def create_website_crawl_job(
@@ -108,6 +158,65 @@ async def retry_website_crawl_job(
             job.id,
         )
     return get_website_crawl_job(job.id, db)
+
+
+async def retry_failed_website_crawl_jobs(
+    job_ids: list[UUID],
+    db: Session,
+) -> BatchJobRetryResponse:
+    unique_job_ids = list(dict.fromkeys(job_ids))
+    jobs = db.scalars(
+        select(WebsiteCrawlJob)
+        .where(WebsiteCrawlJob.id.in_(unique_job_ids))
+        .with_for_update()
+    ).all()
+    jobs_by_id = {job.id: job for job in jobs}
+    retried_job_ids: list[UUID] = []
+    failures: list[BatchJobRetryFailure] = []
+    now = datetime.now(timezone.utc)
+
+    for job_id in unique_job_ids:
+        job = jobs_by_id.get(job_id)
+        if job is None:
+            failures.append(
+                BatchJobRetryFailure(
+                    job_id=job_id,
+                    message="Website crawl job not found.",
+                )
+            )
+        elif job.status != "failed":
+            failures.append(
+                BatchJobRetryFailure(
+                    job_id=job_id,
+                    message="Only failed website crawl jobs can be retried.",
+                )
+            )
+        else:
+            job.status = "queued"
+            job.attempts = 0
+            job.error = None
+            job.started_at = None
+            job.completed_at = None
+            job.updated_at = now
+            retried_job_ids.append(job_id)
+
+    db.commit()
+    if retried_job_ids:
+        try:
+            await enqueue_crawl_jobs(
+                [str(job_id) for job_id in retried_job_ids]
+            )
+        except RedisQueueError:
+            logger.exception(
+                "Could not dispatch %s retried website crawl jobs; they "
+                "remain queued for worker recovery.",
+                len(retried_job_ids),
+            )
+
+    return BatchJobRetryResponse(
+        retried_job_ids=retried_job_ids,
+        failures=failures,
+    )
 
 
 def list_website_crawl_jobs(

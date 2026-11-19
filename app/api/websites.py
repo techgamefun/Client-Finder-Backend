@@ -7,7 +7,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_db
-from app.models import Website, WebsiteCrawlJob
+from app.models import PageSpeedScan, Website, WebsiteCrawlJob
+from app.schemas.pagespeed import PageSpeedScanResponse, PageSpeedScanSummary
 from app.schemas.website import (
     WebsiteAddToLeadsRequest,
     WebsiteAddToLeadsResponse,
@@ -36,6 +37,7 @@ from app.services.website_hypestat import refetch_website_hypestat_profile
 router = APIRouter(prefix="/websites", tags=["Websites"])
 
 WebsiteSession = Annotated[Session, Depends(get_db)]
+PAGESPEED_HISTORY_LIMIT = 10
 
 
 @router.get("", response_model=list[WebsiteResponse])
@@ -150,6 +152,12 @@ def get_website_detail(
         .where(WebsiteCrawlJob.website_url == website.website_url)
         .order_by(WebsiteCrawlJob.created_at.desc(), WebsiteCrawlJob.id.desc())
     ).all()
+    pagespeed_scans = db.scalars(
+        select(PageSpeedScan)
+        .where(PageSpeedScan.website_id == website.id)
+        .order_by(PageSpeedScan.scanned_at.desc(), PageSpeedScan.id.desc())
+        .limit(PAGESPEED_HISTORY_LIMIT)
+    ).all()
     crawl_job_status = crawl_jobs[0].status if crawl_jobs else None
     return WebsiteDetailResponse(
         website=_website_response(website, crawl_job_status),
@@ -158,6 +166,10 @@ def get_website_detail(
             if website.crawl is not None
             else None
         ),
+        pagespeed_scans=[
+            PageSpeedScanSummary.model_validate(scan)
+            for scan in pagespeed_scans
+        ],
         hypestat_profile=(
             WebsiteHypeStatProfileResponse.model_validate(
                 website.hypestat_profile
@@ -174,6 +186,35 @@ def get_website_detail(
             for keyword in website.search_keywords
         ],
     )
+
+
+@router.get(
+    "/{website_id}/pagespeed-scans/{scan_id}",
+    response_model=PageSpeedScanResponse,
+)
+def get_website_pagespeed_scan(
+    website_id: UUID,
+    scan_id: UUID,
+    db: WebsiteSession,
+) -> PageSpeedScan:
+    if db.get(Website, website_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website not found.",
+        )
+
+    scan = db.scalar(
+        select(PageSpeedScan).where(
+            PageSpeedScan.id == scan_id,
+            PageSpeedScan.website_id == website_id,
+        )
+    )
+    if scan is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="PageSpeed scan not found.",
+        )
+    return scan
 
 
 @router.post(

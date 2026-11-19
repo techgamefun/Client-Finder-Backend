@@ -1,9 +1,12 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import func, select
 
 from conftest import TestingSessionLocal
 from app.models import Website, WebsiteCrawlJob, WebsiteHypeStatProfile
 from app.services import crawl_jobs
 from app.services.hypestat import HypeStatFetchResult
+from app.services.redis_queue import RedisQueueError
 
 
 def _disable_redis_enqueue(monkeypatch):
@@ -300,3 +303,133 @@ def test_website_status_stays_new_when_classification_is_updated(
         json={"status": "crawled"},
     )
     assert status_update.status_code == 422
+
+
+def test_batch_crawl_endpoint_creates_jobs_and_dispatches_once(
+    client,
+    monkeypatch,
+):
+    dispatch_calls: list[list[str]] = []
+
+    async def capture_enqueue(job_ids: list[str]) -> None:
+        dispatch_calls.append(job_ids)
+
+    monkeypatch.setattr(crawl_jobs, "enqueue_crawl_jobs", capture_enqueue)
+    response = client.post(
+        "/api/v1/crawler/crawl/batch",
+        json={
+            "website_urls": [
+                "https://example.com/about",
+                "http://www.example.com/contact",
+                "https://example.org/",
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    jobs = response.json()["jobs"]
+    assert [job["website_url"] for job in jobs] == [
+        "https://example.com/",
+        "https://example.org/",
+    ]
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0] == [job["id"] for job in jobs]
+
+    with TestingSessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Website)) == 2
+        assert db.scalar(select(func.count()).select_from(WebsiteCrawlJob)) == 2
+
+
+def test_batch_crawl_endpoint_rejects_more_than_100_urls(client):
+    response = client.post(
+        "/api/v1/crawler/crawl/batch",
+        json={
+            "website_urls": [
+                f"https://site{index}.example/" for index in range(101)
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    with TestingSessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Website)) == 0
+        assert db.scalar(select(func.count()).select_from(WebsiteCrawlJob)) == 0
+
+
+def test_batch_crawl_redis_failure_keeps_jobs_for_recovery(
+    client,
+    monkeypatch,
+):
+    async def fail_enqueue(_job_ids: list[str]) -> None:
+        raise RedisQueueError("Redis unavailable.")
+
+    monkeypatch.setattr(crawl_jobs, "enqueue_crawl_jobs", fail_enqueue)
+    response = client.post(
+        "/api/v1/crawler/crawl/batch",
+        json={"website_urls": ["https://example.com/"]},
+    )
+
+    assert response.status_code == 202
+    assert len(response.json()["jobs"]) == 1
+    with TestingSessionLocal() as db:
+        job = db.scalar(select(WebsiteCrawlJob))
+        assert job is not None
+        assert job.status == "queued"
+
+
+def test_batch_retry_crawler_jobs_updates_and_dispatches_once(
+    client,
+    monkeypatch,
+):
+    dispatch_calls: list[list[str]] = []
+
+    async def capture_enqueue(job_ids: list[str]) -> None:
+        dispatch_calls.append(job_ids)
+
+    monkeypatch.setattr(crawl_jobs, "enqueue_crawl_jobs", capture_enqueue)
+    now = datetime.now(timezone.utc)
+    with TestingSessionLocal() as db:
+        failed_jobs = [
+            WebsiteCrawlJob(
+                website_url=f"https://failed{index}.example/",
+                status="failed",
+                attempts=2,
+                error="Crawler unavailable.",
+                started_at=now,
+                completed_at=now,
+            )
+            for index in range(2)
+        ]
+        queued_job = WebsiteCrawlJob(
+            website_url="https://already-queued.example/",
+            status="queued",
+        )
+        db.add_all([*failed_jobs, queued_job])
+        db.commit()
+        failed_ids = [job.id for job in failed_jobs]
+        queued_id = queued_job.id
+
+    response = client.post(
+        "/api/v1/crawler/jobs/retry-batch",
+        json={"job_ids": [str(job_id) for job_id in [*failed_ids, queued_id]]},
+    )
+
+    assert response.status_code == 202
+    result = response.json()
+    assert result["retried_job_ids"] == [str(job_id) for job_id in failed_ids]
+    assert result["failures"] == [
+        {
+            "job_id": str(queued_id),
+            "message": "Only failed website crawl jobs can be retried.",
+        }
+    ]
+    assert dispatch_calls == [[str(job_id) for job_id in failed_ids]]
+
+    with TestingSessionLocal() as db:
+        retried_jobs = [db.get(WebsiteCrawlJob, job_id) for job_id in failed_ids]
+        assert all(job is not None for job in retried_jobs)
+        assert all(job.status == "queued" for job in retried_jobs)
+        assert all(job.attempts == 0 for job in retried_jobs)
+        assert all(job.error is None for job in retried_jobs)
+        assert all(job.started_at is None for job in retried_jobs)
+        assert all(job.completed_at is None for job in retried_jobs)
