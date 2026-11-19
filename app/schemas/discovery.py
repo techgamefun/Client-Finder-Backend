@@ -200,7 +200,8 @@ class DiscoveryWebsiteInput(BaseModel):
 
 
 class DiscoveryWebsiteSaveRequest(DiscoverySearchRequest):
-    results: list[DiscoveryWebsiteInput] = Field(max_length=20)
+    max_results: int = Field(default=20, ge=1, le=100)
+    results: list[DiscoveryWebsiteInput] = Field(max_length=100)
     search_id: UUID | None = None
 
 

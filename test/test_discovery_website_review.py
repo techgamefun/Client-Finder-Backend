@@ -1,12 +1,45 @@
 from datetime import datetime, timezone
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from conftest import TestingSessionLocal
 from app.models import Website, WebsiteCrawlJob, WebsiteHypeStatProfile
+from app.schemas.discovery import DiscoveryWebsiteSaveRequest
 from app.services import crawl_jobs
 from app.services.hypestat import HypeStatFetchResult
 from app.services.redis_queue import RedisQueueError
+
+
+def test_discovery_website_save_request_accepts_up_to_100_results():
+    base_payload = {
+        "query": "local manufacturing news",
+        "max_results": 100,
+        "results": [
+            {"url": f"https://example-{index}.com", "provider": "tavily"}
+            for index in range(100)
+        ],
+    }
+
+    request = DiscoveryWebsiteSaveRequest.model_validate(base_payload)
+    assert len(request.results) == 100
+
+    with pytest.raises(ValidationError):
+        DiscoveryWebsiteSaveRequest.model_validate(
+            {**base_payload, "max_results": 101}
+        )
+    with pytest.raises(ValidationError):
+        DiscoveryWebsiteSaveRequest.model_validate(
+            {
+                **base_payload,
+                "max_results": 100,
+                "results": [
+                    *base_payload["results"],
+                    {"url": "https://example-100.com", "provider": "tavily"},
+                ],
+            }
+        )
 
 
 def _disable_redis_enqueue(monkeypatch):

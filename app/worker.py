@@ -5,11 +5,16 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from starlette.concurrency import run_in_threadpool
 
 from app.database import SessionLocal
-from app.models import PageSpeedScan, PageSpeedScanJob, WebsiteCrawlJob
+from app.models import (
+    PageSpeedScan,
+    PageSpeedScanJob,
+    UserProviderCredential,
+    WebsiteCrawlJob,
+)
 from app.services.application_settings import get_user_provider_api_key
 from app.tenant_context import (
     TenantContext,
@@ -157,11 +162,6 @@ def _get_crawl_settings() -> CrawlSettings:
         return get_crawl_settings(db)
 
 
-def _get_pagespeed_api_key() -> str | None:
-    with SessionLocal() as db:
-        return get_user_provider_api_key(db, "pagespeed")
-
-
 def _save_failure(job_id: UUID, detail: str) -> None:
     with SessionLocal() as db:
         job = db.get(WebsiteCrawlJob, job_id)
@@ -218,9 +218,22 @@ async def process_job(job_id: UUID) -> None:
 
 def _claim_pagespeed_job(
     job_id: UUID,
-) -> tuple[list[UUID], UUID | None, str, str, TenantContext] | None:
+) -> tuple[list[UUID], UUID | None, str, str, TenantContext, str] | None:
     started_at = datetime.now(timezone.utc)
     with SessionLocal() as db:
+        job = db.get(PageSpeedScanJob, job_id)
+        if job is None or job.created_by_user_id is None:
+            db.rollback()
+            return None
+        api_key = get_user_provider_api_key(
+            db,
+            "pagespeed",
+            user_id=job.created_by_user_id,
+        )
+        if not api_key:
+            db.rollback()
+            return None
+
         result = db.execute(
             update(PageSpeedScanJob)
             .where(
@@ -239,10 +252,6 @@ def _claim_pagespeed_job(
             db.rollback()
             return None
 
-        job = db.get(PageSpeedScanJob, job_id)
-        if job is None:
-            db.rollback()
-            return None
         job_data = (
             [company.id for company in job.companies],
             job.website_id,
@@ -254,6 +263,7 @@ def _claim_pagespeed_job(
                 email="",
                 role="system",
             ),
+            api_key,
         )
         db.commit()
         return job_data
@@ -299,6 +309,13 @@ def _find_recoverable_pagespeed_job() -> UUID | None:
             .where(
                 PageSpeedScanJob.status == "queued",
                 PageSpeedScanJob.created_at < recovery_cutoff,
+                exists(
+                    select(UserProviderCredential.id).where(
+                        UserProviderCredential.user_id
+                        == PageSpeedScanJob.created_by_user_id,
+                        UserProviderCredential.provider == "pagespeed",
+                    )
+                ),
             )
             .order_by(PageSpeedScanJob.created_at)
             .limit(1)
@@ -367,12 +384,11 @@ async def process_pagespeed_job(job_id: UUID) -> None:
     if job_data is None:
         return
 
-    company_ids, website_id, website_url, strategy, context = job_data
+    company_ids, website_id, website_url, strategy, context, api_key = job_data
     tenant_token = set_tenant_context(context)
     try:
         if strategy not in ("mobile", "desktop"):
             raise PageSpeedError("The PageSpeed scan job has an invalid strategy.")
-        api_key = await run_in_threadpool(_get_pagespeed_api_key)
         scan_data = await scan_pagespeed(website_url, strategy, api_key)
         await run_in_threadpool(
             _save_pagespeed_success,

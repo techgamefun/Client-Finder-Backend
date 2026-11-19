@@ -15,15 +15,27 @@ from app.models import (
     PageSpeedScan,
     PageSpeedScanJob,
     SearchKeyword,
+    UserProviderCredential,
     Website,
     WebsiteCrawl,
     WebsiteCrawlJob,
 )
 from app.schemas.discovery import DiscoveryResult, DiscoverySearchResponse
 from app.services import lead_ingestion
-from app.services.pagespeed import PageSpeedError, PageSpeedScanData
+from app.services.pagespeed import PageSpeedScanData
 from app.services.application_settings import CrawlSettings
 from app.services.website_crawler import CrawlData
+
+
+def _save_pagespeed_key(db: Session) -> None:
+    context = db.info["tenant_context"]
+    db.add(
+        UserProviderCredential(
+            user_id=context.user_id,
+            provider="pagespeed",
+            api_key="test-pagespeed-key",
+        )
+    )
 
 
 def _search_response(*results: tuple[str, str, str]) -> DiscoverySearchResponse:
@@ -529,6 +541,9 @@ def test_ingestion_queues_pagespeed_jobs_and_worker_saves_results(
         "scan_pagespeed",
         fake_pagespeed_scan,
     )
+    with TestingSessionLocal() as db:
+        _save_pagespeed_key(db)
+        db.commit()
     for job in jobs:
         asyncio.run(
             pagespeed_worker.process_pagespeed_job(UUID(job["id"]))
@@ -556,12 +571,6 @@ def test_website_only_pagespeed_job_saves_scan_result(client, monkeypatch):
         "SessionLocal",
         TestingSessionLocal,
     )
-    monkeypatch.setattr(
-        pagespeed_worker,
-        "_get_pagespeed_api_key",
-        lambda: None,
-    )
-
     async def fake_pagespeed_scan(
         website_url: str,
         strategy: str,
@@ -580,6 +589,7 @@ def test_website_only_pagespeed_job_saves_scan_result(client, monkeypatch):
         fake_pagespeed_scan,
     )
     with TestingSessionLocal() as db:
+        _save_pagespeed_key(db)
         website = Website(
             website_url="https://standalone.example/",
             domain="standalone.example",
@@ -712,7 +722,7 @@ def test_failed_crawl_does_not_queue_pagespeed_jobs(client, monkeypatch):
         assert db.scalars(select(PageSpeedScanJob)).all() == []
 
 
-def test_failed_pagespeed_job_exposes_reason_and_timestamps(
+def test_worker_leaves_pagespeed_job_queued_without_api_key(
     client,
     monkeypatch,
 ):
@@ -721,15 +731,16 @@ def test_failed_pagespeed_job_exposes_reason_and_timestamps(
         "SessionLocal",
         TestingSessionLocal,
     )
+    created_at = datetime.now(timezone.utc) - timedelta(seconds=60)
 
-    async def fail_scan(
+    async def unexpected_scan(
         _website_url: str,
         _strategy: str,
         _api_key: str | None = None,
     ):
-        raise PageSpeedError("Google PageSpeed API key is not configured.")
+        raise AssertionError("PageSpeed scan must not run without an API key.")
 
-    monkeypatch.setattr(pagespeed_worker, "scan_pagespeed", fail_scan)
+    monkeypatch.setattr(pagespeed_worker, "scan_pagespeed", unexpected_scan)
     with TestingSessionLocal() as db:
         company = Company(
             name="Example Company",
@@ -742,26 +753,24 @@ def test_failed_pagespeed_job_exposes_reason_and_timestamps(
             company_id=company.id,
             website_url="https://example.com/",
             strategy="mobile",
+            created_at=created_at,
             companies=[company],
         )
         db.add(job)
         db.commit()
-        company_id = company.id
         job_id = job.id
 
     asyncio.run(pagespeed_worker.process_pagespeed_job(job_id))
 
-    response = client.get(
-        f"/api/v1/companies/{company_id}/pagespeed-jobs/{job_id}"
-    )
-    assert response.status_code == 200
-    job_status = response.json()
-    assert job_status["status"] == "failed"
-    assert job_status["error"] == (
-        "Google PageSpeed API key is not configured."
-    )
-    assert job_status["started_at"] is not None
-    assert job_status["completed_at"] is not None
+    with TestingSessionLocal() as db:
+        saved_job = db.get(PageSpeedScanJob, job_id)
+        assert saved_job is not None
+        assert saved_job.status == "queued"
+        assert saved_job.error is None
+        assert saved_job.attempts == 0
+        assert saved_job.started_at is None
+        assert saved_job.completed_at is None
+    assert pagespeed_worker._find_recoverable_pagespeed_job() is None
 
 
 def test_pagespeed_queue_endpoint_lists_jobs(client):
@@ -808,6 +817,7 @@ def test_failed_pagespeed_job_can_be_retried(client, monkeypatch):
         fake_enqueue,
     )
     with TestingSessionLocal() as db:
+        _save_pagespeed_key(db)
         company = Company(
             name="Example Company",
             normalized_name="example company",
@@ -842,6 +852,49 @@ def test_failed_pagespeed_job_can_be_retried(client, monkeypatch):
     assert enqueued_ids == [job_id]
 
 
+def test_failed_pagespeed_job_cannot_be_retried_without_api_key(
+    client,
+    monkeypatch,
+):
+    enqueued_ids: list[UUID] = []
+
+    async def capture_enqueue(job_ids: list[UUID]) -> None:
+        enqueued_ids.extend(job_ids)
+
+    monkeypatch.setattr(
+        "app.services.pagespeed_jobs.enqueue_pagespeed_jobs",
+        capture_enqueue,
+    )
+    with TestingSessionLocal() as db:
+        company = Company(
+            name="Example Company",
+            normalized_name="example company",
+            website="https://example.com/",
+        )
+        db.add(company)
+        db.flush()
+        job = PageSpeedScanJob(
+            company_id=company.id,
+            website_url="https://example.com/",
+            strategy="mobile",
+            status="failed",
+            error="PageSpeed request failed.",
+            companies=[company],
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    response = client.post(f"/api/v1/pagespeed/jobs/{job_id}/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "The user who created this PageSpeed job must configure a Google "
+        "PageSpeed API key before it can be queued."
+    )
+    assert enqueued_ids == []
+
+
 def test_batch_retry_pagespeed_jobs_updates_and_dispatches_once(
     client,
     monkeypatch,
@@ -857,6 +910,7 @@ def test_batch_retry_pagespeed_jobs_updates_and_dispatches_once(
     )
     now = datetime.now(timezone.utc)
     with TestingSessionLocal() as db:
+        _save_pagespeed_key(db)
         website = Website(
             website_url="https://example.com/",
             domain="example.com",
@@ -923,6 +977,7 @@ def test_worker_recovers_queued_pagespeed_job_without_redis_delivery(
         TestingSessionLocal,
     )
     with TestingSessionLocal() as db:
+        _save_pagespeed_key(db)
         company = Company(
             name="Example Company",
             normalized_name="example company",
@@ -956,6 +1011,7 @@ def test_worker_requeues_stale_pagespeed_job_and_clears_start_time(
     )
     stale_time = datetime.now(timezone.utc) - timedelta(minutes=10)
     with TestingSessionLocal() as db:
+        _save_pagespeed_key(db)
         company = Company(
             name="Example Company",
             normalized_name="example company",

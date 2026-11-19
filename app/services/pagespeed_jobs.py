@@ -6,13 +6,19 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Company, PageSpeedScanJob, Website
+from app.models import (
+    Company,
+    PageSpeedScanJob,
+    UserProviderCredential,
+    Website,
+)
 from app.schemas.job_queue import (
     BatchJobRetryFailure,
     BatchJobRetryResponse,
 )
 from app.schemas.pagespeed import PageSpeedScanJobResponse
 from app.services.normalization import normalize_domain
+from app.services.application_settings import get_user_provider_api_key
 from app.services.pagespeed import PAGESPEED_STRATEGIES
 from app.services.redis_queue import (
     RedisQueueError,
@@ -21,6 +27,10 @@ from app.services.redis_queue import (
 
 
 logger = logging.getLogger(__name__)
+MISSING_PAGESPEED_KEY = (
+    "The user who created this PageSpeed job must configure a Google "
+    "PageSpeed API key before it can be queued."
+)
 
 
 def create_website_pagespeed_jobs(
@@ -89,6 +99,18 @@ def serialize_pagespeed_scan_job(
     )
 
 
+def _job_has_pagespeed_key(job: PageSpeedScanJob, db: Session) -> bool:
+    if job.created_by_user_id is None:
+        return False
+    return bool(
+        get_user_provider_api_key(
+            db,
+            "pagespeed",
+            user_id=job.created_by_user_id,
+        )
+    )
+
+
 def get_pagespeed_scan_job(
     company_id: UUID,
     job_id: UUID,
@@ -128,6 +150,11 @@ async def retry_pagespeed_scan_job(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only failed PageSpeed scan jobs can be retried.",
+        )
+    if not _job_has_pagespeed_key(job, db):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=MISSING_PAGESPEED_KEY,
         )
 
     job.status = "queued"
@@ -169,6 +196,13 @@ async def retry_failed_pagespeed_scan_jobs(
                 BatchJobRetryFailure(
                     job_id=job_id,
                     message="Only failed PageSpeed scan jobs can be retried.",
+                )
+            )
+        elif not _job_has_pagespeed_key(job, db):
+            failures.append(
+                BatchJobRetryFailure(
+                    job_id=job_id,
+                    message=MISSING_PAGESPEED_KEY,
                 )
             )
         else:

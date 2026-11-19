@@ -129,6 +129,10 @@ app/main.py                 FastAPI app, router registration, health check
   remains synchronous because its results are required by that workflow. Set
   `RUN_WORKER_IN_API=true` to run the worker in the API
   lifespan when a separate background-worker service is unavailable.
+  PageSpeed jobs remain queued when their creating user has no saved PageSpeed
+  key; worker claims and recovery skip those jobs, and retry endpoints reject
+  retries until that user's key is configured. Google validates a saved key
+  when the scan request runs.
 - `app/services/campaign_service.py` validates assigned Gmail accounts and
   tenant-owned companies/contacts, previews campaign capacity, and schedules
   recipients round-robin within weekday send windows in each campaign's
