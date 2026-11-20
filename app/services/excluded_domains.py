@@ -115,6 +115,16 @@ def mark_queued_jobs_skipped_for_domain(
     domain: str,
     reason: str,
 ) -> int:
+    return mark_queued_jobs_skipped_for_domains(db, {domain: reason})
+
+
+def mark_queued_jobs_skipped_for_domains(
+    db: Session,
+    exclusions: dict[str, str],
+) -> int:
+    if not exclusions:
+        return 0
+
     jobs = db.scalars(
         select(WebsiteCrawlJob).where(WebsiteCrawlJob.status == "queued")
     ).all()
@@ -122,7 +132,18 @@ def mark_queued_jobs_skipped_for_domain(
     skipped_count = 0
     for job in jobs:
         job_domain = normalize_domain(job.website_url)
-        if job_domain is None or not _matches_domain(job_domain, domain):
+        if job_domain is None:
+            continue
+        labels = job_domain.split(".")
+        reason = next(
+            (
+                exclusions[candidate]
+                for index in range(len(labels) - 1)
+                if (candidate := ".".join(labels[index:])) in exclusions
+            ),
+            None,
+        )
+        if reason is None:
             continue
         job.status = "skipped"
         job.skip_reason = reason
@@ -131,13 +152,6 @@ def mark_queued_jobs_skipped_for_domain(
         job.completed_at = now
         skipped_count += 1
     return skipped_count
-
-
-def _matches_domain(hostname: str, excluded_domain: str) -> bool:
-    return (
-        hostname == excluded_domain
-        or hostname.endswith(f".{excluded_domain}")
-    )
 
 
 def record_unreachable_domain_failure(

@@ -21,6 +21,10 @@ def test_seeded_domains_are_listed_and_can_be_filtered(client):
         "/api/v1/excluded-domains",
         params={"reason": "Big Tech / Social", "search": "youtube"},
     )
+    count = client.get(
+        "/api/v1/excluded-domains/count",
+        params={"reason": "Big Tech / Social", "search": "youtube"},
+    )
 
     assert response.status_code == 200
     assert {item["domain"] for item in response.json()} == set(
@@ -33,6 +37,91 @@ def test_seeded_domains_are_listed_and_can_be_filtered(client):
     )
     assert filtered.status_code == 200
     assert [item["domain"] for item in filtered.json()] == ["youtube.com"]
+    assert count.status_code == 200
+    assert count.json() == {"total_count": 1}
+    first_page = client.get(
+        "/api/v1/excluded-domains",
+        params={"limit": 1, "offset": 0},
+    )
+    second_page = client.get(
+        "/api/v1/excluded-domains",
+        params={"limit": 1, "offset": 1},
+    )
+    assert first_page.status_code == second_page.status_code == 200
+    assert len(first_page.json()) == len(second_page.json()) == 1
+    assert first_page.json()[0]["domain"] != second_page.json()[0]["domain"]
+
+
+def test_excluded_domain_batch_accepts_1000_and_deduplicates(client):
+    with TestingSessionLocal() as db:
+        queued_job = WebsiteCrawlJob(
+            website_url="https://shop.pending.example/",
+            status="queued",
+        )
+        db.add(queued_job)
+        db.commit()
+        queued_job_id = queued_job.id
+
+    domains = [
+        {
+            "domain": "https://www.pending.example/listing",
+            "reason": "Manual Exclusion",
+        },
+        {
+            "domain": "pending.example",
+            "reason": "Unreachable",
+        },
+        {
+            "domain": "google.com",
+            "reason": "Manual Exclusion",
+            "note": "User reviewed this preset.",
+        },
+    ]
+    domains.extend(
+        {
+            "domain": f"bulk-{index}.example",
+            "reason": "Manual Exclusion",
+        }
+        for index in range(997)
+    )
+    response = client.post(
+        "/api/v1/excluded-domains/batch",
+        json={"domains": domains},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "requested_count": 1000,
+        "created_count": 998,
+        "updated_count": 1,
+        "duplicate_count": 1,
+    }
+    with TestingSessionLocal() as db:
+        saved_job = db.get(WebsiteCrawlJob, queued_job_id)
+        assert saved_job.status == "skipped"
+        assert saved_job.skip_reason == "Manual Exclusion"
+        google = db.scalar(
+            select(ExcludedDomain).where(ExcludedDomain.domain == "google.com")
+        )
+        assert google.reason == "Manual Exclusion"
+        assert google.note == "User reviewed this preset."
+
+
+def test_excluded_domain_batch_rejects_more_than_1000(client):
+    response = client.post(
+        "/api/v1/excluded-domains/batch",
+        json={
+            "domains": [
+                {
+                    "domain": f"bulk-{index}.example",
+                    "reason": "Manual Exclusion",
+                }
+                for index in range(1001)
+            ]
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_exclusion_normalizes_urls_matches_subdomains_and_can_be_removed(

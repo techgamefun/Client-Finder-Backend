@@ -48,6 +48,10 @@ class ExcludedDomainCreate(BaseModel):
         return value.strip() or None if value is not None else None
 
 
+class ExcludedDomainBatchCreate(BaseModel):
+    domains: list[ExcludedDomainCreate] = Field(min_length=1, max_length=1000)
+
+
 class ExcludedDomainResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -59,3 +63,14 @@ class ExcludedDomainResponse(BaseModel):
     failure_count: int
     created_at: datetime
     updated_at: datetime
+
+
+class ExcludedDomainBatchResponse(BaseModel):
+    requested_count: int
+    created_count: int
+    updated_count: int
+    duplicate_count: int
+
+
+class ExcludedDomainCountResponse(BaseModel):
+    total_count: int

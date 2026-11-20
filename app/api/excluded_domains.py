@@ -2,19 +2,23 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.models import CrawlerDomainFailure, ExcludedDomain
 from app.schemas.excluded_domain import (
+    ExcludedDomainBatchCreate,
+    ExcludedDomainBatchResponse,
+    ExcludedDomainCountResponse,
     ExcludedDomainCreate,
     ExcludedDomainReason,
     ExcludedDomainResponse,
 )
 from app.services.excluded_domains import (
     mark_queued_jobs_skipped_for_domain,
+    mark_queued_jobs_skipped_for_domains,
 )
 
 
@@ -22,12 +26,29 @@ router = APIRouter(prefix="/excluded-domains", tags=["Excluded Domains"])
 DatabaseSession = Annotated[Session, Depends(get_db)]
 
 
+@router.get("/count", response_model=ExcludedDomainCountResponse)
+def count_excluded_domains(
+    db: DatabaseSession,
+    search: Annotated[str, Query(max_length=255)] = "",
+    reason: ExcludedDomainReason | None = None,
+) -> ExcludedDomainCountResponse:
+    statement = select(func.count(ExcludedDomain.id))
+    if search:
+        statement = statement.where(
+            ExcludedDomain.domain.contains(search, autoescape=True)
+            | ExcludedDomain.note.contains(search, autoescape=True)
+        )
+    if reason is not None:
+        statement = statement.where(ExcludedDomain.reason == reason)
+    return ExcludedDomainCountResponse(total_count=db.scalar(statement) or 0)
+
+
 @router.get("", response_model=list[ExcludedDomainResponse])
 def list_excluded_domains(
     db: DatabaseSession,
     search: Annotated[str, Query(max_length=255)] = "",
     reason: ExcludedDomainReason | None = None,
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> list[ExcludedDomainResponse]:
     statement = select(ExcludedDomain).order_by(
@@ -92,6 +113,71 @@ def create_excluded_domain(
         ) from exc
 
     return ExcludedDomainResponse.model_validate(domain)
+
+
+@router.post(
+    "/batch",
+    response_model=ExcludedDomainBatchResponse,
+)
+def create_excluded_domains_batch(
+    payload: ExcludedDomainBatchCreate,
+    db: DatabaseSession,
+) -> ExcludedDomainBatchResponse:
+    domains_by_name: dict[str, ExcludedDomainCreate] = {}
+    for domain in payload.domains:
+        domains_by_name.setdefault(domain.domain, domain)
+
+    existing_domains = db.scalars(
+        select(ExcludedDomain).where(
+            ExcludedDomain.domain.in_(domains_by_name)
+        )
+    ).all()
+    existing_by_name = {
+        domain.domain: domain for domain in existing_domains
+    }
+
+    for domain_name, payload_domain in domains_by_name.items():
+        existing = existing_by_name.get(domain_name)
+        if existing is None:
+            db.add(
+                ExcludedDomain(
+                    domain=domain_name,
+                    reason=payload_domain.reason,
+                    note=payload_domain.note,
+                    source="user",
+                )
+            )
+        else:
+            existing.reason = payload_domain.reason
+            existing.note = payload_domain.note
+            existing.source = "user"
+
+    try:
+        db.flush()
+        mark_queued_jobs_skipped_for_domains(
+            db,
+            {
+                domain.domain: domain.reason
+                for domain in domains_by_name.values()
+            },
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Some domains could not be added because they changed concurrently.",
+        ) from exc
+
+    return ExcludedDomainBatchResponse(
+        requested_count=len(payload.domains),
+        created_count=sum(
+            domain_name not in existing_by_name
+            for domain_name in domains_by_name
+        ),
+        updated_count=len(existing_by_name),
+        duplicate_count=len(payload.domains) - len(domains_by_name),
+    )
 
 
 @router.delete("/{domain_id}", status_code=status.HTTP_204_NO_CONTENT)
