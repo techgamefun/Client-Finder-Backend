@@ -67,6 +67,10 @@ app/main.py                 FastAPI app, router registration, health check
 - `app/api/media.py` validates authenticated image uploads and sends them to
   Cloudinary using server-side credentials. Users can manage their own profile
   photos; organization branding is limited to organization administrators.
+- `app/api/user_preferences.py` stores authenticated users' personal
+  preferences separately from organization-wide `ApplicationSettings`.
+  Preferences include theme, sidebar state, selected discovery providers, and
+  Tavily search filters.
 - `app/api/push_notifications.py` manages authenticated users' Web Push
   subscriptions and notification preferences. `app/services/web_push.py`
   delivers preference-filtered messages from background work and removes
@@ -82,9 +86,12 @@ app/main.py                 FastAPI app, router registration, health check
   page/depth preferences are persisted in the organization's
   `ApplicationSettings` row. API responses never include key values; database
   access must be restricted because keys are not encrypted at rest.
-- `app/services/application_settings.py` resolves database preferences and
-  per-user provider keys, including the selected discovery tools and Octoparse
-  template.
+- `app/services/application_settings.py` resolves organization-level
+  application settings, per-user provider credentials, and selected discovery
+  provider defaults.
+- `UserPreferences` stores user-owned UI and search preferences as validated
+  JSON, keyed by user and scoped to their organization. Organization settings
+  remain the defaults where a user has not customized a search filter.
 - `app/services/gemini_template_generator.py` requests an email-template draft
   from Gemini, validates the response schema, Jinja syntax, and available
   placeholder paths, and returns it without persistence.

@@ -22,6 +22,7 @@ from app.api.email_suppression import router as email_suppression_router
 from app.api.email_templates import router as email_templates_router
 from app.api.pagespeed import router as pagespeed_router
 from app.api.push_notifications import router as push_notifications_router
+from app.api.user_preferences import router as user_preferences_router
 from app.api.queue_events import router as queue_events_router
 from app.api.overview import router as overview_router
 from app.api.settings import router as settings_router
@@ -165,6 +166,11 @@ app.include_router(
 
 app.include_router(
     push_notifications_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    user_preferences_router,
     prefix="/api/v1",
 )
 

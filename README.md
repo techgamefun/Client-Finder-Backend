@@ -252,6 +252,9 @@ backend to enable push delivery. Set the matching public key as
 `frontend/.env.local`). The public key is safe to expose; never expose or commit
 `VAPID_PRIVATE_KEY`. Use a `mailto:` address or HTTPS URL for `VAPID_SUBJECT`.
 After the backend is configured, users can enable notifications from Settings.
+Theme, sidebar state, selected discovery providers, and Tavily search filters
+are saved per user and follow them across sessions. Organization-wide search
+defaults still apply for any filters a user has not customized.
 
 To connect Gmail accounts, configure a Google OAuth client with the redirect
 URI above (use your HTTPS API URL in production). Generate a state-signing key

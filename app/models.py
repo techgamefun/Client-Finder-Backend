@@ -204,6 +204,34 @@ class UserPushPreferences(Base):
     )
 
 
+class UserPreferences(Base):
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    preferences: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class UserProviderCredential(Base):
     __tablename__ = "user_provider_credentials"
 
@@ -1515,6 +1543,7 @@ _TENANT_MODELS = (
     PageSpeedScanJob,
     PushSubscription,
     UserPushPreferences,
+    UserPreferences,
 )
 
 _ORG_ID_MODELS = (
