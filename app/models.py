@@ -1103,6 +1103,7 @@ class WebsiteCrawlJob(TenantOwnedMixin, Base):
         server_default="0",
     )
     error: Mapped[str | None] = mapped_column(Text)
+    skip_reason: Mapped[str | None] = mapped_column(Text)
     crawl_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("website_crawls.id", ondelete="SET NULL"),
@@ -1133,6 +1134,95 @@ class WebsiteCrawlJob(TenantOwnedMixin, Base):
             "ix_website_crawl_jobs_organization_completed_at",
             "organization_id",
             "completed_at",
+        ),
+    )
+
+
+class ExcludedDomain(TenantOwnedMixin, Base):
+    __tablename__ = "excluded_domains"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(String(40), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="user",
+        server_default="user",
+    )
+    failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "domain",
+            name="uq_excluded_domains_organization_domain",
+        ),
+        CheckConstraint(
+            "reason IN ('Big Tech / Social', 'Manual Exclusion', "
+            "'Unreachable', 'Blocked (403/429)')",
+            name="ck_excluded_domains_reason_allowed",
+        ),
+        CheckConstraint(
+            "source IN ('system_preset', 'user', 'auto_crawler')",
+            name="ck_excluded_domains_source_allowed",
+        ),
+        CheckConstraint(
+            "failure_count >= 0",
+            name="ck_excluded_domains_failure_count_nonnegative",
+        ),
+    )
+
+
+class CrawlerDomainFailure(TenantOwnedMixin, Base):
+    __tablename__ = "crawler_domain_failures"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    last_error: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "domain",
+            name="uq_crawler_domain_failures_organization_domain",
         ),
     )
 
@@ -1338,6 +1428,8 @@ _TENANT_MODELS = (
     Website,
     WebsiteHypeStatProfile,
     WebsiteCrawlJob,
+    ExcludedDomain,
+    CrawlerDomainFailure,
     ApplicationSettings,
     PageSpeedScan,
     PageSpeedScanJob,

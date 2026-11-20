@@ -18,6 +18,14 @@ from app.services.public_url import _normalize_website_url
 from app.services.website_registry import upsert_website
 
 
+CRAWLER_FAILURE_CODES = {
+    "dns_resolution",
+    "connection_refused",
+    "timeout",
+    "blocked",
+}
+
+
 class CrawlData(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -82,9 +90,20 @@ async def crawl_website(
             if isinstance(error_data, dict)
             else None
         )
+        failure_code = (
+            error_data.get("code")
+            if isinstance(error_data, dict)
+            else None
+        )
+        headers = (
+            {"X-Crawler-Failure-Code": failure_code}
+            if failure_code in CRAWLER_FAILURE_CODES
+            else None
+        )
         raise HTTPException(
             status_code=response.status_code,
             detail=detail or "The website crawler service failed.",
+            headers=headers,
         )
 
     try:

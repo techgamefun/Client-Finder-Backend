@@ -50,6 +50,8 @@ async def crawl_websites(
             WebsiteCrawlBatchJobResponse(
                 id=job.id,
                 website_url=job.website_url,
+                status=job.status,
+                skip_reason=job.skip_reason,
             )
             for job in jobs
         ]

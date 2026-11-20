@@ -28,7 +28,13 @@ from app.services.redis_queue import (
     RedisQueueError,
     dequeue_job,
     dequeue_pagespeed_job,
+    enqueue_job,
     validate_redis_configuration,
+)
+from app.services.excluded_domains import (
+    AUTO_RETRYABLE_FAILURE_CODES,
+    find_excluded_domain,
+    record_unreachable_domain_failure,
 )
 from app.services.pagespeed import (
     PageSpeedError,
@@ -167,12 +173,62 @@ def _save_failure(job_id: UUID, detail: str) -> None:
         job = db.get(WebsiteCrawlJob, job_id)
         if job is None:
             raise RuntimeError(f"Website crawl job {job_id} no longer exists.")
+        if job.status != "running":
+            db.rollback()
+            return
         now = datetime.now(timezone.utc)
         job.status = "failed"
         job.error = detail
+        job.skip_reason = None
         job.updated_at = now
         job.completed_at = now
         db.commit()
+
+
+def _save_skipped(job_id: UUID, reason: str) -> None:
+    with SessionLocal() as db:
+        job = db.get(WebsiteCrawlJob, job_id)
+        if job is None:
+            raise RuntimeError(f"Website crawl job {job_id} no longer exists.")
+        if job.status != "running":
+            db.rollback()
+            return
+        now = datetime.now(timezone.utc)
+        job.status = "skipped"
+        job.skip_reason = reason
+        job.error = None
+        job.updated_at = now
+        job.completed_at = now
+        db.commit()
+
+
+def _excluded_reason(website_url: str) -> str | None:
+    with SessionLocal() as db:
+        exclusion = find_excluded_domain(db, website_url)
+        return exclusion.reason if exclusion is not None else None
+
+
+def _schedule_crawl_retry(job_id: UUID, detail: str) -> bool:
+    with SessionLocal() as db:
+        job = db.get(WebsiteCrawlJob, job_id)
+        if job is None:
+            raise RuntimeError(f"Website crawl job {job_id} no longer exists.")
+        if job.status != "running" or job.attempts >= MAX_JOB_ATTEMPTS:
+            db.rollback()
+            return False
+        now = datetime.now(timezone.utc)
+        job.status = "queued"
+        job.error = detail
+        job.started_at = None
+        job.completed_at = None
+        job.updated_at = now
+        db.commit()
+        return True
+
+
+def _record_unreachable_failure(website_url: str, detail: str) -> None:
+    with SessionLocal() as db:
+        record_unreachable_domain_failure(db, website_url, detail)
 
 
 async def process_job(job_id: UUID) -> None:
@@ -183,6 +239,18 @@ async def process_job(job_id: UUID) -> None:
     tenant_token = set_tenant_context(context)
 
     try:
+        exclusion_reason = await run_in_threadpool(
+            _excluded_reason,
+            website_url,
+        )
+        if exclusion_reason is not None:
+            await run_in_threadpool(
+                _save_skipped,
+                job_id,
+                exclusion_reason,
+            )
+            return
+
         crawl_settings = await run_in_threadpool(_get_crawl_settings)
         crawl_data = await crawl_website(
             website_url,
@@ -204,7 +272,31 @@ async def process_job(job_id: UUID) -> None:
             )
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        failure_code = (exc.headers or {}).get("X-Crawler-Failure-Code")
+        if failure_code in AUTO_RETRYABLE_FAILURE_CODES:
+            retry_scheduled = await run_in_threadpool(
+                _schedule_crawl_retry,
+                job_id,
+                detail,
+            )
+            if retry_scheduled:
+                try:
+                    await enqueue_job(str(job_id))
+                except RedisQueueError:
+                    logger.exception(
+                        "Could not dispatch retry for website crawl job %s; "
+                        "it remains queued for worker recovery.",
+                        job_id,
+                    )
+                return
+
         await run_in_threadpool(_save_failure, job_id, detail)
+        if failure_code in AUTO_RETRYABLE_FAILURE_CODES:
+            await run_in_threadpool(
+                _record_unreachable_failure,
+                website_url,
+                detail,
+            )
     except Exception:
         logger.exception("Website crawl job %s failed unexpectedly.", job_id)
         await run_in_threadpool(

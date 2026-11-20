@@ -23,7 +23,13 @@ class WebsiteResponse(BaseModel):
     favicon_url: str | None
     crawl_id: UUID | None
     is_crawled: bool
-    crawl_job_status: Literal["queued", "running", "succeeded", "failed"] | None
+    crawl_job_status: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+    ] | None
     category: str | None
     page_type: str | None
     site_topic: list[str]
@@ -49,9 +55,10 @@ class WebsiteCrawlJobHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: Literal["queued", "running", "succeeded", "failed", "skipped"]
     attempts: int
     error: str | None
+    skip_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

@@ -14,6 +14,7 @@ from app.services.auth import validate_auth_configuration
 from app.api.auth import router as auth_router
 from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
+from app.api.excluded_domains import router as excluded_domains_router
 from app.api.gmail import router as gmail_router
 from app.api.email_campaigns import router as email_campaigns_router
 from app.api.email_suppression import router as email_suppression_router
@@ -131,6 +132,11 @@ app.include_router(
 # Register the lead discovery API separately.
 app.include_router(
     discovery_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    excluded_domains_router,
     prefix="/api/v1",
 )
 

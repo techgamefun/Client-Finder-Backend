@@ -132,7 +132,10 @@ app/main.py                 FastAPI app, router registration, health check
   PageSpeed jobs remain queued when their creating user has no saved PageSpeed
   key; worker claims and recovery skip those jobs, and retry endpoints reject
   retries until that user's key is configured. Google validates a saved key
-  when the scan request runs.
+  when the scan request runs. `app/services/excluded_domains.py` seeds common
+  preset exclusions per organization, matches excluded root domains and their
+  subdomains, and tracks terminal DNS, connection-refused, and timeout failures
+  for automatic exclusion after three failures.
 - `app/services/campaign_service.py` validates assigned Gmail accounts and
   tenant-owned companies/contacts, previews campaign capacity, and schedules
   recipients round-robin within weekday send windows in each campaign's
@@ -211,6 +214,13 @@ does not get another discovery crawl queued. The worker persists successful
 crawl data and links it to the domain registry row. The Websites page displays
 the crawl signals and allows editing website type, site topic, and language.
 This discovery flow does not create companies or queue PageSpeed scans.
+
+The Website Indexing Queue exposes organization-scoped exclusions through
+`/api/v1/excluded-domains`. Enqueueing skips matching domains and subdomains
+with a `skip_reason`; the worker repeats the check immediately before calling
+the crawler. Terminal DNS, refused-connection, and timeout failures are
+tracked per domain and create an `Unreachable` exclusion after the third
+failure. Removing an exclusion also clears its accumulated failure tracker.
 
 ### Discovery ingestion
 

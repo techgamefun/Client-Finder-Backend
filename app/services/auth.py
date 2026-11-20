@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import parse_token_expiry, settings
 from app.models import AuthRefreshSession, Organization, User
 from app.schemas.auth import CredentialsInput, OrganizationRegistration
+from app.services.excluded_domains import seed_system_excluded_domains
 from app.tenant_context import TenantContext
 
 
@@ -45,6 +46,7 @@ def create_bootstrap_admin(
         db.flush()
     else:
         organization.name = payload.organization_name.strip()
+    seed_system_excluded_domains(db, organization.id)
 
     user = _create_user(
         db,
@@ -64,6 +66,7 @@ def register_organization(
     organization = Organization(name=payload.organization_name.strip())
     db.add(organization)
     db.flush()
+    seed_system_excluded_domains(db, organization.id)
     return _create_user(
         db,
         organization_id=organization.id,

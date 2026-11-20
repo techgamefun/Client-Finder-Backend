@@ -1,0 +1,280 @@
+import asyncio
+from uuid import UUID, uuid4
+
+from fastapi import HTTPException
+from sqlalchemy import select
+
+from conftest import TestingSessionLocal
+from app.models import CrawlerDomainFailure, ExcludedDomain, WebsiteCrawlJob
+from app.services.excluded_domains import (
+    SYSTEM_PRESET_DOMAINS,
+    find_excluded_domain,
+    record_unreachable_domain_failure,
+)
+from app.tenant_context import TenantContext
+from app import worker
+
+
+def test_seeded_domains_are_listed_and_can_be_filtered(client):
+    response = client.get("/api/v1/excluded-domains")
+    filtered = client.get(
+        "/api/v1/excluded-domains",
+        params={"reason": "Big Tech / Social", "search": "youtube"},
+    )
+
+    assert response.status_code == 200
+    assert {item["domain"] for item in response.json()} == set(
+        SYSTEM_PRESET_DOMAINS
+    )
+    assert all(
+        item["source"] == "system_preset"
+        and item["reason"] == "Big Tech / Social"
+        for item in response.json()
+    )
+    assert filtered.status_code == 200
+    assert [item["domain"] for item in filtered.json()] == ["youtube.com"]
+
+
+def test_exclusion_normalizes_urls_matches_subdomains_and_can_be_removed(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.crawl_jobs.enqueue_job",
+        _noop_enqueue_job,
+    )
+    created = client.post(
+        "/api/v1/excluded-domains",
+        json={
+            "domain": "https://www.Facebook.com/some/page?id=1",
+            "reason": "Manual Exclusion",
+            "note": "User requested this.",
+        },
+    )
+
+    assert created.status_code == 201
+    domain = created.json()
+    assert domain["domain"] == "facebook.com"
+    assert domain["source"] == "user"
+
+    excluded_job = client.post(
+        "/api/v1/crawler/crawl",
+        json={"website_url": "https://m.facebook.com/about"},
+    )
+    assert excluded_job.status_code == 202
+    assert excluded_job.json()["status"] == "skipped"
+    assert excluded_job.json()["skip_reason"] == "Manual Exclusion"
+
+    unrelated_job = client.post(
+        "/api/v1/crawler/crawl",
+        json={"website_url": "https://notfacebook.com/"},
+    )
+    assert unrelated_job.status_code == 202
+    assert unrelated_job.json()["status"] == "queued"
+
+    deleted = client.delete(
+        f"/api/v1/excluded-domains/{domain['id']}",
+    )
+    assert deleted.status_code == 204
+
+    crawlable_job = client.post(
+        "/api/v1/crawler/crawl",
+        json={"website_url": "https://m.facebook.com/about"},
+    )
+    assert crawlable_job.status_code == 202
+    assert crawlable_job.json()["status"] == "queued"
+
+    with TestingSessionLocal() as db:
+        assert db.scalar(
+            select(CrawlerDomainFailure).where(
+                CrawlerDomainFailure.domain == "facebook.com"
+            )
+        ) is None
+
+
+def test_adding_exclusion_skips_existing_queued_jobs(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.crawl_jobs.enqueue_job",
+        _noop_enqueue_job,
+    )
+    job = client.post(
+        "/api/v1/crawler/crawl",
+        json={"website_url": "https://pending.example/"},
+    ).json()
+
+    response = client.post(
+        "/api/v1/excluded-domains",
+        json={
+            "domain": "example",
+            "reason": "Manual Exclusion",
+        },
+    )
+
+    assert response.status_code == 422
+
+    response = client.post(
+        "/api/v1/excluded-domains",
+        json={
+            "domain": "pending.example",
+            "reason": "Manual Exclusion",
+        },
+    )
+    assert response.status_code == 201
+    with TestingSessionLocal() as db:
+        saved_job = db.get(WebsiteCrawlJob, UUID(job["id"]))
+        assert saved_job.status == "skipped"
+        assert saved_job.skip_reason == "Manual Exclusion"
+
+
+def test_auto_excludes_domain_after_three_terminal_failures(client):
+    with TestingSessionLocal() as db:
+        job = WebsiteCrawlJob(
+            website_url="https://shop.unreachable.example/",
+            status="queued",
+        )
+        db.add(job)
+        db.commit()
+        assert find_excluded_domain(
+            db,
+            "https://unreachable.example/",
+        ) is None
+
+        assert (
+            record_unreachable_domain_failure(
+                db,
+                "https://www.unreachable.example/",
+                "DNS lookup failed.",
+            )
+            == 1
+        )
+        assert find_excluded_domain(
+            db,
+            "https://unreachable.example/",
+        ) is None
+        assert (
+            record_unreachable_domain_failure(
+                db,
+                "https://unreachable.example/",
+                "DNS lookup failed again.",
+            )
+            == 2
+        )
+        assert (
+            record_unreachable_domain_failure(
+                db,
+                "https://unreachable.example/",
+                "DNS lookup failed for the third time.",
+            )
+            == 3
+        )
+
+        exclusion = find_excluded_domain(
+            db,
+            "https://shop.unreachable.example/",
+        )
+        assert exclusion is not None
+        assert exclusion.reason == "Unreachable"
+        assert exclusion.source == "auto_crawler"
+        assert exclusion.failure_count == 3
+        db.refresh(job)
+        assert job.status == "skipped"
+        assert job.skip_reason == "Unreachable"
+
+
+def test_worker_rechecks_exclusion_before_crawler_call(client, monkeypatch):
+    context = TestingSessionLocal.kw["info"]["tenant_context"]
+    job_id = uuid4()
+    with TestingSessionLocal() as db:
+        db.add(
+            ExcludedDomain(
+                domain="worker-excluded.example",
+                reason="Manual Exclusion",
+                source="user",
+            )
+        )
+        db.add(
+            WebsiteCrawlJob(
+                id=job_id,
+                website_url="https://worker-excluded.example/",
+                status="running",
+                attempts=1,
+            )
+        )
+        db.commit()
+
+    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(
+        worker,
+        "_claim_job",
+        lambda _job_id: (
+            "https://worker-excluded.example/",
+            context,
+        ),
+    )
+    crawler_calls = []
+
+    async def forbidden_crawl(*_args, **_kwargs):
+        crawler_calls.append(True)
+        raise AssertionError("excluded domains must not reach the crawler")
+
+    monkeypatch.setattr(worker, "crawl_website", forbidden_crawl)
+    asyncio.run(worker.process_job(job_id))
+
+    assert crawler_calls == []
+    with TestingSessionLocal() as db:
+        job = db.get(WebsiteCrawlJob, job_id)
+        assert job.status == "skipped"
+        assert job.skip_reason == "Manual Exclusion"
+
+
+def test_worker_retries_classified_target_timeout(client, monkeypatch):
+    context = TestingSessionLocal.kw["info"]["tenant_context"]
+    job_id = uuid4()
+    with TestingSessionLocal() as db:
+        db.add(
+            WebsiteCrawlJob(
+                id=job_id,
+                website_url="https://retry.example/",
+                status="running",
+                attempts=1,
+            )
+        )
+        db.commit()
+
+    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(
+        worker,
+        "_claim_job",
+        lambda _job_id: ("https://retry.example/", context),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_get_crawl_settings",
+        lambda: type("Settings", (), {"max_pages": 4, "max_depth": 1})(),
+    )
+    enqueue_calls = []
+
+    async def fail_with_timeout(*_args, **_kwargs):
+        raise HTTPException(
+            status_code=504,
+            detail="The target site timed out.",
+            headers={"X-Crawler-Failure-Code": "timeout"},
+        )
+
+    async def record_enqueue(job_identifier: str) -> None:
+        enqueue_calls.append(job_identifier)
+
+    monkeypatch.setattr(worker, "crawl_website", fail_with_timeout)
+    monkeypatch.setattr(worker, "enqueue_job", record_enqueue)
+    asyncio.run(worker.process_job(job_id))
+
+    assert enqueue_calls == [str(job_id)]
+    with TestingSessionLocal() as db:
+        job = db.get(WebsiteCrawlJob, job_id)
+        assert job.status == "queued"
+        assert job.attempts == 1
+        assert job.error == "The target site timed out."
+
+
+async def _noop_enqueue_job(_job_id: str) -> None:
+    return None

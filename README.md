@@ -145,6 +145,17 @@ request. Jobs are committed together and dispatched through one Redis request.
 The Crawler and PageSpeed tabs can also retry all recent failed jobs in one
 batch request; eligible jobs are updated together and dispatched once.
 
+The Crawler queue's **Excluded domains** section manages organization-scoped
+domain exclusions. `GET /api/v1/excluded-domains` supports `search` and `reason`
+filters; `POST /api/v1/excluded-domains` accepts a domain or URL, a reason, and
+an optional note; `DELETE /api/v1/excluded-domains/{id}` re-enables that domain.
+Preset social and technology domains are added for each organization.
+Exclusions apply to subdomains as well as the exact domain: matching crawl jobs
+are marked `skipped` before dispatch, and the worker checks again before
+crawling. Classified DNS, refused-connection, and timeout failures are retried
+up to the crawl-attempt limit; after three terminal failures, the domain is
+automatically excluded as `Unreachable`.
+
 The legacy `POST /api/v1/discovery/ingest` endpoint continues to create and
 enrich companies directly and queues mobile and desktop Google PageSpeed
 Insights scans. The frontend discovery workflow instead creates domain

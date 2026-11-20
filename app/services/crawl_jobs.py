@@ -15,6 +15,7 @@ from app.schemas.website_crawl import (
     WebsiteCrawlJobResponse,
 )
 from app.services.normalization import normalize_domain
+from app.services.excluded_domains import find_excluded_domain
 from app.services.redis_queue import (
     RedisQueueError,
     enqueue_crawl_jobs,
@@ -43,6 +44,19 @@ async def create_website_crawl_jobs(
             continue
         seen_domains.add(domain)
 
+        exclusion = find_excluded_domain(db, website_url)
+        if exclusion is not None:
+            now = datetime.now(timezone.utc)
+            job = WebsiteCrawlJob(
+                website_url=website_url,
+                status="skipped",
+                skip_reason=exclusion.reason,
+                completed_at=now,
+            )
+            db.add(job)
+            jobs.append(job)
+            continue
+
         website = upsert_website(
             db,
             website_url,
@@ -53,15 +67,16 @@ async def create_website_crawl_jobs(
         jobs.append(job)
 
     db.commit()
-    job_ids = [str(job.id) for job in jobs]
-    try:
-        await enqueue_crawl_jobs(job_ids)
-    except RedisQueueError:
-        logger.exception(
-            "Could not dispatch %s website crawl jobs; they remain queued "
-            "for worker recovery.",
-            len(job_ids),
-        )
+    job_ids = [str(job.id) for job in jobs if job.status == "queued"]
+    if job_ids:
+        try:
+            await enqueue_crawl_jobs(job_ids)
+        except RedisQueueError:
+            logger.exception(
+                "Could not dispatch %s website crawl jobs; they remain queued "
+                "for worker recovery.",
+                len(job_ids),
+            )
     return jobs
 
 
@@ -72,25 +87,36 @@ async def create_website_crawl_job(
     discovery_source: str = "manual",
     discovery_provider: str | None = None,
 ) -> WebsiteCrawlJob:
-    website = upsert_website(
-        db,
-        website_url,
-        discovery_source=discovery_source,
-        discovery_provider=discovery_provider,
-    )
-    job = WebsiteCrawlJob(website_url=website.website_url, status="queued")
+    exclusion = find_excluded_domain(db, website_url)
+    if exclusion is not None:
+        now = datetime.now(timezone.utc)
+        job = WebsiteCrawlJob(
+            website_url=website_url,
+            status="skipped",
+            skip_reason=exclusion.reason,
+            completed_at=now,
+        )
+    else:
+        website = upsert_website(
+            db,
+            website_url,
+            discovery_source=discovery_source,
+            discovery_provider=discovery_provider,
+        )
+        job = WebsiteCrawlJob(website_url=website.website_url, status="queued")
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    try:
-        await enqueue_job(str(job.id))
-    except RedisQueueError:
-        logger.exception(
-            "Could not dispatch website crawl job %s; it remains queued for "
-            "worker recovery.",
-            job.id,
-        )
+    if job.status == "queued":
+        try:
+            await enqueue_job(str(job.id))
+        except RedisQueueError:
+            logger.exception(
+                "Could not dispatch website crawl job %s; it remains queued for "
+                "worker recovery.",
+                job.id,
+            )
     return job
 
 
@@ -112,6 +138,7 @@ def get_website_crawl_job(
         status=job.status,
         attempts=job.attempts,
         error=job.error,
+        skip_reason=job.skip_reason,
         created_at=job.created_at,
         updated_at=job.updated_at,
         started_at=job.started_at,
@@ -138,6 +165,12 @@ async def retry_website_crawl_job(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only failed website crawl jobs can be retried.",
+        )
+    exclusion = find_excluded_domain(db, job.website_url)
+    if exclusion is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This domain is excluded: {exclusion.reason}.",
         )
 
     now = datetime.now(timezone.utc)
@@ -191,6 +224,13 @@ async def retry_failed_website_crawl_jobs(
                     message="Only failed website crawl jobs can be retried.",
                 )
             )
+        elif (exclusion := find_excluded_domain(db, job.website_url)) is not None:
+            failures.append(
+                BatchJobRetryFailure(
+                    job_id=job_id,
+                    message=f"This domain is excluded: {exclusion.reason}.",
+                )
+            )
         else:
             job.status = "queued"
             job.attempts = 0
@@ -236,6 +276,7 @@ def list_website_crawl_jobs(
             status=job.status,
             attempts=job.attempts,
             error=job.error,
+            skip_reason=job.skip_reason,
             created_at=job.created_at,
             updated_at=job.updated_at,
             started_at=job.started_at,
