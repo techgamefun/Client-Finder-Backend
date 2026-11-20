@@ -60,6 +60,13 @@ app/main.py                 FastAPI app, router registration, health check
   primary key made from UUID foreign keys.
 - `app/api/deps.py` provides a database session per request and closes it when
   the request is complete.
+- `app/api/media.py` validates authenticated image uploads and sends them to
+  Cloudinary using server-side credentials. Users can manage their own profile
+  photos; organization branding is limited to organization administrators.
+- `app/api/auth.py` returns organization branding and description in the
+  authenticated session, and provides admin-scoped organization member
+  management. Member names are optional for existing accounts, and role
+  changes prevent self-editing or demoting the last active administrator.
 - `app/api/settings.py` exposes public settings operations, Tavily usage, and
   Octoparse template search. Provider keys saved through this API, including
   Gemini, are stored as plaintext in the per-user `UserProviderCredential` table.
@@ -160,6 +167,8 @@ app/main.py                 FastAPI app, router registration, health check
   normalization.
 - `migrations/versions/` records schema changes; `migrations/env.py` loads
   application metadata for Alembic.
+- Organization descriptions and user first/last names are stored on their
+  respective records and introduced by the organization-members migration.
 - `test/` exercises schemas, API routes, and service workflows. The shared
   `client` fixture overrides the app's database dependency with SQLite.
 

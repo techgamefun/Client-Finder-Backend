@@ -12,6 +12,7 @@ from app.auth_middleware import authenticate_request
 from app.services.auth import validate_auth_configuration
 
 from app.api.auth import router as auth_router
+from app.api.media import router as media_router
 from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
 from app.api.excluded_domains import router as excluded_domains_router
@@ -95,6 +96,11 @@ app.middleware("http")(authenticate_request)
 
 app.include_router(
     auth_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    media_router,
     prefix="/api/v1",
 )
 

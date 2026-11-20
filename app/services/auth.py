@@ -41,11 +41,15 @@ def create_bootstrap_admin(
             detail="Initial administrator setup has already been completed.",
         )
     if organization is None:
-        organization = Organization(name=payload.organization_name.strip())
+        organization = Organization(
+            name=payload.organization_name.strip(),
+            description=payload.organization_description,
+        )
         db.add(organization)
         db.flush()
     else:
         organization.name = payload.organization_name.strip()
+        organization.description = payload.organization_description
     seed_system_excluded_domains(db, organization.id)
 
     user = _create_user(
@@ -63,7 +67,10 @@ def register_organization(
     payload: OrganizationRegistration,
     db: Session,
 ) -> User:
-    organization = Organization(name=payload.organization_name.strip())
+    organization = Organization(
+        name=payload.organization_name.strip(),
+        description=payload.organization_description,
+    )
     db.add(organization)
     db.flush()
     seed_system_excluded_domains(db, organization.id)
@@ -82,6 +89,8 @@ def create_organization_user(
     email: str,
     password: str,
     role: str,
+    first_name: str | None,
+    last_name: str | None,
     db: Session,
 ) -> User:
     return _create_user(
@@ -90,6 +99,8 @@ def create_organization_user(
         email=email,
         password=password,
         role=role,
+        first_name=first_name,
+        last_name=last_name,
     )
 
 
@@ -100,12 +111,16 @@ def _create_user(
     email: str,
     password: str,
     role: str,
+    first_name: str | None = None,
+    last_name: str | None = None,
 ) -> User:
     user = User(
         organization_id=organization_id,
         email=email,
         password_hash=hash_password(password),
         role=role,
+        first_name=first_name,
+        last_name=last_name,
     )
     db.add(user)
     try:

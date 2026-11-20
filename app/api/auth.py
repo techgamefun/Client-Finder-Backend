@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -9,9 +10,12 @@ from app.schemas.auth import (
     AuthSessionResponse,
     AuthUserResponse,
     CredentialsInput,
+    OrganizationProfileResponse,
+    OrganizationProfileUpdate,
     PasswordChange,
     OrganizationRegistration,
     OrganizationUserCreate,
+    OrganizationUserRoleUpdate,
     OrganizationUsersResponse,
 )
 from app.services.auth import (
@@ -160,6 +164,9 @@ def read_session(
         user=AuthUserResponse.model_validate(user),
         organization_id=organization.id,
         organization_name=organization.name,
+        organization_description=organization.description,
+        organization_logo_url=organization.logo_url,
+        organization_banner_url=organization.banner_url,
     )
 
 
@@ -193,8 +200,84 @@ def add_organization_user(
         email=payload.email,
         password=payload.password,
         role=payload.role,
+        first_name=payload.first_name,
+        last_name=payload.last_name,
         db=db,
     )
+
+
+@router.patch("/users/{user_id}/role", response_model=AuthUserResponse)
+def update_organization_user_role(
+    user_id: UUID,
+    payload: OrganizationUserRoleUpdate,
+    db: DatabaseSession,
+) -> User:
+    context = require_admin_context()
+    organization = db.scalar(
+        select(Organization)
+        .where(Organization.id == context.organization_id)
+        .with_for_update()
+    )
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found.",
+        )
+    user = db.scalar(
+        select(User).where(
+            User.id == user_id,
+            User.organization_id == context.organization_id,
+        )
+    )
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization member not found.",
+        )
+    if user.id == context.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You cannot change your own role.",
+        )
+    if user.role == "admin" and payload.role == "user" and user.is_active:
+        active_admins = db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.organization_id == context.organization_id,
+                User.role == "admin",
+                User.is_active.is_(True),
+            )
+        )
+        if active_admins <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The last active administrator cannot be demoted.",
+            )
+    user.role = payload.role
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.patch(
+    "/organization",
+    response_model=OrganizationProfileResponse,
+)
+def update_organization_profile(
+    payload: OrganizationProfileUpdate,
+    db: DatabaseSession,
+) -> OrganizationProfileResponse:
+    context = require_admin_context()
+    organization = db.get(Organization, context.organization_id)
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found.",
+        )
+    organization.description = payload.description
+    db.commit()
+    return OrganizationProfileResponse(description=organization.description)
 
 
 def _start_session(
@@ -218,6 +301,9 @@ def _session_response(user: User, db: Session) -> AuthSessionResponse:
         user=AuthUserResponse.model_validate(user),
         organization_id=organization.id,
         organization_name=organization.name,
+        organization_description=organization.description,
+        organization_logo_url=organization.logo_url,
+        organization_banner_url=organization.banner_url,
     )
 
 

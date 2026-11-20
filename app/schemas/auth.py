@@ -23,6 +23,7 @@ class CredentialsInput(BaseModel):
 
 class OrganizationRegistration(CredentialsInput):
     organization_name: str = Field(min_length=2, max_length=200)
+    organization_description: str | None = Field(default=None, max_length=1000)
 
     @field_validator("organization_name")
     @classmethod
@@ -34,7 +35,33 @@ class OrganizationRegistration(CredentialsInput):
 
 
 class OrganizationUserCreate(CredentialsInput):
+    first_name: str | None = Field(default=None, max_length=100)
+    last_name: str | None = Field(default=None, max_length=100)
     role: Role = "user"
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def normalize_person_name(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value is not None else None
+        return normalized or None
+
+
+class OrganizationUserRoleUpdate(BaseModel):
+    role: Role
+
+
+class OrganizationProfileUpdate(BaseModel):
+    description: str | None = Field(max_length=1000)
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value is not None else None
+        return normalized or None
+
+
+class OrganizationProfileResponse(BaseModel):
+    description: str | None
 
 
 class PasswordChange(BaseModel):
@@ -45,9 +72,12 @@ class PasswordChange(BaseModel):
 class AuthUserResponse(BaseModel):
     id: UUID
     email: str
+    first_name: str | None
+    last_name: str | None
     role: Role
     is_active: bool
     created_at: datetime
+    profile_photo_url: str | None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -56,6 +86,9 @@ class AuthSessionResponse(BaseModel):
     user: AuthUserResponse
     organization_id: UUID
     organization_name: str
+    organization_description: str | None
+    organization_logo_url: str | None
+    organization_banner_url: str | None
 
 
 class OrganizationUsersResponse(BaseModel):

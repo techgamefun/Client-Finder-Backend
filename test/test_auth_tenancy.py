@@ -145,6 +145,16 @@ def test_password_change_revokes_other_sessions(client):
 
 
 def test_organizations_cannot_read_or_overwrite_each_others_data(client):
+    first_member = client.post(
+        "/api/v1/auth/users",
+        json={
+            "email": "first-member@example.test",
+            "password": "member-password-long",
+            "role": "user",
+        },
+    )
+    assert first_member.status_code == 201
+
     first_company = client.post(
         "/api/v1/companies",
         json={"name": "First tenant", "domain": "shared.example"},
@@ -161,11 +171,22 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
             "/api/v1/auth/register-organization",
             json={
                 "organization_name": "Second Organization",
+                "organization_description": "Second tenant profile",
                 "email": "second-admin@example.test",
                 "password": "another-long-password",
             },
         )
         assert registration.status_code == 200
+        assert (
+            registration.json()["organization_description"]
+            == "Second tenant profile"
+        )
+        cross_tenant_role_change = second_client.patch(
+            f"/api/v1/auth/users/{first_member.json()['id']}/role",
+            json={"role": "admin"},
+        )
+        assert cross_tenant_role_change.status_code == 404
+
         second_company = second_client.post(
             "/api/v1/companies",
             json={"name": "Second tenant", "domain": "shared.example"},
@@ -189,16 +210,73 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
     assert first_list.json()[0]["created_by_email"] == "admin@example.test"
 
 
+def test_organization_description_member_names_and_admin_role_changes(client):
+    session = client.get("/api/v1/auth/me")
+    assert session.status_code == 200
+    assert session.json()["organization_description"] is None
+
+    updated_profile = client.patch(
+        "/api/v1/auth/organization",
+        json={"description": "  A practical description.  "},
+    )
+    assert updated_profile.status_code == 200
+    assert updated_profile.json()["description"] == "A practical description."
+    assert (
+        client.get("/api/v1/auth/me").json()["organization_description"]
+        == "A practical description."
+    )
+
+    created = client.post(
+        "/api/v1/auth/users",
+        json={
+            "first_name": "Taylor",
+            "last_name": "Reed",
+            "email": "taylor.reed@example.test",
+            "password": "member-password-long",
+            "role": "user",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["first_name"] == "Taylor"
+    assert created.json()["last_name"] == "Reed"
+    user_id = created.json()["id"]
+
+    promoted = client.patch(
+        f"/api/v1/auth/users/{user_id}/role",
+        json={"role": "admin"},
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == "admin"
+
+    demoted = client.patch(
+        f"/api/v1/auth/users/{user_id}/role",
+        json={"role": "user"},
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["role"] == "user"
+
+    current_user_id = session.json()["user"]["id"]
+    self_role_change = client.patch(
+        f"/api/v1/auth/users/{current_user_id}/role",
+        json={"role": "user"},
+    )
+    assert self_role_change.status_code == 409
+
+
 def test_user_roles_and_provider_keys_are_scoped(client):
     created = client.post(
         "/api/v1/auth/users",
         json={
+            "first_name": "Morgan",
+            "last_name": "Lane",
             "email": "member@example.test",
             "password": "member-password-long",
             "role": "user",
         },
     )
     assert created.status_code == 201
+    assert created.json()["first_name"] == "Morgan"
+    assert created.json()["last_name"] == "Lane"
 
     with TestClient(app) as member_client:
         login = member_client.post(
@@ -210,6 +288,13 @@ def test_user_roles_and_provider_keys_are_scoped(client):
         )
         assert login.status_code == 200
         assert member_client.get("/api/v1/auth/users").status_code == 403
+        assert (
+            member_client.patch(
+                f"/api/v1/auth/users/{created.json()['id']}/role",
+                json={"role": "admin"},
+            ).status_code
+            == 403
+        )
         assert member_client.put(
             "/api/v1/settings",
             json={"crawl_max_pages": 2},

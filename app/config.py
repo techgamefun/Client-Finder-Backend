@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     )
     upstash_redis_rest_url: str | None = None
     upstash_redis_rest_token: str | None = None
+    cloudinary_cloud_name: str | None = None
+    cloudinary_api_key: str | None = None
+    cloudinary_api_secret: str | None = None
     frontend_origins: str = Field(validation_alias="FRONTEND_URL")
     run_worker_in_api: bool = Field(
         default=False,

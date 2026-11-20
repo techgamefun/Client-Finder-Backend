@@ -218,6 +218,9 @@ GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
 GOOGLE_OAUTH_STATE_SECRET=generate-a-random-64-character-hex-secret
 GMAIL_TOKEN_ENCRYPTION_KEY=replace-with-generated-Fernet-key
 EMAIL_UNSUBSCRIBE_SECRET=generate-a-random-64-character-hex-secret
+CLOUDINARY_CLOUD_NAME=your-cloudinary-cloud-name
+CLOUDINARY_API_KEY=your-cloudinary-api-key
+CLOUDINARY_API_SECRET=your-cloudinary-api-secret
 ```
 
 `DATABASE_URL` is required when the application starts. The access and refresh
@@ -236,6 +239,10 @@ on the Settings page; it is sent only from the Agent to the Go proxy. The Go
 proxy uses it for the first-party HypeStat API and never returns it to the
 frontend. Generate a shared token with
 `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+Configure the three Cloudinary variables to enable user profile photos and
+organization logo/banner uploads. Images are uploaded from the Agent using
+server-side credentials; supported formats are JPEG, PNG, and WebP up to 8 MB.
+Never expose or commit `CLOUDINARY_API_SECRET`.
 
 To connect Gmail accounts, configure a Google OAuth client with the redirect
 URI above (use your HTTPS API URL in production). Generate a state-signing key
