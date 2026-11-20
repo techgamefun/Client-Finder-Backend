@@ -129,11 +129,29 @@ class OverviewUserProgress(BaseModel):
     email: str
     role: str
     is_active: bool
+    searches_run: int
     websites_discovered: int
     companies_created: int
     leads_created: int
     crawls_completed: int
     emails_sent: int
+
+
+class MemberActivitySeriesPoint(BaseModel):
+    date: str
+    searches_run: int
+    websites_discovered: int
+    companies_created: int
+    leads_created: int
+    crawls_completed: int
+    emails_sent: int
+
+
+class MemberActivityResponse(BaseModel):
+    member: OverviewUserProgress
+    range: OverviewRange
+    timezone: str
+    series: list[MemberActivitySeriesPoint]
 
 
 class AdminOverviewResponse(OverviewResponse):

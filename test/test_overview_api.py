@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -189,6 +190,16 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
         db.flush()
         db.add_all(
             [
+                SearchKeyword(
+                    keyword="admin discovery",
+                    searched_at=now,
+                    created_by_user_id=context.user_id,
+                ),
+                SearchKeyword(
+                    keyword="member discovery",
+                    searched_at=now,
+                    created_by_user_id=other_user.id,
+                ),
                 Company(
                     name="Admin-owned company",
                     domain="admin-owned.example",
@@ -249,6 +260,8 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
     }
     assert progress_by_email["admin@example.test"]["websites_discovered"] == 1
     assert progress_by_email["member@example.test"]["websites_discovered"] == 1
+    assert progress_by_email["admin@example.test"]["searches_run"] == 1
+    assert progress_by_email["member@example.test"]["searches_run"] == 1
     assert progress_by_email["member@example.test"]["leads_created"] == 1
 
 
@@ -275,8 +288,101 @@ def test_admin_overview_endpoint_requires_admin(client):
         response = member_client.get(
             "/api/v1/overview/admin?range=30d&tz=UTC"
         )
+        member_activity = member_client.get(
+            f"/api/v1/overview/admin/users/{member.json()['id']}/activity"
+        )
 
     assert response.status_code == 403
+    assert member_activity.status_code == 403
+
+
+def test_admin_member_activity_returns_daily_service_counts(
+    client,
+    monkeypatch,
+):
+    now = datetime(2025, 6, 30, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(overview_service, "_utc_now", lambda: now)
+
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        member = User(
+            organization_id=context.organization_id,
+            email="activity-member@example.test",
+            password_hash="unused-test-hash",
+            role="user",
+        )
+        db.add(member)
+        db.flush()
+        company = Company(
+            name="Activity Company",
+            domain="activity.example",
+            created_by_user_id=member.id,
+            created_at=now - timedelta(days=2),
+        )
+        db.add_all(
+            [
+                company,
+                SearchKeyword(
+                    keyword="activity search",
+                    searched_at=now - timedelta(days=3),
+                    created_by_user_id=member.id,
+                ),
+                Website(
+                    website_url="https://activity.example/",
+                    domain="activity.example",
+                    created_by_user_id=member.id,
+                    created_at=now - timedelta(days=2),
+                ),
+                WebsiteCrawlJob(
+                    website_url="https://activity.example/",
+                    status="succeeded",
+                    created_by_user_id=member.id,
+                    completed_at=now - timedelta(days=1),
+                ),
+            ]
+        )
+        db.flush()
+        db.add(
+            Contact(
+                company_id=company.id,
+                created_by_user_id=member.id,
+                business_email="hello@activity.example",
+            )
+        )
+        member_id = member.id
+        db.commit()
+
+    response = client.get(
+        f"/api/v1/overview/admin/users/{member_id}/activity"
+        "?range=7d&tz=UTC"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["member"]["email"] == "activity-member@example.test"
+    assert data["range"] == "7d"
+    assert data["timezone"] == "UTC"
+    assert data["member"]["searches_run"] == 1
+    assert data["member"]["websites_discovered"] == 1
+    assert data["member"]["companies_created"] == 1
+    assert data["member"]["leads_created"] == 1
+    assert data["member"]["crawls_completed"] == 1
+    assert len(data["series"]) == 7
+    assert data["series"][0]["date"] == "2025-06-24"
+    assert data["series"][-1]["date"] == "2025-06-30"
+    assert data["series"][0]["searches_run"] == 0
+    assert data["series"][3]["searches_run"] == 1
+    assert data["series"][4]["websites_discovered"] == 1
+    assert data["series"][4]["companies_created"] == 1
+    assert data["series"][4]["leads_created"] == 1
+    assert data["series"][5]["crawls_completed"] == 1
+    assert sum(point["searches_run"] for point in data["series"]) == 1
+    assert sum(point["emails_sent"] for point in data["series"]) == 0
+
+    missing_member = client.get(
+        f"/api/v1/overview/admin/users/{uuid4()}/activity?range=30d&tz=UTC"
+    )
+    assert missing_member.status_code == 404
 
 
 def test_overview_delta_handles_zero_previous_value():

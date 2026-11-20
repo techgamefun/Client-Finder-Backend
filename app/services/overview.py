@@ -1,5 +1,6 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
@@ -31,6 +32,8 @@ from app.schemas.overview import (
     OverviewJobs,
     OverviewKpi,
     OverviewKpis,
+    MemberActivityResponse,
+    MemberActivitySeriesPoint,
     OverviewOnboarding,
     OverviewOnboardingStep,
     OverviewPeriod,
@@ -1105,6 +1108,14 @@ def build_admin_overview(
             User.role,
             User.is_active,
             _count_range(
+                SearchKeyword,
+                organization_id,
+                SearchKeyword.searched_at,
+                current_start,
+                current_end,
+                owner_user_id=User.id,
+            ).label("searches_run"),
+            _count_range(
                 Website,
                 organization_id,
                 Website.created_at,
@@ -1159,6 +1170,7 @@ def build_admin_overview(
                 email=row.email,
                 role=row.role,
                 is_active=row.is_active,
+                searches_run=int(row.searches_run or 0),
                 websites_discovered=int(row.websites_discovered or 0),
                 companies_created=int(row.companies_created or 0),
                 leads_created=int(row.leads_created or 0),
@@ -1167,6 +1179,170 @@ def build_admin_overview(
             )
             for row in progress_rows
         ],
+    )
+
+
+def build_member_activity(
+    db: Session,
+    context: TenantContext,
+    user_id: UUID,
+    range_name: OverviewRange,
+    timezone_name: str,
+    *,
+    now: datetime | None = None,
+) -> MemberActivityResponse:
+    if range_name not in RANGE_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="range must be one of 7d, 30d, or 90d.",
+        )
+    try:
+        user_timezone = ZoneInfo(timezone_name)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tz must be a valid IANA timezone.",
+        ) from exc
+
+    member = db.scalar(
+        select(User).where(
+            User.id == user_id,
+            User.organization_id == context.organization_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization member not found.",
+        )
+
+    current_time = _as_utc(now or _utc_now()).astimezone(user_timezone)
+    end_date = current_time.date()
+    start_date = end_date - timedelta(days=RANGE_DAYS[range_name] - 1)
+    current_start = datetime.combine(
+        start_date,
+        time.min,
+        tzinfo=user_timezone,
+    ).astimezone(timezone.utc)
+    current_end = datetime.combine(
+        end_date + timedelta(days=1),
+        time.min,
+        tzinfo=user_timezone,
+    ).astimezone(timezone.utc)
+    organization_id = context.organization_id
+    has_user_contact = exists(
+        select(Contact.id).where(
+            Contact.company_id == Company.id,
+            Contact.organization_id == organization_id,
+            Contact.created_by_user_id == member.id,
+        )
+    )
+    event_rows = union_all(
+        select(
+            literal("searches_run").label("metric"),
+            SearchKeyword.searched_at.label("occurred_at"),
+        ).where(
+            SearchKeyword.organization_id == organization_id,
+            SearchKeyword.created_by_user_id == member.id,
+            SearchKeyword.searched_at >= current_start,
+            SearchKeyword.searched_at < current_end,
+        ),
+        select(
+            literal("websites_discovered").label("metric"),
+            Website.created_at.label("occurred_at"),
+        ).where(
+            Website.organization_id == organization_id,
+            Website.created_by_user_id == member.id,
+            Website.created_at >= current_start,
+            Website.created_at < current_end,
+        ),
+        select(
+            literal("companies_created").label("metric"),
+            Company.created_at.label("occurred_at"),
+        ).where(
+            Company.organization_id == organization_id,
+            Company.created_by_user_id == member.id,
+            Company.created_at >= current_start,
+            Company.created_at < current_end,
+        ),
+        select(
+            literal("leads_created").label("metric"),
+            Company.created_at.label("occurred_at"),
+        ).where(
+            Company.organization_id == organization_id,
+            Company.created_by_user_id == member.id,
+            Company.created_at >= current_start,
+            Company.created_at < current_end,
+            has_user_contact,
+        ),
+        select(
+            literal("crawls_completed").label("metric"),
+            WebsiteCrawlJob.completed_at.label("occurred_at"),
+        ).where(
+            WebsiteCrawlJob.organization_id == organization_id,
+            WebsiteCrawlJob.created_by_user_id == member.id,
+            WebsiteCrawlJob.status == "succeeded",
+            WebsiteCrawlJob.completed_at.is_not(None),
+            WebsiteCrawlJob.completed_at >= current_start,
+            WebsiteCrawlJob.completed_at < current_end,
+        ),
+        select(
+            literal("emails_sent").label("metric"),
+            EmailCampaignRecipient.sent_at.label("occurred_at"),
+        )
+        .join(
+            EmailCampaign,
+            EmailCampaign.id == EmailCampaignRecipient.campaign_id,
+        )
+        .where(
+            EmailCampaign.org_id == organization_id,
+            EmailCampaign.created_by == member.id,
+            EmailCampaignRecipient.org_id == organization_id,
+            EmailCampaignRecipient.sent_at.is_not(None),
+            EmailCampaignRecipient.sent_at >= current_start,
+            EmailCampaignRecipient.sent_at < current_end,
+        ),
+    ).subquery()
+    event_rows_result = db.execute(
+        select(event_rows.c.metric, event_rows.c.occurred_at)
+    ).all()
+
+    metric_names = (
+        "searches_run",
+        "websites_discovered",
+        "companies_created",
+        "leads_created",
+        "crawls_completed",
+        "emails_sent",
+    )
+    daily_counts = {
+        day: {metric: 0 for metric in metric_names}
+        for day in _dates_between(start_date, end_date)
+    }
+    for metric_name, occurred_at in event_rows_result:
+        event_date = _as_utc(occurred_at).astimezone(user_timezone).date()
+        if event_date in daily_counts:
+            daily_counts[event_date][metric_name] += 1
+
+    series = [
+        MemberActivitySeriesPoint(date=day.isoformat(), **counts)
+        for day, counts in daily_counts.items()
+    ]
+    totals = {
+        metric: sum(counts[metric] for counts in daily_counts.values())
+        for metric in metric_names
+    }
+    return MemberActivityResponse(
+        member=OverviewUserProgress(
+            user_id=str(member.id),
+            email=member.email,
+            role=member.role,
+            is_active=member.is_active,
+            **totals,
+        ),
+        range=range_name,
+        timezone=timezone_name,
+        series=series,
     )
 
 
