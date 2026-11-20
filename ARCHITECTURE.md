@@ -53,6 +53,10 @@ app/main.py                 FastAPI app, router registration, health check
 
 - `app/config.py` loads application settings from environment variables and
   `.env`.
+- Web Push uses backend-only VAPID settings and the frontend's matching public
+  key. Subscription prompts are user initiated; notification preferences are
+  stored per user. Background event handlers must explicitly call the delivery
+  helper; crawl, PageSpeed, and outreach events do not currently send pushes.
 - `app/database.py` creates the SQLAlchemy engine, declarative base, and session
   factory.
 - Database entity primary keys use UUIDs; foreign keys and API IDs use the same
@@ -63,6 +67,10 @@ app/main.py                 FastAPI app, router registration, health check
 - `app/api/media.py` validates authenticated image uploads and sends them to
   Cloudinary using server-side credentials. Users can manage their own profile
   photos; organization branding is limited to organization administrators.
+- `app/api/push_notifications.py` manages authenticated users' Web Push
+  subscriptions and notification preferences. `app/services/web_push.py`
+  delivers preference-filtered messages from background work and removes
+  expired subscriptions.
 - `app/api/auth.py` returns organization branding and description in the
   authenticated session, and provides admin-scoped organization member
   management. Member names are optional for existing accounts, and role

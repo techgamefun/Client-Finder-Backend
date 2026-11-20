@@ -221,6 +221,9 @@ EMAIL_UNSUBSCRIBE_SECRET=generate-a-random-64-character-hex-secret
 CLOUDINARY_CLOUD_NAME=your-cloudinary-cloud-name
 CLOUDINARY_API_KEY=your-cloudinary-api-key
 CLOUDINARY_API_SECRET=your-cloudinary-api-secret
+VAPID_PUBLIC_KEY=your-vapid-public-key
+VAPID_PRIVATE_KEY=your-vapid-private-key
+VAPID_SUBJECT=mailto:admin@example.com
 ```
 
 `DATABASE_URL` is required when the application starts. The access and refresh
@@ -243,6 +246,12 @@ Configure the three Cloudinary variables to enable user profile photos and
 organization logo/banner uploads. Images are uploaded from the Agent using
 server-side credentials; supported formats are JPEG, PNG, and WebP up to 8 MB.
 Never expose or commit `CLOUDINARY_API_SECRET`.
+Configure `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` on the
+backend to enable push delivery. Set the matching public key as
+`NEXT_PUBLIC_VAPID_PUBLIC_KEY` in the frontend environment (for example,
+`frontend/.env.local`). The public key is safe to expose; never expose or commit
+`VAPID_PRIVATE_KEY`. Use a `mailto:` address or HTTPS URL for `VAPID_SUBJECT`.
+After the backend is configured, users can enable notifications from Settings.
 
 To connect Gmail accounts, configure a Google OAuth client with the redirect
 URI above (use your HTTPS API URL in production). Generate a state-signing key

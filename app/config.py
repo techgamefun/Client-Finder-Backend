@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     cloudinary_cloud_name: str | None = None
     cloudinary_api_key: str | None = None
     cloudinary_api_secret: str | None = None
+    vapid_public_key: str | None = None
+    vapid_private_key: str | None = None
+    vapid_subject: str | None = None
     frontend_origins: str = Field(validation_alias="FRONTEND_URL")
     run_worker_in_api: bool = Field(
         default=False,
@@ -82,6 +85,18 @@ class Settings(BaseSettings):
     def validate_refresh_token_expiry(cls, value: str) -> str:
         parse_token_expiry(value, maximum_seconds=_REFRESH_TOKEN_MAX_SECONDS)
         return value
+
+    @field_validator("vapid_subject")
+    @classmethod
+    def validate_vapid_subject(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if normalized and not (
+            normalized.startswith("mailto:") or normalized.startswith("https://")
+        ):
+            raise ValueError("VAPID_SUBJECT must be a mailto: or https:// URI.")
+        return normalized or None
 
     @model_validator(mode="after")
     def validate_token_secrets(self) -> "Settings":
@@ -111,6 +126,14 @@ class Settings(BaseSettings):
                 "EMAIL_UNSUBSCRIBE_SECRET must contain at least 32 characters."
             )
         return self
+
+    @property
+    def web_push_configured(self) -> bool:
+        return bool(
+            self.vapid_public_key
+            and self.vapid_private_key
+            and self.vapid_subject
+        )
 
     model_config = SettingsConfigDict(
         env_file=".env",
