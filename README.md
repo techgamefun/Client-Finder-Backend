@@ -158,6 +158,9 @@ are marked `skipped` before dispatch, and the worker checks again before
 crawling. Classified DNS, refused-connection, and timeout failures are retried
 up to the crawl-attempt limit; after three terminal failures, the domain is
 automatically excluded as `Unreachable`.
+The website registry page excludes matching website rows and their subdomains
+from its results, counts, and filter facets without deleting website or crawl
+history. Removing an exclusion makes those records visible again.
 
 The legacy `POST /api/v1/discovery/ingest` endpoint continues to create and
 enrich companies directly and queues mobile and desktop Google PageSpeed

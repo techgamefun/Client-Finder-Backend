@@ -13,7 +13,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Session, contains_eager, joinedload, load_only
 
-from app.models import Website, WebsiteCrawl, WebsiteHypeStatProfile
+from app.models import (
+    ExcludedDomain,
+    Website,
+    WebsiteCrawl,
+    WebsiteHypeStatProfile,
+)
 
 WebsiteSortKey = Literal[
     "website",
@@ -112,6 +117,35 @@ def _audience_country_exists(db: Session, country: str):
     )
 
 
+def _website_is_not_excluded():
+    website_domain = func.lower(Website.domain)
+    excluded_domain = func.lower(ExcludedDomain.domain)
+    is_excluded = exists(
+        select(literal(1))
+        .select_from(ExcludedDomain)
+        .where(
+            ExcludedDomain.organization_id == Website.organization_id,
+            or_(
+                website_domain == excluded_domain,
+                (
+                    func.length(website_domain)
+                    > func.length(excluded_domain)
+                )
+                & (
+                    func.substr(
+                        website_domain,
+                        func.length(website_domain)
+                        - func.length(excluded_domain),
+                    )
+                    == literal(".") + excluded_domain
+                ),
+            ),
+        )
+        .correlate(Website)
+    )
+    return ~is_excluded
+
+
 def _conditions(
     db: Session,
     *,
@@ -127,7 +161,10 @@ def _conditions(
     backlink_country: str | None,
     audience_country: str | None,
 ):
-    conditions = [Website.crawl_id.is_not(None)]
+    conditions = [
+        Website.crawl_id.is_not(None),
+        _website_is_not_excluded(),
+    ]
     if status:
         conditions.append(Website.status == status)
     if page_type:
@@ -279,6 +316,7 @@ def get_website_registry_page(
                 )
             ),
         )
+        .where(_website_is_not_excluded())
     ).one()
     website_count = website_count or 0
     indexed_count = indexed_count or 0
@@ -393,7 +431,10 @@ def get_website_registry_facets(db: Session) -> dict[str, list[str]]:
             WebsiteHypeStatProfile,
             WebsiteHypeStatProfile.website_id == Website.id,
         )
-        .where(Website.crawl_id.is_not(None))
+        .where(
+            Website.crawl_id.is_not(None),
+            _website_is_not_excluded(),
+        )
     )
     categories: set[str] = set()
     discovery_sources: set[str] = set()

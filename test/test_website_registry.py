@@ -6,6 +6,7 @@ from sqlalchemy import select
 from conftest import TestingSessionLocal
 from app.models import (
     Company,
+    ExcludedDomain,
     PageSpeedScan,
     PageSpeedScanJob,
     SearchKeyword,
@@ -303,6 +304,71 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     assert facets.json()["hypestat_countries"] == ["India"]
     assert facets.json()["backlink_countries"] == ["US"]
     assert facets.json()["audience_countries"] == ["India"]
+
+
+def test_website_registry_hides_excluded_domains_without_deleting_them(client):
+    with TestingSessionLocal() as db:
+        for domain, topic in [
+            ("excluded.example", "hidden-root"),
+            ("shop.excluded.example", "hidden-subdomain"),
+            ("visible.example", "visible"),
+        ]:
+            crawl = WebsiteCrawl(
+                website_url=f"https://{domain}/",
+                site_type="saas_corporate_marketing",
+            )
+            db.add(crawl)
+            db.flush()
+            db.add(
+                Website(
+                    website_url=crawl.website_url,
+                    domain=domain,
+                    crawl_id=crawl.id,
+                    site_topic=[topic],
+                    discovery_source=topic,
+                )
+            )
+        exclusion = ExcludedDomain(
+            domain="excluded.example",
+            reason="Manual Exclusion",
+            source="user",
+        )
+        db.add(exclusion)
+        db.commit()
+        exclusion_id = exclusion.id
+
+    response = client.get(
+        "/api/v1/websites/registry-page",
+        params={"limit": 1, "offset": 0, "sort_by": "website"},
+    )
+    facets = client.get("/api/v1/websites/registry-facets")
+
+    assert response.status_code == 200
+    assert response.json()["total_count"] == 1
+    assert response.json()["indexed_count"] == 1
+    assert response.json()["website_count"] == 1
+    assert [item["domain"] for item in response.json()["items"]] == [
+        "visible.example"
+    ]
+    assert facets.status_code == 200
+    assert facets.json()["categories"] == ["visible"]
+    assert facets.json()["discovery_sources"] == ["visible"]
+
+    with TestingSessionLocal() as db:
+        assert db.scalar(
+            select(Website).where(Website.domain == "excluded.example")
+        ) is not None
+        db.delete(db.get(ExcludedDomain, exclusion_id))
+        db.commit()
+
+    restored = client.get("/api/v1/websites/registry-page")
+    assert restored.status_code == 200
+    assert restored.json()["total_count"] == 3
+    assert {item["domain"] for item in restored.json()["items"]} == {
+        "excluded.example",
+        "shop.excluded.example",
+        "visible.example",
+    }
 
 
 def test_job_queue_summaries_return_only_running_and_failed_counts(client):
