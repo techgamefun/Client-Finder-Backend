@@ -156,6 +156,33 @@ class TavilyUsageResponse(BaseModel):
     account: TavilyAccountUsage | None = None
 
 
+class HypeStatUsageLimits(BaseModel):
+    requests_per_minute: int
+    requests_per_day: int
+    analyses_per_day: int
+
+
+class HypeStatUsageCounts(BaseModel):
+    this_minute: int
+    today: int
+    analyses_today: int
+
+
+class HypeStatUsageData(BaseModel):
+    limits: HypeStatUsageLimits
+    used: HypeStatUsageCounts
+    resets_at: datetime
+
+
+class HypeStatUsageMeta(BaseModel):
+    requests_left_today: int
+
+
+class HypeStatUsageResponse(BaseModel):
+    data: HypeStatUsageData
+    meta: HypeStatUsageMeta
+
+
 class OctoparseUsageResponse(BaseModel):
     period_start: datetime
     tasks_started: int

@@ -4,8 +4,13 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import select
 
-from app.models import Website, WebsiteHypeStatProfile
+from app.models import (
+    UserProviderCredential,
+    Website,
+    WebsiteHypeStatProfile,
+)
 from app.services import hypestat
+from app.services import hypestat_usage
 from app.services.hypestat import (
     HypeStatFetchResult,
     _parse_domain_results,
@@ -106,6 +111,67 @@ def test_fetch_profiles_forwards_settings_key_only_to_crawler_service(
     assert results["known.example"].status == "succeeded"
     assert received_headers["x-hypestat-api-key"] == "test-hypestat-api-key"
     assert received_headers["x-crawler-service-token"] == "test-shared-token"
+
+
+def test_hypestat_usage_endpoint_returns_official_usage(client, monkeypatch):
+    api_key = "test-hypestat-api-key"
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        db.add(
+            UserProviderCredential(
+                user_id=context.user_id,
+                provider="hypestat",
+                api_key=api_key,
+            ),
+        )
+        db.commit()
+
+    received_headers = {}
+
+    def handle_request(request):
+        received_headers.update(request.headers)
+        assert str(request.url) == "https://api.hypestat.com/v1/usage"
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "key": "hs_live_a1b2...",
+                    "limits": {
+                        "requests_per_minute": 60,
+                        "requests_per_day": 1000,
+                        "analyses_per_day": 50,
+                    },
+                    "used": {
+                        "this_minute": 1,
+                        "today": 40,
+                        "analyses_today": 0,
+                    },
+                    "resets_at": "2026-10-31T00:00:00Z",
+                },
+                "meta": {"requests_left_today": 960},
+            },
+        )
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        hypestat_usage.httpx,
+        "AsyncClient",
+        lambda timeout: real_async_client(
+            transport=httpx.MockTransport(handle_request),
+            timeout=timeout,
+        ),
+    )
+
+    response = client.get("/api/v1/settings/hypestat/usage")
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["data"]["used"]["today"] == 40
+    assert result["data"]["limits"]["requests_per_day"] == 1000
+    assert result["data"]["limits"]["analyses_per_day"] == 50
+    assert result["meta"]["requests_left_today"] == 960
+    assert "key" not in result["data"]
+    assert received_headers["authorization"] == f"Bearer {api_key}"
 
 
 def test_refetch_hypestat_endpoint_updates_saved_profile(client, monkeypatch):
