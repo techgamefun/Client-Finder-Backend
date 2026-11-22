@@ -7,6 +7,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_db
 from app.schemas.website_crawl import (
+    WebsiteCrawlBatchExcludedResponse,
     WebsiteCrawlBatchJobResponse,
     WebsiteCrawlBatchRequest,
     WebsiteCrawlBatchResponse,
@@ -44,7 +45,7 @@ async def crawl_websites(
     payload: WebsiteCrawlBatchRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> WebsiteCrawlBatchResponse:
-    jobs = await create_website_crawl_jobs(
+    jobs, excluded = await create_website_crawl_jobs(
         [str(website_url) for website_url in payload.website_urls],
         db,
     )
@@ -54,10 +55,16 @@ async def crawl_websites(
                 id=job.id,
                 website_url=job.website_url,
                 status=job.status,
-                skip_reason=job.skip_reason,
             )
             for job in jobs
-        ]
+        ],
+        excluded=[
+            WebsiteCrawlBatchExcludedResponse(
+                website_url=item.website_url,
+                reason=item.reason,
+            )
+            for item in excluded
+        ],
     )
 
 

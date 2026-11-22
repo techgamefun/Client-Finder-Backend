@@ -17,8 +17,7 @@ from app.schemas.excluded_domain import (
     ExcludedDomainResponse,
 )
 from app.services.excluded_domains import (
-    mark_queued_jobs_skipped_for_domain,
-    mark_queued_jobs_skipped_for_domains,
+    delete_queued_jobs_for_domains,
 )
 
 
@@ -98,11 +97,7 @@ def create_excluded_domain(
 
     try:
         db.flush()
-        mark_queued_jobs_skipped_for_domain(
-            db,
-            payload.domain,
-            payload.reason,
-        )
+        delete_queued_jobs_for_domains(db, {payload.domain})
         db.commit()
         db.refresh(domain)
     except IntegrityError as exc:
@@ -154,12 +149,9 @@ def create_excluded_domains_batch(
 
     try:
         db.flush()
-        mark_queued_jobs_skipped_for_domains(
+        delete_queued_jobs_for_domains(
             db,
-            {
-                domain.domain: domain.reason
-                for domain in domains_by_name.values()
-            },
+            set(domains_by_name),
         )
         db.commit()
     except IntegrityError as exc:

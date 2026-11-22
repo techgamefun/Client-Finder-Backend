@@ -240,11 +240,13 @@ the crawl signals and allows editing website type, site topic, and language.
 This discovery flow does not create companies or queue PageSpeed scans.
 
 The Website Indexing Queue exposes organization-scoped exclusions through
-`/api/v1/excluded-domains`. Enqueueing skips matching domains and subdomains
-with a `skip_reason`; the worker repeats the check immediately before calling
-the crawler. Terminal DNS, refused-connection, and timeout failures are
-tracked per domain and create an `Unreachable` exclusion after the third
-failure. Removing an exclusion also clears its accumulated failure tracker.
+`/api/v1/excluded-domains`. Excluding a domain or subdomain deletes matching
+queued crawl-job records; batch imports report excluded URLs without creating
+jobs. The worker repeats the exclusion check immediately before calling the
+crawler and deletes a claimed job if it is already excluded. Terminal DNS,
+refused-connection, and timeout failures are tracked per domain and create an
+`Unreachable` exclusion after the third failure. Removing an exclusion also
+clears its accumulated failure tracker.
 
 ### Discovery ingestion
 

@@ -70,10 +70,9 @@ class WebsiteCrawlJobHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    status: Literal["queued", "running", "succeeded", "failed", "skipped"]
+    status: Literal["queued", "running", "succeeded", "failed"]
     attempts: int
     error: str | None
-    skip_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

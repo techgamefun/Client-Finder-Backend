@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Table, func, select
+from sqlalchemy import Table, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -110,48 +110,38 @@ def seed_system_excluded_domains(
         reset_tenant_context(context_token)
 
 
-def mark_queued_jobs_skipped_for_domain(
+def delete_queued_jobs_for_domains(
     db: Session,
-    domain: str,
-    reason: str,
+    domains: set[str],
 ) -> int:
-    return mark_queued_jobs_skipped_for_domains(db, {domain: reason})
-
-
-def mark_queued_jobs_skipped_for_domains(
-    db: Session,
-    exclusions: dict[str, str],
-) -> int:
-    if not exclusions:
+    if not domains:
         return 0
 
     jobs = db.scalars(
         select(WebsiteCrawlJob).where(WebsiteCrawlJob.status == "queued")
     ).all()
-    now = datetime.now(timezone.utc)
-    skipped_count = 0
+    job_ids: list[UUID] = []
     for job in jobs:
         job_domain = normalize_domain(job.website_url)
         if job_domain is None:
             continue
         labels = job_domain.split(".")
-        reason = next(
-            (
-                exclusions[candidate]
-                for index in range(len(labels) - 1)
-                if (candidate := ".".join(labels[index:])) in exclusions
-            ),
-            None,
+        if any(
+            ".".join(labels[index:]) in domains
+            for index in range(len(labels) - 1)
+        ):
+            job_ids.append(job.id)
+
+    if not job_ids:
+        return 0
+
+    result = db.execute(
+        delete(WebsiteCrawlJob).where(
+            WebsiteCrawlJob.id.in_(job_ids),
+            WebsiteCrawlJob.status == "queued",
         )
-        if reason is None:
-            continue
-        job.status = "skipped"
-        job.skip_reason = reason
-        job.error = None
-        job.updated_at = now
-        job.completed_at = now
-        skipped_count += 1
-    return skipped_count
+    )
+    return result.rowcount or 0
 
 
 def record_unreachable_domain_failure(
@@ -222,11 +212,7 @@ def record_unreachable_domain_failure(
             where=excluded_table.c.source == "auto_crawler",
         )
         db.execute(exclusion_statement)
-        mark_queued_jobs_skipped_for_domain(
-            db,
-            hostname,
-            "Unreachable",
-        )
+        delete_queued_jobs_for_domains(db, {hostname})
 
     db.commit()
     return failure_count

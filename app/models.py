@@ -1392,7 +1392,6 @@ class WebsiteCrawlJob(TenantOwnedMixin, Base):
         server_default="0",
     )
     error: Mapped[str | None] = mapped_column(Text)
-    skip_reason: Mapped[str | None] = mapped_column(Text)
     crawl_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("website_crawls.id", ondelete="SET NULL"),

@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -29,16 +30,22 @@ from app.services.website_registry import upsert_website
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ExcludedCrawlTarget:
+    website_url: str
+    reason: str
+
+
 async def create_website_crawl_jobs(
     website_urls: list[str],
     db: Session,
-) -> list[WebsiteCrawlJob]:
-    jobs = await run_in_threadpool(
+) -> tuple[list[WebsiteCrawlJob], list[ExcludedCrawlTarget]]:
+    jobs, excluded = await run_in_threadpool(
         _create_website_crawl_jobs_sync,
         website_urls,
         db,
     )
-    job_ids = [str(job.id) for job in jobs if job.status == "queued"]
+    job_ids = [str(job.id) for job in jobs]
     if job_ids:
         try:
             await enqueue_crawl_jobs(job_ids)
@@ -48,14 +55,15 @@ async def create_website_crawl_jobs(
                 "for worker recovery.",
                 len(job_ids),
             )
-    return jobs
+    return jobs, excluded
 
 
 def _create_website_crawl_jobs_sync(
     website_urls: list[str],
     db: Session,
-) -> list[WebsiteCrawlJob]:
+) -> tuple[list[WebsiteCrawlJob], list[ExcludedCrawlTarget]]:
     jobs = []
+    excluded = []
     seen_domains: set[str] = set()
 
     for website_url in website_urls:
@@ -70,15 +78,12 @@ def _create_website_crawl_jobs_sync(
 
         exclusion = find_excluded_domain(db, website_url)
         if exclusion is not None:
-            now = datetime.now(timezone.utc)
-            job = WebsiteCrawlJob(
-                website_url=website_url,
-                status="skipped",
-                skip_reason=exclusion.reason,
-                completed_at=now,
+            excluded.append(
+                ExcludedCrawlTarget(
+                    website_url=website_url,
+                    reason=exclusion.reason,
+                )
             )
-            db.add(job)
-            jobs.append(job)
             continue
 
         website = upsert_website(
@@ -91,7 +96,7 @@ def _create_website_crawl_jobs_sync(
         jobs.append(job)
 
     db.commit()
-    return jobs
+    return jobs, excluded
 
 
 async def create_website_crawl_job(
@@ -129,21 +134,18 @@ def _create_website_crawl_job_sync(
 ) -> WebsiteCrawlJob:
     exclusion = find_excluded_domain(db, website_url)
     if exclusion is not None:
-        now = datetime.now(timezone.utc)
-        job = WebsiteCrawlJob(
-            website_url=website_url,
-            status="skipped",
-            skip_reason=exclusion.reason,
-            completed_at=now,
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This domain is excluded: {exclusion.reason}.",
         )
-    else:
-        website = upsert_website(
-            db,
-            website_url,
-            discovery_source=discovery_source,
-            discovery_provider=discovery_provider,
-        )
-        job = WebsiteCrawlJob(website_url=website.website_url, status="queued")
+
+    website = upsert_website(
+        db,
+        website_url,
+        discovery_source=discovery_source,
+        discovery_provider=discovery_provider,
+    )
+    job = WebsiteCrawlJob(website_url=website.website_url, status="queued")
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -168,7 +170,6 @@ def get_website_crawl_job(
         status=job.status,
         attempts=job.attempts,
         error=job.error,
-        skip_reason=job.skip_reason,
         created_at=job.created_at,
         updated_at=job.updated_at,
         started_at=job.started_at,
@@ -331,7 +332,6 @@ def list_website_crawl_jobs(
             status=job.status,
             attempts=job.attempts,
             error=job.error,
-            skip_reason=job.skip_reason,
             created_at=job.created_at,
             updated_at=job.updated_at,
             started_at=job.started_at,

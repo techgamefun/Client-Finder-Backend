@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from conftest import TestingSessionLocal
 from app.models import CrawlerDomainFailure, ExcludedDomain, WebsiteCrawlJob
+from app.services import crawl_jobs
 from app.services.excluded_domains import (
     SYSTEM_PRESET_DOMAINS,
     find_excluded_domain,
@@ -98,8 +99,7 @@ def test_excluded_domain_batch_accepts_1000_and_deduplicates(client):
     }
     with TestingSessionLocal() as db:
         saved_job = db.get(WebsiteCrawlJob, queued_job_id)
-        assert saved_job.status == "skipped"
-        assert saved_job.skip_reason == "Manual Exclusion"
+        assert saved_job is None
         google = db.scalar(
             select(ExcludedDomain).where(ExcludedDomain.domain == "google.com")
         )
@@ -150,9 +150,10 @@ def test_exclusion_normalizes_urls_matches_subdomains_and_can_be_removed(
         "/api/v1/crawler/crawl",
         json={"website_url": "https://m.facebook.com/about"},
     )
-    assert excluded_job.status_code == 202
-    assert excluded_job.json()["status"] == "skipped"
-    assert excluded_job.json()["skip_reason"] == "Manual Exclusion"
+    assert excluded_job.status_code == 409
+    assert excluded_job.json()["detail"] == (
+        "This domain is excluded: Manual Exclusion."
+    )
 
     unrelated_job = client.post(
         "/api/v1/crawler/crawl",
@@ -172,6 +173,7 @@ def test_exclusion_normalizes_urls_matches_subdomains_and_can_be_removed(
     )
     assert crawlable_job.status_code == 202
     assert crawlable_job.json()["status"] == "queued"
+    assert "skip_reason" not in crawlable_job.json()
 
     with TestingSessionLocal() as db:
         assert db.scalar(
@@ -181,7 +183,7 @@ def test_exclusion_normalizes_urls_matches_subdomains_and_can_be_removed(
         ) is None
 
 
-def test_adding_exclusion_skips_existing_queued_jobs(client, monkeypatch):
+def test_adding_exclusion_deletes_existing_queued_jobs(client, monkeypatch):
     monkeypatch.setattr(
         "app.services.crawl_jobs.enqueue_job",
         _noop_enqueue_job,
@@ -211,8 +213,55 @@ def test_adding_exclusion_skips_existing_queued_jobs(client, monkeypatch):
     assert response.status_code == 201
     with TestingSessionLocal() as db:
         saved_job = db.get(WebsiteCrawlJob, UUID(job["id"]))
-        assert saved_job.status == "skipped"
-        assert saved_job.skip_reason == "Manual Exclusion"
+        assert saved_job is None
+
+
+def test_batch_crawl_reports_excluded_targets_without_creating_jobs(
+    client,
+    monkeypatch,
+):
+    dispatch_calls: list[list[str]] = []
+
+    async def capture_enqueue(job_ids: list[str]) -> None:
+        dispatch_calls.append(job_ids)
+
+    monkeypatch.setattr(crawl_jobs, "enqueue_crawl_jobs", capture_enqueue)
+    exclusion = client.post(
+        "/api/v1/excluded-domains",
+        json={
+            "domain": "blocked.example",
+            "reason": "Manual Exclusion",
+        },
+    )
+    assert exclusion.status_code == 201
+
+    response = client.post(
+        "/api/v1/crawler/crawl/batch",
+        json={
+            "website_urls": [
+                "https://shop.blocked.example/",
+                "https://allowed.example/",
+            ]
+        },
+    )
+
+    assert response.status_code == 202
+    assert [job["website_url"] for job in response.json()["jobs"]] == [
+        "https://allowed.example/"
+    ]
+    assert response.json()["excluded"] == [
+        {
+            "website_url": "https://shop.blocked.example/",
+            "reason": "Manual Exclusion",
+        }
+    ]
+    assert len(dispatch_calls) == 1
+    assert len(dispatch_calls[0]) == 1
+    with TestingSessionLocal() as db:
+        jobs = db.scalars(select(WebsiteCrawlJob)).all()
+        assert len(jobs) == 1
+        assert jobs[0].website_url == "https://allowed.example/"
+        assert jobs[0].status == "queued"
 
 
 def test_auto_excludes_domain_after_three_terminal_failures(client):
@@ -265,9 +314,7 @@ def test_auto_excludes_domain_after_three_terminal_failures(client):
         assert exclusion.reason == "Unreachable"
         assert exclusion.source == "auto_crawler"
         assert exclusion.failure_count == 3
-        db.refresh(job)
-        assert job.status == "skipped"
-        assert job.skip_reason == "Unreachable"
+        assert db.get(WebsiteCrawlJob, job.id) is None
 
 
 def test_worker_rechecks_exclusion_before_crawler_call(client, monkeypatch):
@@ -311,9 +358,7 @@ def test_worker_rechecks_exclusion_before_crawler_call(client, monkeypatch):
 
     assert crawler_calls == []
     with TestingSessionLocal() as db:
-        job = db.get(WebsiteCrawlJob, job_id)
-        assert job.status == "skipped"
-        assert job.skip_reason == "Manual Exclusion"
+        assert db.get(WebsiteCrawlJob, job_id) is None
 
 
 def test_worker_retries_classified_target_timeout(client, monkeypatch):

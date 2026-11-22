@@ -85,10 +85,9 @@ class WebsiteCrawlResponse(BaseModel):
 class WebsiteCrawlJobResponse(BaseModel):
     id: UUID
     website_url: str
-    status: Literal["queued", "running", "succeeded", "failed", "skipped"]
+    status: Literal["queued", "running", "succeeded", "failed"]
     attempts: int
     error: str | None
-    skip_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None
@@ -99,9 +98,16 @@ class WebsiteCrawlJobResponse(BaseModel):
 class WebsiteCrawlBatchJobResponse(BaseModel):
     id: UUID
     website_url: str
-    status: Literal["queued", "skipped"]
-    skip_reason: str | None = None
+    status: Literal["queued"]
+
+
+class WebsiteCrawlBatchExcludedResponse(BaseModel):
+    website_url: str
+    reason: str
 
 
 class WebsiteCrawlBatchResponse(BaseModel):
     jobs: list[WebsiteCrawlBatchJobResponse]
+    excluded: list[WebsiteCrawlBatchExcludedResponse] = Field(
+        default_factory=list,
+    )

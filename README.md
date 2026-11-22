@@ -158,11 +158,12 @@ domains in one request; `DELETE /api/v1/excluded-domains/{id}` re-enables that
 domain. The Excluded domains page imports CSV files with a `domain`, `url`, or
 `website_url` column and optional `reason` and `note` columns.
 Preset social and technology domains are added for each organization.
-Exclusions apply to subdomains as well as the exact domain: matching crawl jobs
-are marked `skipped` before dispatch, and the worker checks again before
-crawling. Classified DNS, refused-connection, and timeout failures are retried
-up to the crawl-attempt limit; after three terminal failures, the domain is
-automatically excluded as `Unreachable`.
+Exclusions apply to subdomains as well as the exact domain: matching queued
+crawl-job records are deleted, and the worker rechecks running jobs before
+crawling. Batch crawl imports report excluded URLs without creating jobs.
+Classified DNS, refused-connection, and timeout failures are retried up to the
+crawl-attempt limit; after three terminal failures, the domain is automatically
+excluded as `Unreachable`.
 The website registry page excludes matching website rows and their subdomains
 from its results, counts, and filter facets without deleting website or crawl
 history. Removing an exclusion makes those records visible again.

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import exists, select, update
+from sqlalchemy import delete, exists, select, update
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
@@ -425,26 +425,19 @@ def _save_failure(job_id: UUID, detail: str) -> None:
         now = datetime.now(timezone.utc)
         job.status = "failed"
         job.error = detail
-        job.skip_reason = None
         job.updated_at = now
         job.completed_at = now
         db.commit()
 
 
-def _save_skipped(job_id: UUID, reason: str) -> None:
+def _delete_excluded_job(job_id: UUID) -> None:
     with SessionLocal() as db:
-        job = db.get(WebsiteCrawlJob, job_id)
-        if job is None:
-            raise RuntimeError(f"Website crawl job {job_id} no longer exists.")
-        if job.status != "running":
-            db.rollback()
-            return
-        now = datetime.now(timezone.utc)
-        job.status = "skipped"
-        job.skip_reason = reason
-        job.error = None
-        job.updated_at = now
-        job.completed_at = now
+        db.execute(
+            delete(WebsiteCrawlJob).where(
+                WebsiteCrawlJob.id == job_id,
+                WebsiteCrawlJob.status == "running",
+            )
+        )
         db.commit()
 
 
@@ -490,11 +483,7 @@ async def process_job(job_id: UUID) -> None:
             website_url,
         )
         if exclusion_reason is not None:
-            await run_in_threadpool(
-                _save_skipped,
-                job_id,
-                exclusion_reason,
-            )
+            await run_in_threadpool(_delete_excluded_job, job_id)
             return
 
         crawl_settings = await run_in_threadpool(_get_crawl_settings)
