@@ -1,8 +1,8 @@
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -12,6 +12,8 @@ from app.models import Company, Contact, PageSpeedScan
 from app.schemas.company import (
     CompanyCreate,
     CompanyNavigationSummaryResponse,
+    CompanyPipelineResponse,
+    CompanyPipelineSelectionResponse,
     CompanyResponse,
     CompanyUpdate,
     ContactCreate,
@@ -31,6 +33,10 @@ from app.schemas.website_crawl import (
 from app.services.crawl_jobs import (
     create_website_crawl_job,
     get_website_crawl_job,
+)
+from app.services.company_pipeline import (
+    get_company_pipeline,
+    get_company_pipeline_selection,
 )
 from app.services.normalization import (
     normalize_company_name,
@@ -321,6 +327,62 @@ def list_companies(
     )
 
     return list(db.scalars(statement).all())
+
+
+@router.get("/pipeline", response_model=CompanyPipelineResponse)
+def list_company_pipeline(
+    db: DatabaseSession,
+    view: Literal["companies", "leads"] = "companies",
+    query: Annotated[str, Query(max_length=300)] = "",
+    status_filter: Annotated[
+        str | None,
+        Query(max_length=30, alias="status"),
+    ] = None,
+    email_status: Literal["all", "contacted", "not_contacted"] = "all",
+    website: Literal["all", "with_website", "without_website"] = "all",
+    page: int = Query(default=1, ge=1),
+    page_size: Annotated[int, Query(ge=10, le=50)] = 10,
+) -> CompanyPipelineResponse:
+    if page_size not in (10, 25, 50):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="page_size must be 10, 25, or 50.",
+        )
+    return get_company_pipeline(
+        db,
+        view=view,
+        query=query,
+        status_filter=status_filter,
+        email_status=email_status,
+        website=website,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/pipeline/selection",
+    response_model=CompanyPipelineSelectionResponse,
+)
+def select_company_pipeline_results(
+    db: DatabaseSession,
+    view: Literal["companies", "leads"] = "leads",
+    query: Annotated[str, Query(max_length=300)] = "",
+    status_filter: Annotated[
+        str | None,
+        Query(max_length=30, alias="status"),
+    ] = None,
+    email_status: Literal["all", "contacted", "not_contacted"] = "all",
+    website: Literal["all", "with_website", "without_website"] = "all",
+) -> CompanyPipelineSelectionResponse:
+    return get_company_pipeline_selection(
+        db,
+        view=view,
+        query=query,
+        status_filter=status_filter,
+        email_status=email_status,
+        website=website,
+    )
 
 
 @router.get(

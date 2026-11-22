@@ -1,7 +1,14 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -9,10 +16,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_db
 from app.models import PageSpeedScan, Website, WebsiteCrawlJob
 from app.schemas.pagespeed import PageSpeedScanResponse, PageSpeedScanSummary
+from app.schemas.job_queue import BatchJobRetryRequest, BatchJobRetryResponse
 from app.schemas.website import (
     WebsiteAddToLeadsRequest,
     WebsiteAddToLeadsResponse,
     WebsiteCorpusWordsResponse,
+    WebsiteCorpusAnalysisJobResponse,
     WebsiteCrawlJobHistoryResponse,
     WebsiteDetailResponse,
     WebsiteDiscoveryKeywordResponse,
@@ -29,7 +38,16 @@ from app.schemas.website_crawl import (
     CrawlPageClassification,
     WebsiteCrawlResponse,
 )
-from app.services.website_corpus_words import get_website_corpus_words
+from app.services.website_corpus_words import (
+    get_website_corpus_words,
+    queue_stale_website_corpus_analysis,
+)
+from app.services.website_corpus_jobs import (
+    enqueue_website_corpus_analysis_jobs,
+    list_website_corpus_analysis_jobs,
+    retry_failed_website_corpus_analysis_jobs,
+    retry_website_corpus_analysis_job,
+)
 from app.services.website_classification import (
     reclassify_saved_website,
     reclassify_unclassified_websites,
@@ -158,10 +176,52 @@ def list_website_registry_facets(
 
 @router.get("/corpus-words", response_model=WebsiteCorpusWordsResponse)
 def website_corpus_words(
+    background_tasks: BackgroundTasks,
     db: WebsiteSession,
     website_ids: list[UUID] | None = Query(default=None, max_length=100),
 ) -> WebsiteCorpusWordsResponse:
+    job_ids = queue_stale_website_corpus_analysis(db, website_ids=website_ids)
+    if job_ids:
+        background_tasks.add_task(enqueue_website_corpus_analysis_jobs, job_ids)
     return get_website_corpus_words(db, website_ids=website_ids)
+
+
+@router.get(
+    "/corpus-words/jobs",
+    response_model=list[WebsiteCorpusAnalysisJobResponse],
+)
+def website_corpus_analysis_jobs(
+    db: WebsiteSession,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[WebsiteCorpusAnalysisJobResponse]:
+    return list_website_corpus_analysis_jobs(db, limit)
+
+
+@router.post(
+    "/corpus-words/jobs/retry-batch",
+    response_model=BatchJobRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_website_corpus_analysis_batch(
+    payload: BatchJobRetryRequest,
+    db: WebsiteSession,
+) -> BatchJobRetryResponse:
+    return await retry_failed_website_corpus_analysis_jobs(
+        payload.job_ids,
+        db,
+    )
+
+
+@router.post(
+    "/corpus-words/jobs/{job_id}/retry",
+    response_model=WebsiteCorpusAnalysisJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_website_corpus_analysis(
+    job_id: UUID,
+    db: WebsiteSession,
+) -> WebsiteCorpusAnalysisJobResponse:
+    return await retry_website_corpus_analysis_job(job_id, db)
 
 
 @router.post(

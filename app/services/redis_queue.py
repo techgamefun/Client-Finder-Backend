@@ -5,6 +5,7 @@ from app.config import settings
 
 QUEUE_KEY = "website-crawl:jobs"
 PAGESPEED_QUEUE_KEY = "pagespeed-scan:jobs"
+CORPUS_ANALYSIS_QUEUE_KEY = "website-corpus-analysis:jobs"
 
 
 class RedisQueueError(RuntimeError):
@@ -62,12 +63,21 @@ async def enqueue_pagespeed_jobs(job_ids: list[str]) -> None:
         await _execute("LPUSH", PAGESPEED_QUEUE_KEY, *job_ids)
 
 
+async def enqueue_corpus_analysis_jobs(job_ids: list[str]) -> None:
+    if job_ids:
+        await _execute("LPUSH", CORPUS_ANALYSIS_QUEUE_KEY, *job_ids)
+
+
 async def dequeue_job() -> str | None:
     return await _dequeue_from(QUEUE_KEY)
 
 
 async def dequeue_pagespeed_job() -> str | None:
     return await _dequeue_from(PAGESPEED_QUEUE_KEY)
+
+
+async def dequeue_corpus_analysis_job() -> str | None:
+    return await _dequeue_from(CORPUS_ANALYSIS_QUEUE_KEY)
 
 
 async def _dequeue_from(queue_key: str) -> str | None:

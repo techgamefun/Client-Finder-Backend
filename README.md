@@ -110,10 +110,14 @@ without overwriting their existing contact details. Company profiles use the
 Contacts section as the single place to manage email and phone values; raw crawl
 extractions remain visible on website profiles.
 The Websites page also displays the top keywords extracted from each domain's
-own saved crawl page titles and descriptions. `GET
-/api/v1/websites/corpus-words` computes these independently using the Go
-crawler service's `POST /corpus-words` endpoint and persists each domain's
-results until that website is re-crawled.
+own saved crawl page titles and descriptions. Successful crawl jobs queue
+keyword analysis automatically; results are persisted per website and reused
+until that website is re-crawled. `GET /api/v1/websites/corpus-words` returns
+saved results and queues any stale or missing analyses without waiting for the
+crawler service. The Jobs page's **Keywords** tab shows status and errors and
+allows failed analyses to be retried. The worker calls the Go crawler
+service's `POST /corpus-words` endpoint and stores the result in
+`website_corpus_analyses`.
 Deploy or restart the Go crawler service whenever its corpus response contract
 changes; `GET /health` alone does not verify that `/corpus-words` is current.
 When **Save websites** is used, the Agent also requests full HypeStat profiles
@@ -133,17 +137,19 @@ website/domain values are filled only when the source provides a credible
 company association. The API endpoint is
 `POST /api/v1/companies/{id}/sources/crawl` with a `source_url` field.
 
-The Jobs page combines the Crawler and PageSpeed queues in separate tabs. The
-Jobs page and active crawl-status views receive job updates over the WebSocket
-endpoint `/api/v1/queue/events`. PostgreSQL publishes an event after a job is
-created or updated, including when a separate worker process changes it. The
-frontend reconnects and refreshes the affected job data when it receives an
-event; it does not continuously poll those job statuses. The Indexing tab can
-queue up to 100 websites from a CSV with a `website_url` or `url` column; the
-CSV is parsed in the browser and all valid URLs are submitted in one batch
-request. Jobs are committed together and dispatched through one Redis request.
-The Crawler and PageSpeed tabs can also retry all recent failed jobs in one
-batch request; eligible jobs are updated together and dispatched once.
+The Jobs page combines the Crawler, PageSpeed, and keyword generation queues in
+separate tabs. Keyword status refreshes automatically every five seconds. The
+Indexing and PageSpeed views and active crawl-status views receive job updates
+over the WebSocket endpoint `/api/v1/queue/events`. PostgreSQL publishes an
+event after a job is created or updated, including when a separate worker
+process changes it. The frontend reconnects and refreshes affected job data
+when it receives an event; it does not continuously poll those job statuses.
+The Indexing tab can queue up to 100 websites from a CSV with a `website_url` or
+`url` column; the CSV is parsed in the browser and all valid URLs are submitted
+in one batch request. Jobs are committed together and dispatched through one
+Redis request. The Crawler and PageSpeed tabs can also retry all recent failed
+jobs in one batch request; eligible jobs are updated together and dispatched
+once.
 
 The **Excluded domains** page manages organization-scoped domain exclusions.
 `GET /api/v1/excluded-domains` supports `search` and `reason`
@@ -635,6 +641,28 @@ Manually created companies default to the `new` lead status.
 Results are ordered newest first. `limit` must be between 1 and 100 and
 `offset` must be non-negative. The response is a JSON array of company records,
 including their saved contacts and lead sources.
+
+### Filter and paginate the company pipeline
+
+`GET /api/v1/companies/pipeline`
+
+The Companies and Leads pages use this endpoint so search, status, contact,
+website, and pagination filters are applied by the database rather than by
+loading the full company table into the browser. Supported query parameters:
+
+- `view=companies|leads` — leads include only companies with at least one
+  contact.
+- `query`, `status`, `email_status=all|contacted|not_contacted`, and
+  `website=all|with_website|without_website` — optional filters.
+- `page` (1-based) and `page_size=10|25|50` — server-side pagination.
+
+The response includes the current `items` page and filtered/eligible totals,
+status counts, website/contacted counts, and effective page metadata.
+`GET /api/v1/companies/pipeline/selection` accepts the same view and filters
+and returns matching company IDs with the total match count for the Leads
+page's “select filtered” action. It returns at most 5,001 IDs so the frontend
+can enforce its 5,000-company campaign limit without transferring an unbounded
+selection.
 
 ### Read, update, and delete a company
 

@@ -142,6 +142,25 @@ class WebsiteCorpusAnalysisResponse(BaseModel):
 
 class WebsiteCorpusWordsResponse(BaseModel):
     websites: list[WebsiteCorpusAnalysisResponse] = Field(default_factory=list)
+    pending_website_ids: list[UUID] = Field(default_factory=list)
+    failed_website_ids: list[UUID] = Field(default_factory=list)
+
+
+class WebsiteCorpusAnalysisJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    website_id: UUID
+    website_url: str
+    domain: str
+    source_crawled_at: datetime
+    status: Literal["queued", "running", "succeeded", "failed", "skipped"]
+    attempts: int
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
 
 
 class WebsiteReclassificationBatchResponse(BaseModel):

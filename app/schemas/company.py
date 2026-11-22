@@ -155,3 +155,21 @@ class CompanyResponse(BaseModel):
 
 class CompanyNavigationSummaryResponse(BaseModel):
     leads_needing_review: int
+
+
+class CompanyPipelineResponse(BaseModel):
+    items: list[CompanyResponse]
+    page: int
+    page_count: int
+    page_size: int
+    total_count: int
+    eligible_count: int
+    company_count: int
+    status_counts: dict[str, int]
+    with_website_count: int
+    contacted_count: int
+
+
+class CompanyPipelineSelectionResponse(BaseModel):
+    company_ids: list[UUID]
+    total_count: int

@@ -1,5 +1,6 @@
 
 import asyncio
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
@@ -46,6 +47,126 @@ def test_list_companies(client):
     assert response.status_code == 200
     assert len(response.json()) == 1
     assert response.json()[0]["name"] == "Example Company"
+
+
+def test_company_pipeline_filters_and_paginates_on_server(client):
+    with TestingSessionLocal() as db:
+        matched = Company(
+            name="Acme Health",
+            domain="acme-health.test",
+            lead_status="qualified",
+            last_email_sent_at=datetime.now(timezone.utc),
+        )
+        other_lead = Company(
+            name="Acme Retail",
+            domain="acme-retail.test",
+            lead_status="new",
+        )
+        company_without_contact = Company(
+            name="Acme Uncontacted",
+            domain="acme-uncontacted.test",
+            lead_status="qualified",
+        )
+        db.add_all([matched, other_lead, company_without_contact])
+        db.flush()
+        db.add(Contact(company_id=matched.id))
+        db.add(Contact(company_id=other_lead.id))
+        matched_id = matched.id
+        db.commit()
+
+    response = client.get(
+        "/api/v1/companies/pipeline",
+        params={
+            "view": "leads",
+            "query": "ACME",
+            "status": "qualified",
+            "email_status": "contacted",
+            "website": "with_website",
+            "page": 8,
+            "page_size": 10,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert [item["id"] for item in result["items"]] == [str(matched_id)]
+    assert result["total_count"] == 1
+    assert result["eligible_count"] == 2
+    assert result["company_count"] == 3
+    assert result["status_counts"] == {"new": 1, "qualified": 1}
+    assert result["page"] == 1
+    assert result["page_count"] == 1
+
+
+def test_company_pipeline_selection_returns_all_server_filtered_leads(client):
+    with TestingSessionLocal() as db:
+        first = Company(name="Selected Alpha", lead_status="qualified")
+        second = Company(name="Selected Beta", lead_status="qualified")
+        excluded = Company(name="Other Company", lead_status="new")
+        db.add_all([first, second, excluded])
+        db.flush()
+        db.add_all(
+            [
+                Contact(company_id=first.id),
+                Contact(company_id=second.id),
+                Contact(company_id=excluded.id),
+            ]
+        )
+        first_id = first.id
+        second_id = second.id
+        db.commit()
+
+    response = client.get(
+        "/api/v1/companies/pipeline/selection",
+        params={
+            "view": "leads",
+            "query": "selected",
+            "status": "qualified",
+            "email_status": "all",
+            "website": "all",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_count"] == 2
+    assert set(response.json()["company_ids"]) == {
+        str(first_id),
+        str(second_id),
+    }
+
+
+def test_company_pipeline_returns_only_requested_page(client):
+    with TestingSessionLocal() as db:
+        companies = [Company(name=f"Page Lead {index:02}") for index in range(12)]
+        db.add_all(companies)
+        db.flush()
+        db.add_all([Contact(company_id=company.id) for company in companies])
+        db.commit()
+
+    response = client.get(
+        "/api/v1/companies/pipeline",
+        params={
+            "view": "leads",
+            "page": 2,
+            "page_size": 10,
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert len(result["items"]) == 2
+    assert result["total_count"] == 12
+    assert result["page"] == 2
+    assert result["page_count"] == 2
+
+
+def test_company_pipeline_rejects_unsupported_page_size(client):
+    response = client.get(
+        "/api/v1/companies/pipeline",
+        params={"page_size": 11},
+    )
+
+    assert response.status_code == 422
 
 
 def test_company_navigation_summary_counts_review_leads_with_contacts(

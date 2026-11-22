@@ -6,12 +6,15 @@ import httpx
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy import select
-from sqlalchemy.engine import Row
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Website, WebsiteCorpusAnalysis, WebsiteCrawl
+from app.models import (
+    Website,
+    WebsiteCorpusAnalysis,
+    WebsiteCorpusAnalysisJob,
+    WebsiteCrawl,
+)
 from app.schemas.website import (
     CrawlerCorpusWordsResponse,
     WebsiteCorpusAnalysisResponse,
@@ -19,6 +22,7 @@ from app.schemas.website import (
     WebsiteCorpusWordsResponse,
 )
 from app.services.normalization import normalize_domain
+from app.services.website_corpus_jobs import create_website_corpus_analysis_job
 
 _TOP_N = 50
 _ANALYSIS_VERSION = 2
@@ -63,41 +67,21 @@ def get_website_corpus_words(
         for row in rows
         if not _is_current(cached.get(row.id), row.crawled_at)
     ]
-
-    if stale_rows:
-        words_by_domain = _analyze_sites(
-            [
-                _site_text_record(row.domain, row.classification_signals)
-                for row in stale_rows
-            ],
-        )
-        for row in stale_rows:
-            domain = normalize_domain(row.domain)
-            if domain is None or domain not in words_by_domain:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="The crawler service omitted a website corpus result.",
-                )
-            analysis = cached.get(row.id)
-            if analysis is None:
-                analysis = WebsiteCorpusAnalysis(website_id=row.id)
-                db.add(analysis)
-                cached[row.id] = analysis
-            analysis.words = [
-                word.model_dump() for word in words_by_domain[domain]
-            ]
-            analysis.algorithm_version = _ANALYSIS_VERSION
-            analysis.source_crawled_at = row.crawled_at
-            analysis.computed_at = datetime.now(timezone.utc)
-
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            return _read_concurrent_results(db, rows)
-        except Exception:
-            db.rollback()
-            raise
+    jobs = (
+        db.scalars(
+            select(WebsiteCorpusAnalysisJob).where(
+                WebsiteCorpusAnalysisJob.website_id.in_(
+                    [row.id for row in stale_rows],
+                ),
+            )
+        ).all()
+        if stale_rows
+        else []
+    )
+    job_statuses = {
+        (job.website_id, job.source_crawled_at): job.status
+        for job in jobs
+    }
 
     return WebsiteCorpusWordsResponse(
         websites=[
@@ -108,9 +92,66 @@ def get_website_corpus_words(
                 computed_at=_as_utc(cached[row.id].computed_at),
             )
             for row in rows
-            if row.id in cached
+            if _is_current(cached.get(row.id), row.crawled_at)
+        ],
+        pending_website_ids=[
+            row.id
+            for row in stale_rows
+            if job_statuses.get((row.id, row.crawled_at))
+            in ("queued", "running")
+        ],
+        failed_website_ids=[
+            row.id
+            for row in stale_rows
+            if job_statuses.get((row.id, row.crawled_at)) == "failed"
         ],
     )
+
+
+def queue_stale_website_corpus_analysis(
+    db: Session,
+    website_ids: list[UUID] | None = None,
+) -> list[UUID]:
+    statement = (
+        select(
+            Website.id,
+            WebsiteCrawl.crawled_at,
+        )
+        .join(WebsiteCrawl, Website.crawl_id == WebsiteCrawl.id)
+        .order_by(Website.domain)
+    )
+    if website_ids is not None:
+        if not website_ids:
+            return []
+        statement = statement.where(Website.id.in_(website_ids))
+    rows = db.execute(statement).all()
+    if not rows:
+        return []
+
+    website_ids = [row.id for row in rows]
+    cached = {
+        analysis.website_id: analysis
+        for analysis in db.scalars(
+            select(WebsiteCorpusAnalysis).where(
+                WebsiteCorpusAnalysis.website_id.in_(website_ids),
+            )
+        ).all()
+    }
+    job_ids: list[UUID] = []
+    for row in rows:
+        if _is_current(cached.get(row.id), row.crawled_at):
+            continue
+        job = create_website_corpus_analysis_job(
+            row.id,
+            row.crawled_at,
+            db,
+        )
+        if job is not None:
+            job_ids.append(job.id)
+
+    if job_ids:
+        db.commit()
+    return job_ids
 
 
 def _is_current(
@@ -148,40 +189,6 @@ def _as_utc(value: datetime) -> datetime:
         value.replace(tzinfo=timezone.utc)
         if value.tzinfo is None
         else value.astimezone(timezone.utc)
-    )
-
-
-def _read_concurrent_results(
-    db: Session,
-    rows: list[Row[tuple[UUID, str, list[dict[str, Any]], datetime]]],
-) -> WebsiteCorpusWordsResponse:
-    analyses = {
-        analysis.website_id: analysis
-        for analysis in db.scalars(
-            select(WebsiteCorpusAnalysis).where(
-                WebsiteCorpusAnalysis.website_id.in_(
-                    [row.id for row in rows],
-                ),
-            )
-        ).all()
-    }
-    if any(
-        not _is_current(analyses.get(row.id), row.crawled_at)
-        for row in rows
-    ):
-        raise RuntimeError(
-            "Concurrent website corpus analysis could not be persisted.",
-        )
-    return WebsiteCorpusWordsResponse(
-        websites=[
-            WebsiteCorpusAnalysisResponse(
-                website_id=row.id,
-                domain=row.domain,
-                words=analyses[row.id].words,
-                computed_at=_as_utc(analyses[row.id].computed_at),
-            )
-            for row in rows
-        ],
     )
 
 

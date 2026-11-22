@@ -1,17 +1,26 @@
+import asyncio
 from datetime import datetime, timezone
 
-import httpx
+from fastapi import HTTPException
 from sqlalchemy import select
 
-from conftest import TestingSessionLocal
-from app.models import Website, WebsiteCorpusAnalysis, WebsiteCrawl
+from app import worker
+from app.models import (
+    Website,
+    WebsiteCorpusAnalysis,
+    WebsiteCorpusAnalysisJob,
+    WebsiteCrawl,
+    WebsiteCrawlJob,
+)
+from app.schemas.website import WebsiteCorpusWordStat
 from app.services import website_corpus_words
+from app.services.website_crawler import CrawlData
+from conftest import TestingSessionLocal
 
 
 def _create_crawled_website(
     db,
     domain: str,
-    title: str,
     *,
     crawled_at: datetime,
 ) -> Website:
@@ -22,8 +31,8 @@ def _create_crawled_website(
             {
                 "url": website_url,
                 "classification_signals": {
-                    "page_title": title,
-                    "meta_description": f"{title} services",
+                    "page_title": f"{domain} services",
+                    "meta_description": f"Services from {domain}",
                 },
             },
         ],
@@ -42,333 +51,235 @@ def _create_crawled_website(
     return website
 
 
-def _crawler_response(url: str, sites: list[dict[str, object]]) -> httpx.Response:
-    results = []
-    for site in sites:
-        domain = site["domain"]
-        keyword = (
-            "residential plumbing"
-            if domain == "example.com"
-            else "organic garden"
-        )
-        results.append(
-            {
-                "domain": domain,
-                "words": [
-                    {
-                        "word": keyword,
-                        "score": 1.25,
-                        "is_phrase": True,
-                    },
-                ],
-            },
-        )
-    return httpx.Response(
-        200,
-        json={"sites": results},
-        request=httpx.Request("POST", url),
+def _disable_keyword_dispatch(monkeypatch):
+    async def no_dispatch(_job_ids):
+        return None
+
+    monkeypatch.setattr(
+        "app.api.websites.enqueue_website_corpus_analysis_jobs",
+        no_dispatch,
     )
 
 
-def test_corpus_words_endpoint_returns_empty_list_without_crawled_websites(
-    client,
-):
+def test_corpus_words_returns_empty_without_crawled_websites(client):
     response = client.get("/api/v1/websites/corpus-words")
 
     assert response.status_code == 200
-    assert response.json() == {"websites": []}
-
-
-def test_corpus_words_are_analyzed_and_cached_per_website(client, monkeypatch):
-    crawled_at = datetime(2026, 11, 14, tzinfo=timezone.utc)
-    with TestingSessionLocal() as db:
-        first = _create_crawled_website(
-            db,
-            "example.com",
-            "Residential plumbing",
-            crawled_at=crawled_at,
-        )
-        second = _create_crawled_website(
-            db,
-            "garden.example",
-            "Organic garden",
-            crawled_at=crawled_at,
-        )
-        first_id = first.id
-        second_id = second.id
-        db.commit()
-
-    calls = []
-
-    def fake_post(url, *, json, timeout):
-        calls.append(json)
-        return _crawler_response(url, json["sites"])
-
-    monkeypatch.setattr(website_corpus_words.httpx, "post", fake_post)
-    first_response = client.get("/api/v1/websites/corpus-words")
-    second_response = client.get("/api/v1/websites/corpus-words")
-
-    assert first_response.status_code == 200
-    analyses = {
-        analysis["website_id"]: analysis
-        for analysis in first_response.json()["websites"]
+    assert response.json() == {
+        "websites": [],
+        "pending_website_ids": [],
+        "failed_website_ids": [],
     }
-    assert set(analyses) == {str(first_id), str(second_id)}
-    assert analyses[str(first_id)]["domain"] == "example.com"
-    assert analyses[str(first_id)]["words"] == [
-        {
-            "word": "residential plumbing",
-            "score": 1.25,
-            "is_phrase": True,
-        },
-    ]
-    assert analyses[str(second_id)]["domain"] == "garden.example"
-    assert analyses[str(second_id)]["words"] == [
-        {
-            "word": "organic garden",
-            "score": 1.25,
-            "is_phrase": True,
-        },
-    ]
-    assert analyses[str(first_id)]["computed_at"]
-    assert second_response.json() == first_response.json()
-    assert len(calls) == 1
-    assert calls[0]["sites"] == [
-        {
-            "domain": "example.com",
-            "titles": ["Residential plumbing"],
-            "descriptions": ["Residential plumbing services"],
-        },
-        {
-            "domain": "garden.example",
-            "titles": ["Organic garden"],
-            "descriptions": ["Organic garden services"],
-        },
-    ]
-
-    with TestingSessionLocal() as db:
-        saved = {
-            analysis.website_id: analysis
-            for analysis in db.scalars(select(WebsiteCorpusAnalysis)).all()
-        }
-        assert set(saved) == {first_id, second_id}
-        assert saved[first_id].algorithm_version != 0
-        assert saved[second_id].algorithm_version != 0
 
 
-def test_corpus_words_can_be_limited_to_visible_website_ids(
+def test_corpus_words_endpoint_queues_stale_sites_without_analyzing(
     client,
     monkeypatch,
 ):
+    _disable_keyword_dispatch(monkeypatch)
     crawled_at = datetime(2026, 11, 14, tzinfo=timezone.utc)
     with TestingSessionLocal() as db:
         visible = _create_crawled_website(
             db,
             "visible.example",
-            "Visible business",
             crawled_at=crawled_at,
         )
         _create_crawled_website(
             db,
             "off-page.example",
-            "Off-page business",
             crawled_at=crawled_at,
         )
         visible_id = visible.id
         db.commit()
 
-    calls = []
+    def should_not_analyze(*_args, **_kwargs):
+        raise AssertionError("keyword generation must run in the worker")
 
-    def fake_post(url, *, json, timeout):
-        calls.append(json)
-        return _crawler_response(url, json["sites"])
-
-    monkeypatch.setattr(website_corpus_words.httpx, "post", fake_post)
+    monkeypatch.setattr(website_corpus_words, "_analyze_sites", should_not_analyze)
     response = client.get(
         "/api/v1/websites/corpus-words",
         params={"website_ids": str(visible_id)},
     )
 
     assert response.status_code == 200
-    assert [
-        result["domain"] for result in response.json()["websites"]
-    ] == ["visible.example"]
-    assert [
-        site["domain"] for site in calls[0]["sites"]
-    ] == ["visible.example"]
-
-
-def test_re_crawl_recomputes_only_that_website(client, monkeypatch):
-    old_time = datetime(2026, 11, 13, tzinfo=timezone.utc)
-    new_time = datetime(2026, 11, 14, tzinfo=timezone.utc)
+    assert response.json()["websites"] == []
+    assert response.json()["pending_website_ids"] == [str(visible_id)]
     with TestingSessionLocal() as db:
-        first = _create_crawled_website(
-            db,
-            "example.com",
-            "Residential plumbing",
-            crawled_at=old_time,
-        )
-        second = _create_crawled_website(
-            db,
-            "garden.example",
-            "Organic garden",
-            crawled_at=old_time,
-        )
-        first_id = first.id
-        db.commit()
+        jobs = db.scalars(select(WebsiteCorpusAnalysisJob)).all()
+        assert len(jobs) == 1
+        assert jobs[0].website_id == visible_id
 
-    calls = []
-
-    def fake_post(url, *, json, timeout):
-        calls.append(json)
-        return _crawler_response(url, json["sites"])
-
-    monkeypatch.setattr(website_corpus_words.httpx, "post", fake_post)
-    assert client.get("/api/v1/websites/corpus-words").status_code == 200
-
-    with TestingSessionLocal() as db:
-        crawl = db.scalar(
-            select(WebsiteCrawl).where(
-                WebsiteCrawl.website_url == "https://example.com/",
-            ),
-        )
-        assert crawl is not None
-        crawl.classification_signals = [
-            {
-                "url": crawl.website_url,
-                "classification_signals": {
-                    "page_title": "Commercial heating",
-                },
-            },
-        ]
-        crawl.crawled_at = new_time
-        db.commit()
-
-    response = client.get("/api/v1/websites/corpus-words")
-    assert response.status_code == 200
-    assert len(calls) == 2
-    assert calls[1]["sites"] == [
-        {
-            "domain": "example.com",
-            "titles": ["Commercial heating"],
-            "descriptions": [],
-        },
-    ]
-    with TestingSessionLocal() as db:
-        first_analysis = db.get(WebsiteCorpusAnalysis, first_id)
-        second_website = db.scalar(
-            select(Website).where(Website.domain == "garden.example"),
-        )
-        assert first_analysis is not None
-        assert second_website is not None
-        second_analysis = db.get(WebsiteCorpusAnalysis, second_website.id)
-        assert second_analysis is not None
-        assert first_analysis.source_crawled_at.replace(
-            tzinfo=timezone.utc,
-        ) == new_time
-        assert second_analysis.source_crawled_at.replace(
-            tzinfo=timezone.utc,
-        ) == old_time
+    queue_response = client.get("/api/v1/websites/corpus-words/jobs")
+    assert queue_response.status_code == 200
+    assert len(queue_response.json()) == 1
+    assert queue_response.json()[0]["website_id"] == str(visible_id)
+    assert queue_response.json()[0]["status"] == "queued"
 
 
-def test_corpus_words_recomputes_when_analyzer_version_changes(
+def test_corpus_worker_persists_keywords_and_endpoint_reads_cache(
     client,
     monkeypatch,
 ):
+    _disable_keyword_dispatch(monkeypatch)
     crawled_at = datetime(2026, 11, 14, tzinfo=timezone.utc)
     with TestingSessionLocal() as db:
         website = _create_crawled_website(
             db,
             "example.com",
-            "Old saved words",
             crawled_at=crawled_at,
         )
-        db.add(
-            WebsiteCorpusAnalysis(
-                website_id=website.id,
-                words=[
-                    {
-                        "word": "stale",
-                        "score": 1.0,
-                        "is_phrase": False,
-                    },
-                ],
-                algorithm_version=1,
-                source_crawled_at=crawled_at,
-                computed_at=crawled_at,
-            ),
-        )
         website_id = website.id
+        job = WebsiteCorpusAnalysisJob(
+            website_id=website.id,
+            source_crawled_at=crawled_at,
+        )
+        db.add(job)
         db.commit()
+        job_id = job.id
 
-    calls = []
+    def analyze(sites):
+        assert sites == [
+            {
+                "domain": "example.com",
+                "titles": ["example.com services"],
+                "descriptions": ["Services from example.com"],
+            },
+        ]
+        return {
+            "example.com": [
+                WebsiteCorpusWordStat(
+                    word="home services",
+                    score=1.5,
+                    is_phrase=True,
+                ),
+            ],
+        }
 
-    def fake_post(url, *, json, timeout):
-        calls.append(json)
-        return _crawler_response(url, json["sites"])
+    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(worker, "_analyze_sites", analyze)
+    asyncio.run(worker.process_corpus_analysis_job(job_id))
 
-    monkeypatch.setattr(website_corpus_words.httpx, "post", fake_post)
-    response = client.get("/api/v1/websites/corpus-words")
+    with TestingSessionLocal() as db:
+        saved_job = db.get(WebsiteCorpusAnalysisJob, job_id)
+        analysis = db.get(WebsiteCorpusAnalysis, website_id)
+        assert saved_job is not None
+        assert saved_job.status == "succeeded"
+        assert analysis is not None
+        assert analysis.words[0]["word"] == "home services"
 
+    response = client.get(
+        "/api/v1/websites/corpus-words",
+        params={"website_ids": str(website_id)},
+    )
     assert response.status_code == 200
     assert response.json()["websites"][0]["words"][0]["word"] == (
-        "residential plumbing"
+        "home services"
     )
-    assert len(calls) == 1
-    with TestingSessionLocal() as db:
-        analysis = db.get(WebsiteCorpusAnalysis, website_id)
-        assert analysis is not None
-        assert analysis.algorithm_version != 1
+    assert response.json()["pending_website_ids"] == []
 
 
-def test_corpus_words_endpoint_reports_crawler_service_failures(
+def test_failed_keyword_job_is_visible_and_can_be_retried(
     client,
     monkeypatch,
 ):
+    _disable_keyword_dispatch(monkeypatch)
+    crawled_at = datetime(2026, 11, 14, tzinfo=timezone.utc)
     with TestingSessionLocal() as db:
-        _create_crawled_website(
+        website = _create_crawled_website(
             db,
             "unavailable.example",
-            "Business information",
-            crawled_at=datetime(2026, 11, 14, tzinfo=timezone.utc),
+            crawled_at=crawled_at,
         )
+        website_id = website.id
+        job = WebsiteCorpusAnalysisJob(
+            website_id=website_id,
+            source_crawled_at=crawled_at,
+        )
+        db.add(job)
         db.commit()
+        job_id = job.id
 
-    def fail_post(*_args, **_kwargs):
-        raise httpx.ConnectError("unavailable")
+    def fail_analysis(_sites):
+        raise HTTPException(
+            status_code=502,
+            detail="The crawler service rejected the corpus analysis request.",
+        )
 
-    monkeypatch.setattr(website_corpus_words.httpx, "post", fail_post)
+    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(worker, "_analyze_sites", fail_analysis)
+    asyncio.run(worker.process_corpus_analysis_job(job_id))
 
-    response = client.get("/api/v1/websites/corpus-words")
+    response = client.get(
+        "/api/v1/websites/corpus-words",
+        params={"website_ids": str(website_id)},
+    )
+    assert response.status_code == 200
+    assert response.json()["failed_website_ids"] == [str(website_id)]
 
-    assert response.status_code == 503
-    assert "unavailable" in response.json()["detail"]
+    retry = client.post(
+        f"/api/v1/websites/corpus-words/jobs/{job_id}/retry",
+    )
+    assert retry.status_code == 202
+    assert retry.json()["status"] == "queued"
+
     with TestingSessionLocal() as db:
-        assert db.scalar(select(WebsiteCorpusAnalysis)) is None
+        retried_job = db.get(WebsiteCorpusAnalysisJob, job_id)
+        assert retried_job is not None
+        retried_job.status = "failed"
+        db.commit()
+    retry_batch = client.post(
+        "/api/v1/websites/corpus-words/jobs/retry-batch",
+        json={"job_ids": [str(job_id)]},
+    )
+    assert retry_batch.status_code == 202
+    assert retry_batch.json()["retried_job_ids"] == [str(job_id)]
 
 
-def test_corpus_words_reports_outdated_crawler_response_contract(
+def test_successful_crawl_creates_keyword_job_in_database(
     client,
     monkeypatch,
 ):
+    crawled_at = datetime(2026, 11, 14, tzinfo=timezone.utc)
+    website_url = "https://example.com/"
     with TestingSessionLocal() as db:
-        _create_crawled_website(
-            db,
-            "outdated.example",
-            "Local services",
-            crawled_at=datetime(2026, 11, 14, tzinfo=timezone.utc),
+        crawl_job = WebsiteCrawlJob(
+            website_url=website_url,
+            status="running",
         )
+        db.add(crawl_job)
         db.commit()
+        crawl_job_id = crawl_job.id
 
-    def fake_post(url, *, json, timeout):
-        return httpx.Response(
-            200,
-            json={"words": []},
-            request=httpx.Request("POST", url),
+    def persist_crawl(_crawl_data, db):
+        website = _create_crawled_website(
+            db,
+            "example.com",
+            crawled_at=crawled_at,
         )
+        return db.get(WebsiteCrawl, website.crawl_id)
 
-    monkeypatch.setattr(website_corpus_words.httpx, "post", fake_post)
-    response = client.get("/api/v1/websites/corpus-words")
+    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(worker, "_persist_crawl", persist_crawl)
+    monkeypatch.setattr(worker, "create_website_pagespeed_jobs", lambda *_: [])
 
-    assert response.status_code == 502
-    assert "Redeploy or restart crawler-service" in response.json()["detail"]
+    _, corpus_job_ids = worker._save_success(
+        crawl_job_id,
+        CrawlData(
+            website_url=website_url,
+            about_page_url=None,
+            about_content=None,
+            contact_page_url=None,
+            contact_content=None,
+            goals_page_url=None,
+            goals_content=None,
+        ),
+    )
+
+    assert len(corpus_job_ids) == 1
+    with TestingSessionLocal() as db:
+        saved_job = db.get(WebsiteCorpusAnalysisJob, corpus_job_ids[0])
+        assert saved_job is not None
+        assert saved_job.status == "queued"
+        saved_crawl_job = db.get(WebsiteCrawlJob, crawl_job_id)
+        assert saved_crawl_job is not None
+        assert saved_crawl_job.status == "succeeded"
