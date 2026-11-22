@@ -96,11 +96,11 @@ async def google_oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The Google OAuth state cookie is missing or invalid.",
         )
-    admin = _validate_admin_state(oauth_state, db)
+    user, membership = _validate_oauth_state(oauth_state, db)
     current_context = get_tenant_context()
     if current_context is not None and (
         current_context.organization_id != oauth_state.org_id
-        or current_context.user_id != oauth_state.admin_user_id
+        or current_context.user_id != oauth_state.user_id
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -108,7 +108,7 @@ async def google_oauth_callback(
         )
 
     if error is not None:
-        return _frontend_redirect("error")
+        return _frontend_redirect("error", membership.role)
     if not code:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -120,9 +120,9 @@ async def google_oauth_callback(
     tenant_token = set_tenant_context(
         TenantContext(
             organization_id=oauth_state.org_id,
-            user_id=admin.id,
-            email=admin.email,
-            role=admin.role,
+            user_id=user.id,
+            email=user.email,
+            role=membership.role,
         )
     )
     try:
@@ -133,10 +133,18 @@ async def google_oauth_callback(
             )
         )
         if account is not None and account.org_id != oauth_state.org_id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="This Google account is already connected to another organization.",
-            )
+            return _frontend_redirect("already-connected", membership.role)
+        if account is not None and account.owner_user_id not in (
+            None,
+            user.id,
+        ):
+            return _frontend_redirect("already-connected", membership.role)
+        if (
+            account is not None
+            and account.owner_user_id is None
+            and membership.role != "admin"
+        ):
+            return _frontend_redirect("already-connected", membership.role)
         if account is None and not tokens.refresh_token:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -147,6 +155,7 @@ async def google_oauth_callback(
         if account is None:
             account = ConnectedGmailAccount(
                 org_id=oauth_state.org_id,
+                owner_user_id=user.id if membership.role != "admin" else None,
                 email_address=profile.email_address,
                 google_account_id=profile.google_account_id,
                 encrypted_refresh_token=encrypt_refresh_token(
@@ -155,6 +164,7 @@ async def google_oauth_callback(
                 token_updated_at=now,
             )
             db.add(account)
+            db.flush()
         else:
             account.email_address = profile.email_address
             if tokens.refresh_token:
@@ -162,6 +172,23 @@ async def google_oauth_callback(
                     tokens.refresh_token
                 )
                 account.token_updated_at = now
+        if account.owner_user_id == user.id:
+            assignment = db.scalar(
+                select(UserGmailAssignment).where(
+                    UserGmailAssignment.org_id == oauth_state.org_id,
+                    UserGmailAssignment.gmail_account_id == account.id,
+                    UserGmailAssignment.user_id == user.id,
+                )
+            )
+            if assignment is None:
+                db.add(
+                    UserGmailAssignment(
+                        org_id=oauth_state.org_id,
+                        user_id=user.id,
+                        gmail_account_id=account.id,
+                        assigned_by=user.id,
+                    )
+                )
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -173,7 +200,7 @@ async def google_oauth_callback(
     finally:
         reset_tenant_context(tenant_token)
 
-    return _frontend_redirect("connected")
+    return _frontend_redirect("connected", membership.role)
 
 
 @router.get("/accounts", response_model=list[ConnectedGmailAccountResponse])
@@ -218,6 +245,7 @@ def list_connected_gmail_accounts(
             id=account.id,
             email_address=account.email_address,
             google_account_id=account.google_account_id,
+            owner_user_id=account.owner_user_id,
             token_updated_at=account.token_updated_at,
             assigned_users=assigned_users[account.id],
         )
@@ -466,6 +494,11 @@ def assign_gmail_account(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="The connected Gmail account was not found.",
         )
+    if account.owner_user_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Personal Gmail accounts cannot be assigned to other users.",
+        )
     user = db.scalar(
         select(User)
         .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
@@ -521,37 +554,50 @@ def remove_gmail_assignment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="The Gmail assignment was not found.",
         )
+    account = db.get(ConnectedGmailAccount, assignment.gmail_account_id)
+    if account is not None and account.owner_user_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A personal Gmail account cannot be unassigned by an administrator.",
+        )
     db.delete(assignment)
     db.commit()
 
 
-def _validate_admin_state(
+def _validate_oauth_state(
     oauth_state: GoogleOAuthState,
     db: Session,
-) -> User:
-    admin = db.scalar(
-        select(User)
+) -> tuple[User, OrganizationMembership]:
+    user_membership = db.execute(
+        select(User, OrganizationMembership)
         .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
         .where(
-            User.id == oauth_state.admin_user_id,
+            User.id == oauth_state.user_id,
             OrganizationMembership.organization_id == oauth_state.org_id,
-            OrganizationMembership.role == "admin",
             OrganizationMembership.is_active.is_(True),
             User.is_active.is_(True),
         )
-    )
-    if admin is None:
+    ).one_or_none()
+    if user_membership is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="The organization administrator in the OAuth state is no longer active.",
+            detail="The user in the Google OAuth request is no longer an active organization member.",
         )
-    return admin
+    return user_membership
 
 
-def _frontend_redirect(status_value: str) -> RedirectResponse:
+def _frontend_redirect(
+    status_value: str,
+    role: str,
+) -> RedirectResponse:
     frontend_origin = settings.frontend_origins.split(",", maxsplit=1)[0].strip()
+    destination = (
+        f"/settings?section=gmail&gmail={status_value}"
+        if role == "admin"
+        else f"/gmail?gmail={status_value}"
+    )
     response = RedirectResponse(
-        f"{frontend_origin.rstrip('/')}/settings?gmail={status_value}",
+        f"{frontend_origin.rstrip('/')}{destination}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
     secure, samesite = gmail_oauth_cookie_security()

@@ -16,6 +16,7 @@ class ConnectedGmailAccountResponse(BaseModel):
     id: UUID
     email_address: str
     google_account_id: str
+    owner_user_id: UUID | None
     token_updated_at: datetime
     assigned_users: list[GmailAccountAssigneeResponse]
 

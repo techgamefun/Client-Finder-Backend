@@ -371,6 +371,12 @@ class ConnectedGmailAccount(Base):
         nullable=False,
         index=True,
     )
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     email_address: Mapped[str] = mapped_column(String(320), nullable=False)
     google_account_id: Mapped[str] = mapped_column(
         String(255),

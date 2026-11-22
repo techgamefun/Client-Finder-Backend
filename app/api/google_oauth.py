@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
-from app.api.deps import require_admin_context
+from app.api.deps import require_authenticated_context
 from app.api.gmail_oauth_cookie import (
     GMAIL_CALLBACK_PATH,
     GMAIL_OAUTH_STATE_COOKIE,
@@ -18,31 +18,32 @@ from app.tenant_context import TenantContext
 
 
 router = APIRouter(prefix="/auth", tags=["Gmail OAuth"])
-AdminContext = Annotated[TenantContext, Depends(require_admin_context)]
+CurrentContext = Annotated[
+    TenantContext,
+    Depends(require_authenticated_context),
+]
 
 
 @router.get("/google/login")
 def start_google_oauth(
     request: Request,
-    context: AdminContext,
+    context: CurrentContext,
     org_id: UUID = Query(...),
-    admin_user_id: UUID = Query(...),
 ) -> RedirectResponse:
     if (
         context.user_id is None
         or context.organization_id != org_id
-        or context.user_id != admin_user_id
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the signed-in organization administrator can connect Gmail.",
+            detail="The signed-in user cannot connect Gmail for this organization.",
         )
     _validate_request_origin(request)
 
     validate_gmail_token_encryption_configuration()
     authorization_url, nonce = create_google_authorization_url(
         org_id=org_id,
-        admin_user_id=admin_user_id,
+        user_id=context.user_id,
     )
     response = RedirectResponse(authorization_url, status_code=302)
     secure, samesite = gmail_oauth_cookie_security()

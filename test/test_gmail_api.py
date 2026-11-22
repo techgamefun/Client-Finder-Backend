@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from urllib.parse import parse_qs, urlsplit
@@ -14,7 +15,10 @@ from app import main
 from app.api import gmail as gmail_api
 from app.api.gmail_oauth_cookie import gmail_oauth_cookie_security
 from app.config import settings
-from app.models import ConnectedGmailAccount
+from app.models import (
+    ConnectedGmailAccount,
+    UserGmailAssignment,
+)
 from app.services import gmail, gmail_oauth
 from app.tenant_context import TenantContext
 from conftest import TestingSessionLocal
@@ -81,7 +85,6 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         "/api/v1/auth/google/login",
         params={
             "org_id": str(organization_id),
-            "admin_user_id": str(admin_user_id),
         },
         headers={"referer": "http://localhost:3000/settings"},
         follow_redirects=False,
@@ -99,7 +102,7 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
     state = google_query["state"][0]
     decoded_state = gmail_oauth.decode_google_oauth_state(state)
     assert decoded_state.org_id == organization_id
-    assert decoded_state.admin_user_id == admin_user_id
+    assert decoded_state.user_id == admin_user_id
     assert google_query["access_type"] == ["offline"]
     assert "https://www.googleapis.com/auth/gmail.modify" in google_query["scope"][0]
     assert "https://www.googleapis.com/auth/gmail.send" in google_query["scope"][0]
@@ -138,9 +141,9 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         params={"code": "authorization-code", "state": state},
         follow_redirects=False,
     )
-    assert callback.status_code == 303
+    assert callback.status_code == 303, callback.text
     assert callback.headers["location"] == (
-        "http://localhost:3000/settings?gmail=connected"
+        "http://localhost:3000/settings?section=gmail&gmail=connected"
     )
     delete_cookie_header = callback.headers["set-cookie"].lower()
     assert "path=/api/v1/gmail/callback" in delete_cookie_header
@@ -163,7 +166,6 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         "/api/v1/auth/google/login",
         params={
             "org_id": str(organization_id),
-            "admin_user_id": str(admin_user_id),
         },
         headers={"referer": "http://localhost:3000/settings"},
         follow_redirects=False,
@@ -473,6 +475,7 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
     assert accounts.json()[0]["assigned_users"][0]["email"] == (
         "gmail-user@example.test"
     )
+    assert accounts.json()[0]["owner_user_id"] is None
     assert "encrypted_refresh_token" not in accounts.text
 
     removed = client.delete(
@@ -483,7 +486,10 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
     assert refreshed_accounts.json()[0]["assigned_users"] == []
 
 
-def test_gmail_oauth_and_assignment_require_admin(client, monkeypatch):
+def test_gmail_oauth_requires_authentication_and_assignment_requires_admin(
+    client,
+    monkeypatch,
+):
     _configure_google_oauth(monkeypatch)
     admin_session = client.get("/api/v1/auth/me").json()
     account_id = uuid4()
@@ -506,17 +512,285 @@ def test_gmail_oauth_and_assignment_require_admin(client, monkeypatch):
             "/api/v1/auth/google/login",
             params={
                 "org_id": admin_session["organization_id"],
-                "admin_user_id": user_id,
             },
             headers={"referer": "http://localhost:3000/settings"},
             follow_redirects=False,
         )
-        assert oauth_start.status_code == 403
+        assert oauth_start.status_code == 302
         assignment = member_client.post(
             f"/api/v1/gmail/accounts/{account_id}/assignments",
             json={"user_id": user_id},
         )
         assert assignment.status_code == 403
+
+
+def test_member_cannot_reconnect_an_existing_shared_gmail_account(
+    client,
+    monkeypatch,
+):
+    _configure_google_oauth(monkeypatch)
+    session = client.get("/api/v1/auth/me").json()
+    organization_id = UUID(session["organization_id"])
+    with TestingSessionLocal() as db:
+        account = ConnectedGmailAccount(
+            org_id=organization_id,
+            email_address="shared@example.com",
+            google_account_id="existing-shared-google-account",
+            encrypted_refresh_token=gmail.encrypt_refresh_token(
+                "existing-shared-refresh-token"
+            ),
+            token_updated_at=datetime.now(timezone.utc),
+        )
+        db.add(account)
+        db.commit()
+        account_id = account.id
+
+    _invite_member(
+        client,
+        "shared-attempt@example.test",
+        "shared-attempt-password-long",
+    )
+
+    async def exchange_code(code: str):
+        return gmail_oauth.GoogleOAuthTokens(
+            access_token="shared-attempt-access",
+            refresh_token="replacement-shared-refresh-token",
+        )
+
+    async def fetch_profile(access_token: str):
+        return gmail_oauth.GoogleProfile(
+            google_account_id="existing-shared-google-account",
+            email_address="shared@example.com",
+        )
+
+    monkeypatch.setattr(
+        gmail_api,
+        "exchange_google_authorization_code",
+        exchange_code,
+    )
+    monkeypatch.setattr(
+        gmail_api,
+        "fetch_google_profile",
+        fetch_profile,
+    )
+
+    with TestClient(main.app) as member_client:
+        login = member_client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "shared-attempt@example.test",
+                "password": "shared-attempt-password-long",
+            },
+        )
+        assert login.status_code == 200
+        start = member_client.get(
+            "/api/v1/auth/google/login",
+            params={"org_id": str(organization_id)},
+            headers={"referer": "http://localhost:3000/gmail"},
+            follow_redirects=False,
+        )
+        assert start.status_code == 302
+        state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+        member_client.cookies.set(
+            gmail_api.GMAIL_OAUTH_STATE_COOKIE,
+            start.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE],
+        )
+        callback = member_client.get(
+            "/api/v1/gmail/callback",
+            params={"code": "shared-attempt", "state": state},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 303
+        assert callback.headers["location"] == (
+            "http://localhost:3000/gmail?gmail=already-connected"
+        )
+
+    with TestingSessionLocal() as db:
+        account = db.get(ConnectedGmailAccount, account_id)
+        assert account is not None
+        assert gmail.decrypt_refresh_token(account.encrypted_refresh_token) == (
+            "existing-shared-refresh-token"
+        )
+
+
+def test_member_connects_personal_gmail_assigned_only_to_self(
+    client,
+    monkeypatch,
+):
+    _configure_google_oauth(monkeypatch)
+    session = client.get("/api/v1/auth/me").json()
+    organization_id = UUID(session["organization_id"])
+    owner_id = _invite_member(
+        client,
+        "personal-owner@example.test",
+        "personal-owner-password-long",
+    )
+    other_member_id = _invite_member(
+        client,
+        "personal-other@example.test",
+        "personal-other-password-long",
+    )
+
+    async def exchange_code(code: str):
+        return gmail_oauth.GoogleOAuthTokens(
+            access_token=f"access-{code}",
+            refresh_token=f"refresh-{code}",
+        )
+
+    async def fetch_profile(access_token: str):
+        return gmail_oauth.GoogleProfile(
+            google_account_id="member-owned-google-account",
+            email_address="personal@example.com",
+        )
+
+    monkeypatch.setattr(
+        gmail_api,
+        "exchange_google_authorization_code",
+        exchange_code,
+    )
+    monkeypatch.setattr(
+        gmail_api,
+        "fetch_google_profile",
+        fetch_profile,
+    )
+
+    with TestClient(main.app) as owner_client:
+        login = owner_client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "personal-owner@example.test",
+                "password": "personal-owner-password-long",
+            },
+        )
+        assert login.status_code == 200
+        start = owner_client.get(
+            "/api/v1/auth/google/login",
+            params={"org_id": str(organization_id)},
+            headers={"referer": "http://localhost:3000/gmail"},
+            follow_redirects=False,
+        )
+        assert start.status_code == 302
+        state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+        oauth_cookie = start.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE]
+        assert gmail_oauth.decode_google_oauth_state(state).user_id == UUID(
+            owner_id
+        )
+        owner_client.cookies.set(
+            gmail_api.GMAIL_OAUTH_STATE_COOKIE,
+            oauth_cookie,
+        )
+        callback = owner_client.get(
+            "/api/v1/gmail/callback",
+            params={"code": "owner-connect", "state": state},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 303, callback.text
+        assert callback.headers["location"] == (
+            "http://localhost:3000/gmail?gmail=connected"
+        )
+        assigned_accounts = owner_client.get(
+            "/api/v1/gmail/accounts/assigned"
+        )
+        assert [
+            account["email_address"] for account in assigned_accounts.json()
+        ] == ["personal@example.com"]
+        reauth_start = owner_client.get(
+            "/api/v1/auth/google/login",
+            params={"org_id": str(organization_id)},
+            headers={"referer": "http://localhost:3000/gmail"},
+            follow_redirects=False,
+        )
+        reauth_state = parse_qs(
+            urlsplit(reauth_start.headers["location"]).query
+        )["state"][0]
+        owner_client.cookies.set(
+            gmail_api.GMAIL_OAUTH_STATE_COOKIE,
+            reauth_start.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE],
+        )
+        reauthorized = owner_client.get(
+            "/api/v1/gmail/callback",
+            params={"code": "owner-reauthorize", "state": reauth_state},
+            follow_redirects=False,
+        )
+        assert reauthorized.status_code == 303
+        assert reauthorized.headers["location"] == (
+            "http://localhost:3000/gmail?gmail=connected"
+        )
+
+    with TestingSessionLocal() as db:
+        account = db.scalar(
+            select(ConnectedGmailAccount).where(
+                ConnectedGmailAccount.google_account_id
+                == "member-owned-google-account"
+            )
+        )
+        assert account is not None
+        assert account.owner_user_id == UUID(owner_id)
+        original_refresh_token = gmail.decrypt_refresh_token(
+            account.encrypted_refresh_token
+        )
+        assignment = db.scalar(
+            select(UserGmailAssignment).where(
+                UserGmailAssignment.gmail_account_id == account.id
+            )
+        )
+        assert assignment is not None
+        assert assignment.user_id == UUID(owner_id)
+        account_id = account.id
+
+    assert client.post(
+        f"/api/v1/gmail/accounts/{account_id}/assignments",
+        json={"user_id": other_member_id},
+    ).status_code == 403
+    with TestingSessionLocal() as db:
+        assignment = db.scalar(
+            select(UserGmailAssignment).where(
+                UserGmailAssignment.gmail_account_id == account_id
+            )
+        )
+        assert assignment is not None
+        assignment_id = assignment.id
+    assert client.delete(
+        f"/api/v1/gmail/assignments/{assignment_id}"
+    ).status_code == 403
+
+    with TestClient(main.app) as other_client:
+        login = other_client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "personal-other@example.test",
+                "password": "personal-other-password-long",
+            },
+        )
+        assert login.status_code == 200
+        start = other_client.get(
+            "/api/v1/auth/google/login",
+            params={"org_id": str(organization_id)},
+            headers={"referer": "http://localhost:3000/gmail"},
+            follow_redirects=False,
+        )
+        assert start.status_code == 302
+        state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+        other_client.cookies.set(
+            gmail_api.GMAIL_OAUTH_STATE_COOKIE,
+            start.cookies[gmail_api.GMAIL_OAUTH_STATE_COOKIE],
+        )
+        callback = other_client.get(
+            "/api/v1/gmail/callback",
+            params={"code": "other-connect", "state": state},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 303
+        assert callback.headers["location"] == (
+            "http://localhost:3000/gmail?gmail=already-connected"
+        )
+
+    with TestingSessionLocal() as db:
+        account = db.get(ConnectedGmailAccount, account_id)
+        assert account is not None
+        assert gmail.decrypt_refresh_token(account.encrypted_refresh_token) == (
+            original_refresh_token
+        )
 
 
 @pytest.mark.parametrize(

@@ -31,7 +31,7 @@ GMAIL_SCOPES = (
 @dataclass(frozen=True)
 class GoogleOAuthState:
     org_id: UUID
-    admin_user_id: UUID
+    user_id: UUID
     nonce: str
 
 
@@ -49,14 +49,14 @@ class GoogleProfile:
 
 def create_google_authorization_url(
     org_id: UUID,
-    admin_user_id: UUID,
+    user_id: UUID,
 ) -> tuple[str, str]:
     client_id, _, redirect_uri, state_secret = _oauth_configuration()
     nonce = secrets.token_urlsafe(32)
     payload = json.dumps(
         {
             "org_id": str(org_id),
-            "admin_user_id": str(admin_user_id),
+            "user_id": str(user_id),
             "nonce": nonce,
             "exp": int(time.time()) + OAUTH_STATE_TTL_SECONDS,
         },
@@ -99,7 +99,7 @@ def decode_google_oauth_state(state: str) -> GoogleOAuthState:
             raise ValueError("Invalid OAuth state signature.")
         payload = json.loads(_base64url_decode(encoded_payload))
         org_id = UUID(payload["org_id"])
-        admin_user_id = UUID(payload["admin_user_id"])
+        user_id = UUID(payload["user_id"])
         nonce = payload["nonce"]
         expires_at = payload["exp"]
         if (
@@ -123,7 +123,7 @@ def decode_google_oauth_state(state: str) -> GoogleOAuthState:
         ) from exc
     return GoogleOAuthState(
         org_id=org_id,
-        admin_user_id=admin_user_id,
+        user_id=user_id,
         nonce=nonce,
     )
 
