@@ -533,7 +533,6 @@ def test_ingestion_queues_pagespeed_jobs_and_worker_saves_results(
                 "best-practices": 93,
                 "seo": 94,
             },
-            report={"lighthouseResult": {"audits": {}}},
         )
 
     monkeypatch.setattr(
@@ -553,6 +552,7 @@ def test_ingestion_queues_pagespeed_jobs_and_worker_saves_results(
         scans = db.scalars(select(PageSpeedScan)).all()
         assert len(scans) == 2
         assert {scan.strategy for scan in scans} == {"mobile", "desktop"}
+        assert all(not hasattr(scan, "report") for scan in scans)
 
     for job in jobs:
         status_response = client.get(
@@ -579,8 +579,12 @@ def test_website_only_pagespeed_job_saves_scan_result(client, monkeypatch):
         return PageSpeedScanData(
             website_url=website_url,
             strategy=strategy,
-            category_scores={"performance": 91},
-            report={"lighthouseResult": {"audits": {}}},
+            category_scores={
+                "performance": 91,
+                "accessibility": 92,
+                "best-practices": 93,
+                "seo": 94,
+            },
         )
 
     monkeypatch.setattr(
@@ -622,6 +626,13 @@ def test_website_only_pagespeed_job_saves_scan_result(client, monkeypatch):
         assert saved_job.scan_id == scan.id
         assert scan.company_id is None
         assert scan.website_id == website_id
+        assert set(scan.category_scores) == {
+            "performance",
+            "accessibility",
+            "best-practices",
+            "seo",
+        }
+        assert not hasattr(scan, "report")
 
 
 def test_successful_crawl_queues_website_pagespeed_jobs(client, monkeypatch):

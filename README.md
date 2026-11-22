@@ -95,12 +95,11 @@ The save operation sends the origin to the existing crawl
 job queue; crawl progress remains on `website_crawl_jobs`. The Websites page
 links each domain to `GET /api/v1/websites/{id}`, which returns the website
 record, crawl page content, classification signals, contact/social links, the
-ten most recent PageSpeed score summaries, and crawl-job history. Full
-Lighthouse audits are loaded on demand from
-`GET /api/v1/websites/{id}/pagespeed-scans/{scan_id}`. The list API supports
-bounded `limit`/`offset`, page type, and search filters. Website type, site
-topic, and language can be
-edited with `PATCH /api/v1/websites/{id}`. The **Add to Lead** action creates
+ten most recent PageSpeed score summaries, and crawl-job history. Lighthouse
+audit reports are not retained; scan detail endpoints return only the four
+category scores. The list API supports bounded `limit`/`offset`, page type, and
+search filters. Website type, site topic, and language can be edited with
+`PATCH /api/v1/websites/{id}`. The **Add to Lead** action creates
 companies for the filtered crawled websites and marks their registry status as
 `lead`; listing websites are excluded. Newly created companies use the domain
 as their initial name and have lead status `new`.
@@ -592,9 +591,11 @@ PageSpeed scan jobs include one job per website and strategy. Poll
 `GET /api/v1/companies/{company_id}/pagespeed-jobs/{job_id}` to check whether a
 scan is queued, running, succeeded, or failed. The discovery screen polls jobs
 automatically and shows queue, start, finish, and elapsed times, as well as a
-failure reason. Completed scan summaries and full Lighthouse reports appear in
-the company's PageSpeed scan history. Retry a failed scan from the PageSpeed
-queue page or with `POST /api/v1/pagespeed/jobs/{job_id}/retry`.
+failure reason. Completed scan summaries appear in the company's PageSpeed
+scan history. Only the Performance, Accessibility, Best practices, and SEO
+scores are stored; Lighthouse audit details are discarded. Retry a failed scan
+from the PageSpeed queue page or with
+`POST /api/v1/pagespeed/jobs/{job_id}/retry`.
 
 ### Crawl and enrich a website
 

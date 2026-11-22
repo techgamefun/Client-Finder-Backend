@@ -6,7 +6,7 @@ import pytest
 from app.services import pagespeed
 
 
-def test_pagespeed_scan_requests_all_categories_and_preserves_audits(
+def test_pagespeed_scan_requests_and_returns_only_category_scores(
     monkeypatch,
 ):
     received: list[httpx.Request] = []
@@ -23,6 +23,7 @@ def test_pagespeed_scan_requests_all_categories_and_preserves_audits(
                 "accessibility": {"score": 0.92},
                 "best-practices": {"score": 0.93},
                 "seo": {"score": 0.94},
+                "experimental": {"score": 1.0},
             },
             "audits": {
                 "first-contentful-paint": {
@@ -73,13 +74,7 @@ def test_pagespeed_scan_requests_all_categories_and_preserves_audits(
         "best-practices": 93,
         "seo": 94,
     }
-    assert scan.report["loadingExperience"]["overall_category"] == "FAST"
-    assert (
-        scan.report["lighthouseResult"]["audits"]["first-contentful-paint"][
-            "displayValue"
-        ]
-        == "1.2 s"
-    )
+    assert not hasattr(scan, "report")
 
 
 def test_pagespeed_scan_requires_configured_key():

@@ -685,7 +685,6 @@ def _save_pagespeed_success(
                 website_url=scan_data.website_url,
                 strategy=scan_data.strategy,
                 category_scores=scan_data.category_scores,
-                report=scan_data.report,
             )
             for company_id in company_ids
         ]
@@ -697,7 +696,6 @@ def _save_pagespeed_success(
                     website_url=scan_data.website_url,
                     strategy=scan_data.strategy,
                     category_scores=scan_data.category_scores,
-                    report=scan_data.report,
                 )
             )
         db.add_all(scans)

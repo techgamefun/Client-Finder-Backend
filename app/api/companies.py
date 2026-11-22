@@ -25,7 +25,7 @@ from app.schemas.company import (
 from app.schemas.pagespeed import (
     PageSpeedScanJobResponse,
     PageSpeedScanRequest,
-    PageSpeedScanResponse,
+    PageSpeedScanSummary,
 )
 from app.schemas.website_crawl import (
     WebsiteCrawlJobResponse,
@@ -479,7 +479,7 @@ async def crawl_company_website(
 
 @router.get(
     "/{company_id}/pagespeed-scans/{scan_id}",
-    response_model=PageSpeedScanResponse,
+    response_model=PageSpeedScanSummary,
 )
 def get_pagespeed_scan(
     company_id: UUID,
@@ -526,7 +526,7 @@ def get_company_pagespeed_job(
 
 @router.post(
     "/{company_id}/pagespeed-scans",
-    response_model=PageSpeedScanResponse,
+    response_model=PageSpeedScanSummary,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_pagespeed_scan(
@@ -579,7 +579,6 @@ def _persist_pagespeed_scan(
         website_url=result.website_url,
         strategy=result.strategy,
         category_scores=result.category_scores,
-        report=result.report,
     )
     db.add(scan)
     try:

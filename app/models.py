@@ -1592,7 +1592,6 @@ class PageSpeedScan(TenantOwnedMixin, Base):
         JSON,
         nullable=False,
     )
-    report: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     scanned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

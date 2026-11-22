@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 import httpx
 from fastapi import HTTPException
@@ -31,7 +31,6 @@ class PageSpeedScanData:
     website_url: str
     strategy: PageSpeedStrategy
     category_scores: dict[str, int | None]
-    report: dict[str, Any]
 
 
 async def scan_pagespeed(
@@ -114,10 +113,4 @@ async def scan_pagespeed(
         website_url=website_url,
         strategy=strategy,
         category_scores=category_scores,
-        report={
-            "analysisUTCTimestamp": data.get("analysisUTCTimestamp"),
-            "loadingExperience": data.get("loadingExperience"),
-            "originLoadingExperience": data.get("originLoadingExperience"),
-            "lighthouseResult": lighthouse_result,
-        },
     )

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_db
 from app.models import PageSpeedScan, Website, WebsiteCrawlJob
-from app.schemas.pagespeed import PageSpeedScanResponse, PageSpeedScanSummary
+from app.schemas.pagespeed import PageSpeedScanSummary
 from app.schemas.job_queue import BatchJobRetryRequest, BatchJobRetryResponse
 from app.schemas.website import (
     WebsiteAddToLeadsRequest,
@@ -351,7 +351,7 @@ def get_website_detail(
 
 @router.get(
     "/{website_id}/pagespeed-scans/{scan_id}",
-    response_model=PageSpeedScanResponse,
+    response_model=PageSpeedScanSummary,
 )
 def get_website_pagespeed_scan(
     website_id: UUID,

@@ -532,7 +532,7 @@ def test_website_detail_returns_404_for_unknown_id(client):
     assert response.status_code == 404
 
 
-def test_website_detail_includes_pagespeed_summaries_and_report(client):
+def test_website_detail_includes_only_pagespeed_scores(client):
     with TestingSessionLocal() as db:
         website = Website(
             website_url="https://speed.example/",
@@ -555,18 +555,6 @@ def test_website_detail_includes_pagespeed_summaries_and_report(client):
                 "best-practices": 100,
                 "seo": 91,
             },
-            report={
-                "lighthouseResult": {
-                    "lighthouseVersion": "12.0.0",
-                    "audits": {
-                        "first-contentful-paint": {
-                            "title": "First Contentful Paint",
-                            "score": 0.9,
-                            "displayValue": "1.2 s",
-                        },
-                    },
-                },
-            },
             scanned_at=datetime(2026, 1, 4, tzinfo=timezone.utc),
         )
         db.add(scan)
@@ -584,16 +572,17 @@ def test_website_detail_includes_pagespeed_summaries_and_report(client):
     assert summaries[0]["strategy"] == "mobile"
     assert summaries[0]["category_scores"]["performance"] == 87
 
-    report_response = client.get(
+    scan_response = client.get(
         f"/api/v1/websites/{website_id}/pagespeed-scans/{scan_id}"
     )
-    assert report_response.status_code == 200
-    assert (
-        report_response.json()["report"]["lighthouseResult"]["audits"][
-            "first-contentful-paint"
-        ]["displayValue"]
-        == "1.2 s"
-    )
+    assert scan_response.status_code == 200
+    assert "report" not in scan_response.json()
+    assert set(scan_response.json()["category_scores"]) == {
+        "performance",
+        "accessibility",
+        "best-practices",
+        "seo",
+    }
 
     unrelated_scan_response = client.get(
         f"/api/v1/websites/{other_website_id}/pagespeed-scans/{scan_id}"

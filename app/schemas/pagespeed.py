@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -20,10 +20,6 @@ class PageSpeedScanSummary(BaseModel):
     strategy: PageSpeedStrategy
     category_scores: dict[str, int | None]
     scanned_at: datetime
-
-
-class PageSpeedScanResponse(PageSpeedScanSummary):
-    report: dict[str, Any]
 
 
 class PageSpeedScanJobResponse(BaseModel):

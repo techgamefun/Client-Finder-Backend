@@ -553,7 +553,6 @@ def test_company_pagespeed_scan_and_rescan(client, monkeypatch):
                 "best-practices": 92,
                 "seo": 93,
             },
-            report={"lighthouseResult": {"audits": {}}},
         )
 
     monkeypatch.setattr(
@@ -572,6 +571,13 @@ def test_company_pagespeed_scan_and_rescan(client, monkeypatch):
 
     assert first_scan.status_code == 201
     assert second_scan.status_code == 201
+    assert "report" not in first_scan.json()
+    assert set(first_scan.json()["category_scores"]) == {
+        "performance",
+        "accessibility",
+        "best-practices",
+        "seo",
+    }
     assert first_scan.json()["strategy"] == "mobile"
     assert first_scan.json()["category_scores"]["performance"] == 90
     assert first_scan.json()["id"] != second_scan.json()["id"]
@@ -579,6 +585,12 @@ def test_company_pagespeed_scan_and_rescan(client, monkeypatch):
 
     company = client.get(f"/api/v1/companies/{company_id}")
     assert len(company.json()["pagespeed_scans"]) == 2
+    scan_id = first_scan.json()["id"]
+    scan_response = client.get(
+        f"/api/v1/companies/{company_id}/pagespeed-scans/{scan_id}"
+    )
+    assert scan_response.status_code == 200
+    assert "report" not in scan_response.json()
 
 
 def test_company_pagespeed_scan_requires_website(client):
