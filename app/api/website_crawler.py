@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -18,6 +18,7 @@ from app.schemas.job_queue import (
     BatchJobRetryRequest,
     BatchJobRetryResponse,
     JobQueueStatusSummary,
+    QueueJobsPageResponse,
 )
 from app.services.crawl_jobs import (
     create_website_crawl_job,
@@ -81,12 +82,26 @@ async def crawl_website(
     return await run_in_threadpool(get_website_crawl_job, job.id, db)
 
 
-@router.get("/jobs", response_model=list[WebsiteCrawlJobResponse])
+@router.get(
+    "/jobs",
+    response_model=QueueJobsPageResponse[WebsiteCrawlJobResponse],
+)
 def list_crawl_jobs(
     db: Annotated[Session, Depends(get_db)],
-    limit: int = Query(default=100, ge=1, le=500),
-) -> list[WebsiteCrawlJobResponse]:
-    return list_website_crawl_jobs(db, limit)
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    search: Annotated[str, Query(max_length=300)] = "",
+    status_filter: Literal["queued", "running", "succeeded", "failed"] | None = (
+        Query(default=None, alias="status")
+    ),
+) -> QueueJobsPageResponse[WebsiteCrawlJobResponse]:
+    return list_website_crawl_jobs(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status_filter,
+    )
 
 
 @router.get("/jobs/summary", response_model=JobQueueStatusSummary)

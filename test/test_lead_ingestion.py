@@ -695,7 +695,7 @@ def test_successful_crawl_queues_website_pagespeed_jobs(client, monkeypatch):
 
     response = client.get("/api/v1/pagespeed/jobs")
     assert response.status_code == 200
-    assert {job["website_id"] for job in response.json()} == {
+    assert {job["website_id"] for job in response.json()["items"]} == {
         str(website_id) for website_id in website_ids
     }
 
@@ -808,13 +808,61 @@ def test_pagespeed_queue_endpoint_lists_jobs(client):
     response = client.get("/api/v1/pagespeed/jobs")
 
     assert response.status_code == 200
-    jobs = response.json()
+    result = response.json()
+    jobs = result["items"]
     assert len(jobs) == 1
     assert jobs[0]["id"] == str(job_id)
     assert jobs[0]["website_url"] == "https://example.com/"
     assert jobs[0]["company_ids"] == [str(company_id)]
     assert jobs[0]["status"] == "queued"
     assert jobs[0]["started_at"] is None
+    assert result["total_count"] == 1
+    assert result["status_counts"] == {"queued": 1}
+
+
+def test_pagespeed_jobs_search_status_and_pagination(client):
+    with TestingSessionLocal() as db:
+        jobs = []
+        for domain, strategy, job_status in (
+            ("alpha-one.example", "mobile", "queued"),
+            ("alpha-two.example", "desktop", "queued"),
+            ("alpha-three.example", "mobile", "failed"),
+            ("beta.example", "mobile", "queued"),
+        ):
+            website_url = f"https://{domain}/"
+            company = Company(name=domain, website=website_url)
+            db.add(company)
+            db.flush()
+            jobs.append(
+                PageSpeedScanJob(
+                    company_id=company.id,
+                    website_url=website_url,
+                    strategy=strategy,
+                    status=job_status,
+                )
+            )
+        db.add_all(jobs)
+        db.commit()
+        expected_job_ids = {str(job.id) for job in jobs[:2]}
+
+    response = client.get(
+        "/api/v1/pagespeed/jobs",
+        params={
+            "search": "alpha",
+            "status": "queued",
+            "page": 2,
+            "page_size": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert len(result["items"]) == 1
+    assert result["items"][0]["id"] in expected_job_ids
+    assert result["total_count"] == 2
+    assert result["page"] == 2
+    assert result["page_size"] == 1
+    assert result["status_counts"] == {"queued": 2, "failed": 1}
 
 
 def test_failed_pagespeed_job_can_be_retried(client, monkeypatch):

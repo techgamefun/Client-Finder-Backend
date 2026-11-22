@@ -606,7 +606,7 @@ def test_crawl_endpoint_queues_job_and_exposes_status(client, monkeypatch):
 
     queue_response = client.get("/api/v1/crawler/jobs")
     assert queue_response.status_code == 200
-    assert [queued_job["id"] for queued_job in queue_response.json()] == [
+    assert [queued_job["id"] for queued_job in queue_response.json()["items"]] == [
         job["id"]
     ]
 

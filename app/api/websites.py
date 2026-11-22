@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_db
 from app.models import PageSpeedScan, Website, WebsiteCrawlJob
 from app.schemas.pagespeed import PageSpeedScanSummary
+from app.schemas.job_queue import QueueJobsPageResponse
 from app.schemas.job_queue import BatchJobRetryRequest, BatchJobRetryResponse
 from app.schemas.website import (
     WebsiteAddToLeadsRequest,
@@ -188,13 +189,29 @@ def website_corpus_words(
 
 @router.get(
     "/corpus-words/jobs",
-    response_model=list[WebsiteCorpusAnalysisJobResponse],
+    response_model=QueueJobsPageResponse[WebsiteCorpusAnalysisJobResponse],
 )
 def website_corpus_analysis_jobs(
     db: WebsiteSession,
-    limit: int = Query(default=100, ge=1, le=500),
-) -> list[WebsiteCorpusAnalysisJobResponse]:
-    return list_website_corpus_analysis_jobs(db, limit)
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    search: Annotated[str, Query(max_length=300)] = "",
+    status_filter: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+    ]
+    | None = Query(default=None, alias="status"),
+) -> QueueJobsPageResponse[WebsiteCorpusAnalysisJobResponse]:
+    return list_website_corpus_analysis_jobs(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status_filter,
+    )
 
 
 @router.post(

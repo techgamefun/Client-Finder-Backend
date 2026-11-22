@@ -111,9 +111,57 @@ def test_corpus_words_endpoint_queues_stale_sites_without_analyzing(
 
     queue_response = client.get("/api/v1/websites/corpus-words/jobs")
     assert queue_response.status_code == 200
-    assert len(queue_response.json()) == 1
-    assert queue_response.json()[0]["website_id"] == str(visible_id)
-    assert queue_response.json()[0]["status"] == "queued"
+    queue_result = queue_response.json()
+    assert len(queue_result["items"]) == 1
+    assert queue_result["items"][0]["website_id"] == str(visible_id)
+    assert queue_result["items"][0]["status"] == "queued"
+    assert queue_result["total_count"] == 1
+    assert queue_result["status_counts"] == {"queued": 1}
+
+
+def test_corpus_analysis_jobs_search_status_and_pagination(client):
+    crawled_at = datetime(2026, 11, 14, tzinfo=timezone.utc)
+    with TestingSessionLocal() as db:
+        jobs = []
+        for domain, status in (
+            ("alpha-one.example", "queued"),
+            ("alpha-two.example", "queued"),
+            ("alpha-three.example", "failed"),
+            ("beta.example", "queued"),
+        ):
+            website = _create_crawled_website(
+                db,
+                domain,
+                crawled_at=crawled_at,
+            )
+            job = WebsiteCorpusAnalysisJob(
+                website_id=website.id,
+                source_crawled_at=crawled_at,
+                status=status,
+            )
+            db.add(job)
+            jobs.append(job)
+        db.commit()
+        expected_job_ids = {str(job.id) for job in jobs[:2]}
+
+    response = client.get(
+        "/api/v1/websites/corpus-words/jobs",
+        params={
+            "search": "alpha",
+            "status": "queued",
+            "page": 2,
+            "page_size": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert len(result["items"]) == 1
+    assert result["items"][0]["id"] in expected_job_ids
+    assert result["total_count"] == 2
+    assert result["page"] == 2
+    assert result["page_size"] == 1
+    assert result["status_counts"] == {"queued": 2, "failed": 1}
 
 
 def test_corpus_worker_persists_keywords_and_endpoint_reads_cache(

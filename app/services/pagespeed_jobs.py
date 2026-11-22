@@ -17,6 +17,7 @@ from app.schemas.job_queue import (
     BatchJobRetryFailure,
     BatchJobRetryResponse,
     JobQueueStatusSummary,
+    QueueJobsPageResponse,
 )
 from app.schemas.pagespeed import PageSpeedScanJobResponse
 from app.services.normalization import normalize_domain
@@ -254,15 +255,51 @@ def _retry_failed_pagespeed_scan_jobs_sync(
 
 def list_pagespeed_scan_jobs(
     db: Session,
-    limit: int = 100,
-) -> list[PageSpeedScanJobResponse]:
+    *,
+    search: str = "",
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> QueueJobsPageResponse[PageSpeedScanJobResponse]:
+    filters = []
+    if search:
+        filters.append(
+            func.lower(PageSpeedScanJob.website_url).contains(
+                search.lower(),
+                autoescape=True,
+            )
+        )
+    status_counts = dict(
+        db.execute(
+            select(PageSpeedScanJob.status, func.count())
+            .where(*filters)
+            .group_by(PageSpeedScanJob.status)
+        ).all()
+    )
+    total_count = (
+        status_counts.get(status, 0)
+        if status is not None
+        else sum(status_counts.values())
+    )
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    if status is not None:
+        filters.append(PageSpeedScanJob.status == status)
     jobs = db.scalars(
         select(PageSpeedScanJob)
         .options(selectinload(PageSpeedScanJob.companies))
         .order_by(PageSpeedScanJob.created_at.desc(), PageSpeedScanJob.id.desc())
-        .limit(limit)
+        .where(*filters)
+        .limit(page_size)
+        .offset((page - 1) * page_size)
     ).all()
-    return [serialize_pagespeed_scan_job(job) for job in jobs]
+    return QueueJobsPageResponse(
+        items=[serialize_pagespeed_scan_job(job) for job in jobs],
+        total_count=total_count,
+        page=page,
+        page_size=page_size,
+        status_counts=status_counts,
+    )
 
 
 def summarize_pagespeed_scan_jobs(db: Session) -> JobQueueStatusSummary:

@@ -3,13 +3,17 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.models import Website, WebsiteCorpusAnalysisJob
-from app.schemas.job_queue import BatchJobRetryFailure, BatchJobRetryResponse
+from app.schemas.job_queue import (
+    BatchJobRetryFailure,
+    BatchJobRetryResponse,
+    QueueJobsPageResponse,
+)
 from app.schemas.website import WebsiteCorpusAnalysisJobResponse
 from app.services.redis_queue import (
     RedisQueueError,
@@ -92,21 +96,58 @@ def serialize_website_corpus_analysis_job(
 
 def list_website_corpus_analysis_jobs(
     db: Session,
-    limit: int = 100,
-) -> list[WebsiteCorpusAnalysisJobResponse]:
+    *,
+    search: str = "",
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> QueueJobsPageResponse[WebsiteCorpusAnalysisJobResponse]:
+    filters = []
+    if search:
+        filters.append(
+            func.lower(Website.website_url).contains(
+                search.lower(),
+                autoescape=True,
+            )
+        )
+    status_counts = dict(
+        db.execute(
+            select(WebsiteCorpusAnalysisJob.status, func.count())
+            .join(Website, Website.id == WebsiteCorpusAnalysisJob.website_id)
+            .where(*filters)
+            .group_by(WebsiteCorpusAnalysisJob.status)
+        ).all()
+    )
+    total_count = (
+        status_counts.get(status, 0)
+        if status is not None
+        else sum(status_counts.values())
+    )
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    if status is not None:
+        filters.append(WebsiteCorpusAnalysisJob.status == status)
     rows = db.execute(
         select(WebsiteCorpusAnalysisJob, Website)
         .join(Website, Website.id == WebsiteCorpusAnalysisJob.website_id)
+        .where(*filters)
         .order_by(
             WebsiteCorpusAnalysisJob.created_at.desc(),
             WebsiteCorpusAnalysisJob.id.desc(),
         )
-        .limit(limit)
+        .limit(page_size)
+        .offset((page - 1) * page_size)
     ).all()
-    return [
-        serialize_website_corpus_analysis_job(job, website)
-        for job, website in rows
-    ]
+    return QueueJobsPageResponse(
+        items=[
+            serialize_website_corpus_analysis_job(job, website)
+            for job, website in rows
+        ],
+        total_count=total_count,
+        page=page,
+        page_size=page_size,
+        status_counts=status_counts,
+    )
 
 
 async def retry_website_corpus_analysis_job(

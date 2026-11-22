@@ -72,6 +72,50 @@ def test_websites_endpoint_returns_domain_and_crawl_details(client):
     }
 
 
+def test_crawler_jobs_search_status_and_pagination(client):
+    with TestingSessionLocal() as db:
+        jobs = [
+            WebsiteCrawlJob(
+                website_url="https://alpha-one.example/",
+                status="queued",
+            ),
+            WebsiteCrawlJob(
+                website_url="https://alpha-two.example/",
+                status="queued",
+            ),
+            WebsiteCrawlJob(
+                website_url="https://alpha-three.example/",
+                status="failed",
+            ),
+            WebsiteCrawlJob(
+                website_url="https://beta.example/",
+                status="queued",
+            ),
+        ]
+        db.add_all(jobs)
+        db.commit()
+        expected_job_ids = {str(job.id) for job in jobs[:2]}
+
+    response = client.get(
+        "/api/v1/crawler/jobs",
+        params={
+            "search": "alpha",
+            "status": "queued",
+            "page": 2,
+            "page_size": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert len(result["items"]) == 1
+    assert result["items"][0]["id"] in expected_job_ids
+    assert result["total_count"] == 2
+    assert result["page"] == 2
+    assert result["page_size"] == 1
+    assert result["status_counts"] == {"queued": 2, "failed": 1}
+
+
 def test_websites_endpoint_returns_hypestat_table_summaries(client):
     with TestingSessionLocal() as db:
         website = Website(

@@ -13,6 +13,7 @@ from app.schemas.job_queue import (
     BatchJobRetryFailure,
     BatchJobRetryResponse,
     JobQueueStatusSummary,
+    QueueJobsPageResponse,
 )
 from app.schemas.website_crawl import (
     WebsiteCrawlJobResponse,
@@ -317,29 +318,65 @@ def _retry_failed_website_crawl_jobs_sync(
 
 def list_website_crawl_jobs(
     db: Session,
-    limit: int = 100,
-) -> list[WebsiteCrawlJobResponse]:
+    *,
+    search: str = "",
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> QueueJobsPageResponse[WebsiteCrawlJobResponse]:
+    filters = []
+    if search:
+        filters.append(
+            func.lower(WebsiteCrawlJob.website_url).contains(
+                search.lower(),
+                autoescape=True,
+            )
+        )
+    status_counts = dict(
+        db.execute(
+            select(WebsiteCrawlJob.status, func.count())
+            .where(*filters)
+            .group_by(WebsiteCrawlJob.status)
+        ).all()
+    )
+    total_count = (
+        status_counts.get(status, 0)
+        if status is not None
+        else sum(status_counts.values())
+    )
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    if status is not None:
+        filters.append(WebsiteCrawlJob.status == status)
     jobs = db.scalars(
         select(WebsiteCrawlJob)
         .options(selectinload(WebsiteCrawlJob.crawl))
         .order_by(WebsiteCrawlJob.created_at.desc(), WebsiteCrawlJob.id.desc())
-        .limit(limit)
+        .where(*filters)
+        .limit(page_size)
+        .offset((page - 1) * page_size)
     ).all()
-    return [
-        WebsiteCrawlJobResponse(
-            id=job.id,
-            website_url=job.website_url,
-            status=job.status,
-            attempts=job.attempts,
-            error=job.error,
-            created_at=job.created_at,
-            updated_at=job.updated_at,
-            started_at=job.started_at,
-            completed_at=job.completed_at,
-            result=job.crawl,
-        )
-        for job in jobs
-    ]
+    return QueueJobsPageResponse(
+        items=[
+            WebsiteCrawlJobResponse(
+                id=job.id,
+                website_url=job.website_url,
+                status=job.status,
+                attempts=job.attempts,
+                error=job.error,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+                started_at=job.started_at,
+                completed_at=job.completed_at,
+                result=job.crawl,
+            )
+            for job in jobs
+        ],
+        total_count=total_count,
+        page=page,
+        page_size=page_size,
+        status_counts=status_counts,
+    )
 
 
 def summarize_website_crawl_jobs(db: Session) -> JobQueueStatusSummary:

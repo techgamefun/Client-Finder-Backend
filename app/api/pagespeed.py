@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -9,6 +9,7 @@ from app.schemas.job_queue import (
     BatchJobRetryRequest,
     BatchJobRetryResponse,
     JobQueueStatusSummary,
+    QueueJobsPageResponse,
 )
 from app.schemas.pagespeed import PageSpeedScanJobResponse
 from app.services.pagespeed_jobs import (
@@ -32,12 +33,30 @@ def pagespeed_job_summary(
     return summarize_pagespeed_scan_jobs(db)
 
 
-@router.get("/jobs", response_model=list[PageSpeedScanJobResponse])
+@router.get(
+    "/jobs",
+    response_model=QueueJobsPageResponse[PageSpeedScanJobResponse],
+)
 def list_pagespeed_jobs(
     db: Annotated[Session, Depends(get_db)],
-    limit: int = Query(default=100, ge=1, le=500),
-) -> list[PageSpeedScanJobResponse]:
-    return list_pagespeed_scan_jobs(db, limit)
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    search: Annotated[str, Query(max_length=300)] = "",
+    status_filter: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+    ]
+    | None = Query(default=None, alias="status"),
+) -> QueueJobsPageResponse[PageSpeedScanJobResponse]:
+    return list_pagespeed_scan_jobs(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status_filter,
+    )
 
 
 @router.post(
