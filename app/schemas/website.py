@@ -51,6 +51,21 @@ class WebsiteResponse(BaseModel):
     hypestat_audience_countries: list[str] = Field(default_factory=list)
 
 
+class WebsiteRegistryPageResponse(BaseModel):
+    items: list[WebsiteResponse]
+    total_count: int
+    indexed_count: int
+    website_count: int
+
+
+class WebsiteRegistryFacetsResponse(BaseModel):
+    categories: list[str]
+    discovery_sources: list[str]
+    hypestat_countries: list[str]
+    backlink_countries: list[str]
+    audience_countries: list[str]
+
+
 class WebsiteCrawlJobHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

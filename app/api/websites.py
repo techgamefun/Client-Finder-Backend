@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,6 +20,8 @@ from app.schemas.website import (
     WebsiteBatchStatusUpdateRequest,
     WebsiteBatchStatusUpdateResponse,
     WebsiteReclassificationBatchResponse,
+    WebsiteRegistryFacetsResponse,
+    WebsiteRegistryPageResponse,
     WebsiteResponse,
     WebsiteUpdate,
 )
@@ -35,6 +37,11 @@ from app.services.website_classification import (
 from app.services.website_leads import add_websites_to_leads
 from app.services.website_registry import update_websites_status
 from app.services.website_hypestat import refetch_website_hypestat_profile
+from app.services.website_registry_query import (
+    WebsiteSortKey,
+    get_website_registry_facets,
+    get_website_registry_page,
+)
 
 
 router = APIRouter(prefix="/websites", tags=["Websites"])
@@ -80,11 +87,81 @@ def list_websites(
     ]
 
 
+@router.get("/registry-page", response_model=WebsiteRegistryPageResponse)
+def list_website_registry_page(
+    db: WebsiteSession,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: Annotated[str, Query(max_length=300)] = "",
+    status_filter: Literal["new", "lead", "checked"] | None = Query(
+        default=None,
+        alias="status",
+    ),
+    page_type: str | None = Query(default=None, max_length=64),
+    category: str | None = Query(default=None, max_length=100),
+    discovery_source: str | None = Query(default=None, max_length=255),
+    minimum_monthly_visits: float | None = Query(default=None, ge=0),
+    minimum_referring_domains: float | None = Query(default=None, ge=0),
+    maximum_global_rank: float | None = Query(default=None, ge=1),
+    hypestat_country: str | None = Query(default=None, max_length=100),
+    backlink_country: str | None = Query(default=None, max_length=100),
+    audience_country: str | None = Query(default=None, max_length=100),
+    sort_by: WebsiteSortKey | None = Query(default=None),
+    sort_direction: Literal["ascending", "descending"] = "ascending",
+) -> WebsiteRegistryPageResponse:
+    websites, total_count, indexed_count, website_count = (
+        get_website_registry_page(
+            db,
+            limit=limit,
+            offset=offset,
+            search=search,
+            status=status_filter,
+            page_type=page_type,
+            category=category,
+            discovery_source=discovery_source,
+            minimum_monthly_visits=minimum_monthly_visits,
+            minimum_referring_domains=minimum_referring_domains,
+            maximum_global_rank=maximum_global_rank,
+            hypestat_country=hypestat_country,
+            backlink_country=backlink_country,
+            audience_country=audience_country,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+        )
+    )
+    crawl_job_statuses = _crawl_job_statuses(db, websites)
+    return WebsiteRegistryPageResponse(
+        items=[
+            _website_response(
+                website,
+                crawl_job_statuses.get(website.website_url),
+                include_crawl_signals=False,
+                include_created_by=False,
+            )
+            for website in websites
+        ],
+        total_count=total_count,
+        indexed_count=indexed_count,
+        website_count=website_count,
+    )
+
+
+@router.get(
+    "/registry-facets",
+    response_model=WebsiteRegistryFacetsResponse,
+)
+def list_website_registry_facets(
+    db: WebsiteSession,
+) -> WebsiteRegistryFacetsResponse:
+    return WebsiteRegistryFacetsResponse(**get_website_registry_facets(db))
+
+
 @router.get("/corpus-words", response_model=WebsiteCorpusWordsResponse)
 def website_corpus_words(
     db: WebsiteSession,
+    website_ids: list[UUID] | None = Query(default=None, max_length=100),
 ) -> WebsiteCorpusWordsResponse:
-    return get_website_corpus_words(db)
+    return get_website_corpus_words(db, website_ids=website_ids)
 
 
 @router.post(
@@ -294,29 +371,33 @@ def _crawl_job_statuses(
     if not website_urls:
         return {}
 
-    jobs = db.scalars(
-        select(WebsiteCrawlJob)
+    jobs = db.execute(
+        select(
+            WebsiteCrawlJob.website_url,
+            WebsiteCrawlJob.status,
+        )
         .where(WebsiteCrawlJob.website_url.in_(website_urls))
         .order_by(WebsiteCrawlJob.created_at.desc(), WebsiteCrawlJob.id.desc())
     ).all()
     statuses: dict[str, str] = {}
-    for job in jobs:
-        statuses.setdefault(job.website_url, job.status)
+    for website_url, status in jobs:
+        statuses.setdefault(website_url, status)
     return statuses
 
 
 def _website_response(
     website: Website,
     crawl_job_status: str | None,
+    *,
+    include_crawl_signals: bool = True,
+    include_created_by: bool = True,
 ) -> WebsiteResponse:
-    crawl_signals = [
-        CrawlPageClassification.model_validate(page)
-        for page in (
-            website.crawl.classification_signals
-            if website.crawl is not None
-            else []
-        )
-    ]
+    crawl_signals = []
+    if include_crawl_signals and website.crawl is not None:
+        crawl_signals = [
+            CrawlPageClassification.model_validate(page)
+            for page in website.crawl.classification_signals
+        ]
     hypestat_summary = _website_hypestat_summary(
         website.hypestat_profile.payload
         if website.hypestat_profile is not None
@@ -343,7 +424,7 @@ def _website_response(
         created_at=website.created_at,
         created_by_email=(
             website.created_by_user.email
-            if website.created_by_user is not None
+            if include_created_by and website.created_by_user is not None
             else None
         ),
         crawled_at=website.crawl.crawled_at if website.crawl else None,

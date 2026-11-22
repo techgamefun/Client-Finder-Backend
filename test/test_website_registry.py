@@ -138,6 +138,232 @@ def test_websites_endpoint_returns_hypestat_table_summaries(client):
     ]
 
 
+def test_website_registry_page_filters_and_paginates_on_the_backend(client):
+    with TestingSessionLocal() as db:
+        for domain, status, topics in [
+            ("alpha.example", "lead", ["saas"]),
+            ("bravo.example", "new", ["commerce"]),
+            ("charlie.example", "checked", ["saas"]),
+        ]:
+            crawl = WebsiteCrawl(
+                website_url=f"https://{domain}/",
+                site_type="saas_corporate_marketing",
+                classification_signals=(
+                    [
+                        {
+                            "url": f"https://{domain}/",
+                            "classification_signals": {
+                                "page_title": domain,
+                                "heading_texts": ["Business"],
+                            },
+                        }
+                    ]
+                    if domain == "alpha.example"
+                    else []
+                ),
+            )
+            db.add(crawl)
+            db.flush()
+            website = Website(
+                website_url=crawl.website_url,
+                domain=domain,
+                crawl_id=crawl.id,
+                site_topic=topics,
+                status=status,
+                page_type="business_site",
+                discovery_source="tavily",
+            )
+            db.add(website)
+            db.flush()
+            if domain == "alpha.example":
+                db.add(
+                    WebsiteHypeStatProfile(
+                        website_id=website.id,
+                        status="succeeded",
+                        payload={
+                            "entry": {
+                                "data": {
+                                    "traffic": {
+                                        "visits_monthly": 1200,
+                                        "countries": [{"country": "India"}],
+                                    },
+                                    "rank": {
+                                        "hypestat": 300,
+                                        "country": {"country": "India"},
+                                    },
+                                    "backlinks": {
+                                        "referring_domains": 25,
+                                        "by_country": [
+                                            {"country": "US", "domains": 10}
+                                        ],
+                                    },
+                                }
+                            }
+                        },
+                    )
+                )
+        db.add(
+            Website(
+                website_url="https://unindexed.example/",
+                domain="unindexed.example",
+                site_topic=[],
+            )
+        )
+        db.commit()
+
+    first_page = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 1,
+            "offset": 0,
+            "sort_by": "website",
+            "sort_direction": "ascending",
+        },
+    )
+    second_page = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 1,
+            "offset": 1,
+            "sort_by": "website",
+            "sort_direction": "ascending",
+        },
+    )
+    beyond_last_page = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 1,
+            "offset": 99,
+            "sort_by": "website",
+            "sort_direction": "ascending",
+        },
+    )
+
+    assert first_page.status_code == 200
+    assert first_page.json()["total_count"] == 3
+    assert first_page.json()["indexed_count"] == 3
+    assert first_page.json()["website_count"] == 4
+    assert [row["domain"] for row in first_page.json()["items"]] == [
+        "alpha.example"
+    ]
+    assert [row["domain"] for row in second_page.json()["items"]] == [
+        "bravo.example"
+    ]
+    assert [row["domain"] for row in beyond_last_page.json()["items"]] == [
+        "charlie.example"
+    ]
+    assert first_page.json()["items"][0]["crawl_signals"] == []
+
+    filter_cases = [
+        ({"status": "lead"}, 1),
+        ({"category": "saas"}, 2),
+        ({"discovery_source": "tavily"}, 3),
+        ({"minimum_monthly_visits": 1000}, 1),
+        ({"minimum_referring_domains": 20}, 1),
+        ({"maximum_global_rank": 500}, 1),
+        ({"hypestat_country": "India"}, 1),
+        ({"backlink_country": "US"}, 1),
+        ({"audience_country": "India"}, 1),
+        ({"search": "alpha"}, 1),
+    ]
+    for filters, total_count in filter_cases:
+        filter_response = client.get(
+            "/api/v1/websites/registry-page",
+            params=filters,
+        )
+        assert filter_response.status_code == 200
+        assert filter_response.json()["total_count"] == total_count, filters
+
+    filtered_page = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "status": "lead",
+            "category": "saas",
+            "discovery_source": "tavily",
+            "minimum_monthly_visits": 1000,
+            "minimum_referring_domains": 20,
+            "maximum_global_rank": 500,
+            "hypestat_country": "India",
+            "backlink_country": "US",
+            "audience_country": "India",
+            "search": "alpha",
+        },
+    )
+
+    assert filtered_page.status_code == 200
+    assert filtered_page.json()["total_count"] == 1
+    assert [row["domain"] for row in filtered_page.json()["items"]] == [
+        "alpha.example"
+    ]
+
+    facets = client.get("/api/v1/websites/registry-facets")
+    assert facets.status_code == 200
+    assert facets.json()["categories"] == ["commerce", "saas"]
+    assert facets.json()["discovery_sources"] == ["tavily"]
+    assert facets.json()["hypestat_countries"] == ["India"]
+    assert facets.json()["backlink_countries"] == ["US"]
+    assert facets.json()["audience_countries"] == ["India"]
+
+
+def test_job_queue_summaries_return_only_running_and_failed_counts(client):
+    with TestingSessionLocal() as db:
+        website = Website(
+            website_url="https://queue.example/",
+            domain="queue.example",
+        )
+        db.add(website)
+        db.flush()
+        db.add_all(
+            [
+                WebsiteCrawlJob(
+                    website_url=website.website_url,
+                    status="running",
+                ),
+                WebsiteCrawlJob(
+                    website_url=website.website_url,
+                    status="failed",
+                ),
+                WebsiteCrawlJob(
+                    website_url=website.website_url,
+                    status="succeeded",
+                ),
+                PageSpeedScanJob(
+                    website_id=website.id,
+                    website_url=website.website_url,
+                    strategy="mobile",
+                    status="running",
+                ),
+                PageSpeedScanJob(
+                    website_id=website.id,
+                    website_url=website.website_url,
+                    strategy="desktop",
+                    status="failed",
+                ),
+                PageSpeedScanJob(
+                    website_id=website.id,
+                    website_url=website.website_url,
+                    strategy="mobile",
+                    status="succeeded",
+                ),
+            ]
+        )
+        db.commit()
+
+    crawler_summary = client.get("/api/v1/crawler/jobs/summary")
+    pagespeed_summary = client.get("/api/v1/pagespeed/jobs/summary")
+
+    assert crawler_summary.status_code == 200
+    assert crawler_summary.json() == {
+        "running_count": 1,
+        "failed_count": 1,
+    }
+    assert pagespeed_summary.status_code == 200
+    assert pagespeed_summary.json() == {
+        "running_count": 1,
+        "failed_count": 1,
+    }
+
+
 def test_website_detail_includes_crawl_content_signals_and_job_history(client):
     with TestingSessionLocal() as db:
         crawl = WebsiteCrawl(

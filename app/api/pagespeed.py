@@ -8,12 +8,14 @@ from app.api.deps import get_db
 from app.schemas.job_queue import (
     BatchJobRetryRequest,
     BatchJobRetryResponse,
+    JobQueueStatusSummary,
 )
 from app.schemas.pagespeed import PageSpeedScanJobResponse
 from app.services.pagespeed_jobs import (
     list_pagespeed_scan_jobs,
     retry_failed_pagespeed_scan_jobs,
     retry_pagespeed_scan_job,
+    summarize_pagespeed_scan_jobs,
 )
 
 
@@ -21,6 +23,13 @@ router = APIRouter(
     prefix="/pagespeed",
     tags=["PageSpeed"],
 )
+
+
+@router.get("/jobs/summary", response_model=JobQueueStatusSummary)
+def pagespeed_job_summary(
+    db: Annotated[Session, Depends(get_db)],
+) -> JobQueueStatusSummary:
+    return summarize_pagespeed_scan_jobs(db)
 
 
 @router.get("/jobs", response_model=list[PageSpeedScanJobResponse])

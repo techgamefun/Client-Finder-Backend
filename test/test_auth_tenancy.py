@@ -98,6 +98,18 @@ def test_unauthenticated_business_api_is_rejected(client):
     assert response.status_code == 401
 
 
+def test_account_profile_updates_names(client):
+    response = client.patch(
+        "/api/v1/auth/me/profile",
+        json={"first_name": "  Updated  ", "last_name": "  Name  "},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["first_name"] == "Updated"
+    assert response.json()["user"]["last_name"] == "Name"
+    assert client.get("/api/v1/auth/me").json()["user"]["first_name"] == "Updated"
+
+
 def test_legacy_session_cookie_is_not_accepted(client):
     client.cookies.clear()
     client.cookies.set(
@@ -174,6 +186,8 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
                 "organization_description": "Second tenant profile",
                 "email": "second-admin@example.test",
                 "password": "another-long-password",
+                "first_name": "Second",
+                "last_name": "Admin",
             },
         )
         assert registration.status_code == 200

@@ -156,6 +156,48 @@ def test_corpus_words_are_analyzed_and_cached_per_website(client, monkeypatch):
         assert saved[second_id].algorithm_version != 0
 
 
+def test_corpus_words_can_be_limited_to_visible_website_ids(
+    client,
+    monkeypatch,
+):
+    crawled_at = datetime(2026, 11, 14, tzinfo=timezone.utc)
+    with TestingSessionLocal() as db:
+        visible = _create_crawled_website(
+            db,
+            "visible.example",
+            "Visible business",
+            crawled_at=crawled_at,
+        )
+        _create_crawled_website(
+            db,
+            "off-page.example",
+            "Off-page business",
+            crawled_at=crawled_at,
+        )
+        visible_id = visible.id
+        db.commit()
+
+    calls = []
+
+    def fake_post(url, *, json, timeout):
+        calls.append(json)
+        return _crawler_response(url, json["sites"])
+
+    monkeypatch.setattr(website_corpus_words.httpx, "post", fake_post)
+    response = client.get(
+        "/api/v1/websites/corpus-words",
+        params={"website_ids": str(visible_id)},
+    )
+
+    assert response.status_code == 200
+    assert [
+        result["domain"] for result in response.json()["websites"]
+    ] == ["visible.example"]
+    assert [
+        site["domain"] for site in calls[0]["sites"]
+    ] == ["visible.example"]
+
+
 def test_re_crawl_recomputes_only_that_website(client, monkeypatch):
     old_time = datetime(2026, 11, 13, tzinfo=timezone.utc)
     new_time = datetime(2026, 11, 14, tzinfo=timezone.utc)

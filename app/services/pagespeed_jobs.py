@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
@@ -15,6 +15,7 @@ from app.models import (
 from app.schemas.job_queue import (
     BatchJobRetryFailure,
     BatchJobRetryResponse,
+    JobQueueStatusSummary,
 )
 from app.schemas.pagespeed import PageSpeedScanJobResponse
 from app.services.normalization import normalize_domain
@@ -233,3 +234,17 @@ def list_pagespeed_scan_jobs(
         .limit(limit)
     ).all()
     return [serialize_pagespeed_scan_job(job) for job in jobs]
+
+
+def summarize_pagespeed_scan_jobs(db: Session) -> JobQueueStatusSummary:
+    counts = dict(
+        db.execute(
+            select(PageSpeedScanJob.status, func.count())
+            .where(PageSpeedScanJob.status.in_(("running", "failed")))
+            .group_by(PageSpeedScanJob.status)
+        ).all()
+    )
+    return JobQueueStatusSummary(
+        running_count=counts.get("running", 0),
+        failed_count=counts.get("failed", 0),
+    )

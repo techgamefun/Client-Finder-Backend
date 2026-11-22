@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, require_admin_context
 from app.models import Organization, User
 from app.schemas.auth import (
+    AccountProfileUpdate,
     AuthSessionResponse,
     AuthUserResponse,
     CredentialsInput,
@@ -153,13 +154,20 @@ def read_session(
     db: DatabaseSession,
 ) -> AuthSessionResponse:
     context = _required_context(request)
-    user = db.get(User, context.user_id)
-    organization = db.get(Organization, context.organization_id)
-    if user is None or organization is None:
+    session_row = db.execute(
+        select(User, Organization)
+        .join(Organization, Organization.id == User.organization_id)
+        .where(
+            User.id == context.user_id,
+            Organization.id == context.organization_id,
+        )
+    ).one_or_none()
+    if session_row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Your session is no longer valid.",
         )
+    user, organization = session_row
     return AuthSessionResponse(
         user=AuthUserResponse.model_validate(user),
         organization_id=organization.id,
@@ -278,6 +286,26 @@ def update_organization_profile(
     organization.description = payload.description
     db.commit()
     return OrganizationProfileResponse(description=organization.description)
+
+
+@router.patch("/me/profile", response_model=AuthSessionResponse)
+def update_account_profile(
+    payload: AccountProfileUpdate,
+    request: Request,
+    db: DatabaseSession,
+) -> AuthSessionResponse:
+    context = _required_context(request)
+    user = db.get(User, context.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your account is no longer available.",
+        )
+    user.first_name = payload.first_name
+    user.last_name = payload.last_name
+    db.commit()
+    db.refresh(user)
+    return _session_response(user, db)
 
 
 def _start_session(

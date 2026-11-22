@@ -58,6 +58,8 @@ def create_bootstrap_admin(
         email=payload.email,
         password=payload.password,
         role="admin",
+        first_name=payload.first_name,
+        last_name=payload.last_name,
     )
     db.refresh(user)
     return user
@@ -80,6 +82,8 @@ def register_organization(
         email=payload.email,
         password=payload.password,
         role="admin",
+        first_name=payload.first_name,
+        last_name=payload.last_name,
     )
 
 

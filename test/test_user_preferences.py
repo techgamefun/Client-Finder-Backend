@@ -1,7 +1,11 @@
+import json as json_module
 from uuid import UUID, uuid4
 
+from app.api import user_preferences as user_preferences_api
+from app.config import settings
 from app.main import app
 from app.models import User, UserPreferences
+from app.services import user_preferences_cache
 from conftest import TestingSessionLocal
 
 
@@ -113,3 +117,135 @@ def test_user_preferences_validate_values_and_require_authentication(client):
     client.cookies.clear()
     unauthenticated = client.get("/api/v1/preferences")
     assert unauthenticated.status_code == 401
+
+
+def test_user_preferences_read_from_cache_before_database(client, monkeypatch):
+    cached = {
+        "theme": "dark",
+        "sidebar_collapsed": True,
+        "search": {"providers": None, "tavily": None},
+    }
+    monkeypatch.setattr(
+        user_preferences_api,
+        "read_cached_preferences",
+        lambda _organization_id, _user_id: cached,
+    )
+    monkeypatch.setattr(
+        user_preferences_api,
+        "_get_preferences_row",
+        lambda *_args: None,
+    )
+
+    response = client.get("/api/v1/preferences")
+
+    assert response.status_code == 200
+    assert response.json() == cached
+
+
+def test_user_preferences_cache_is_populated_and_invalidated(
+    client,
+    monkeypatch,
+):
+    cache_writes = []
+    cache_invalidations = []
+    monkeypatch.setattr(
+        user_preferences_api,
+        "read_cached_preferences",
+        lambda _organization_id, _user_id: None,
+    )
+    monkeypatch.setattr(
+        user_preferences_api,
+        "write_cached_preferences",
+        lambda organization_id, user_id, preferences: cache_writes.append(
+            (organization_id, user_id, preferences)
+        ),
+    )
+    monkeypatch.setattr(
+        user_preferences_api,
+        "invalidate_cached_preferences",
+        lambda organization_id, user_id: cache_invalidations.append(
+            (organization_id, user_id)
+        ),
+    )
+
+    initial = client.get("/api/v1/preferences")
+    updated = client.patch(
+        "/api/v1/preferences",
+        json={"theme": "dark"},
+    )
+
+    assert initial.status_code == 200
+    assert cache_writes[0][2] == initial.json()
+    assert updated.status_code == 200
+    assert len(cache_invalidations) == 1
+    assert cache_invalidations[0] == cache_writes[0][:2]
+
+
+def test_redis_preferences_cache_uses_user_scoped_ttl_commands(monkeypatch):
+    organization_id = uuid4()
+    user_id = uuid4()
+    cached = {
+        "theme": "dark",
+        "sidebar_collapsed": True,
+        "search": {"providers": None, "tavily": None},
+    }
+    commands = []
+
+    class FakeResponse:
+        def __init__(self, result):
+            self.result = result
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": self.result}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            assert timeout == 1.0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, _url, *, headers, json):
+            assert headers["Authorization"] == "Bearer test-token"
+            commands.append(json)
+            if json[0] == "GET":
+                return FakeResponse(json_module.dumps(cached))
+            return FakeResponse("OK")
+
+    monkeypatch.setattr(settings, "upstash_redis_rest_url", "https://redis.test")
+    monkeypatch.setattr(settings, "upstash_redis_rest_token", "test-token")
+    monkeypatch.setattr(user_preferences_cache.httpx, "Client", FakeClient)
+
+    assert (
+        user_preferences_cache.read_cached_preferences(
+            organization_id,
+            user_id,
+        )
+        == cached
+    )
+    user_preferences_cache.write_cached_preferences(
+        organization_id,
+        user_id,
+        cached,
+    )
+    user_preferences_cache.invalidate_cached_preferences(
+        organization_id,
+        user_id,
+    )
+
+    cache_key = f"user-preferences:v1:{organization_id}:{user_id}"
+    assert commands[0] == ["GET", cache_key]
+    assert commands[1] == [
+        "SET",
+        cache_key,
+        json_module.dumps(cached, separators=(",", ":")),
+        "EX",
+        "180",
+    ]
+    assert commands[2] == ["DEL", cache_key]

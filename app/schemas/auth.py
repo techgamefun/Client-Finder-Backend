@@ -24,6 +24,8 @@ class CredentialsInput(BaseModel):
 class OrganizationRegistration(CredentialsInput):
     organization_name: str = Field(min_length=2, max_length=200)
     organization_description: str | None = Field(default=None, max_length=1000)
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
 
     @field_validator("organization_name")
     @classmethod
@@ -31,6 +33,14 @@ class OrganizationRegistration(CredentialsInput):
         normalized = value.strip()
         if len(normalized) < 2:
             raise ValueError("Organization name must have at least 2 characters.")
+        return normalized
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def normalize_registration_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("First name and last name are required.")
         return normalized
 
 
@@ -58,6 +68,19 @@ class OrganizationProfileUpdate(BaseModel):
     def normalize_description(cls, value: str | None) -> str | None:
         normalized = value.strip() if value is not None else None
         return normalized or None
+
+
+class AccountProfileUpdate(BaseModel):
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def normalize_account_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("First name and last name are required.")
+        return normalized
 
 
 class OrganizationProfileResponse(BaseModel):

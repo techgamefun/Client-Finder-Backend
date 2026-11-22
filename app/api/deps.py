@@ -1,10 +1,12 @@
 
 from collections.abc import Generator
+from time import perf_counter
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.request_metrics import record_database_checkout
 from app.tenant_context import TenantContext, get_tenant_context
 
 
@@ -12,6 +14,11 @@ def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
 
     try:
+        checkout_started_at = perf_counter()
+        db.connection()
+        record_database_checkout(
+            (perf_counter() - checkout_started_at) * 1000,
+        )
         yield db
     finally:
         db.close()

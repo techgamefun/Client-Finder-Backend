@@ -26,8 +26,14 @@ _CRAWLER_TIMEOUT_SECONDS = 30.0
 _MAX_ANALYSIS_BATCH_SIZE = 500
 
 
-def get_website_corpus_words(db: Session) -> WebsiteCorpusWordsResponse:
-    rows = db.execute(
+def get_website_corpus_words(
+    db: Session,
+    website_ids: list[UUID] | None = None,
+) -> WebsiteCorpusWordsResponse:
+    if website_ids is not None and not website_ids:
+        return WebsiteCorpusWordsResponse()
+
+    statement = (
         select(
             Website.id,
             Website.domain,
@@ -36,7 +42,10 @@ def get_website_corpus_words(db: Session) -> WebsiteCorpusWordsResponse:
         )
         .join(WebsiteCrawl, Website.crawl_id == WebsiteCrawl.id)
         .order_by(Website.domain)
-    ).all()
+    )
+    if website_ids is not None:
+        statement = statement.where(Website.id.in_(website_ids))
+    rows = db.execute(statement).all()
     if not rows:
         return WebsiteCorpusWordsResponse()
 

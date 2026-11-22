@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import WebsiteCrawlJob
 from app.schemas.job_queue import (
     BatchJobRetryFailure,
     BatchJobRetryResponse,
+    JobQueueStatusSummary,
 )
 from app.schemas.website_crawl import (
     WebsiteCrawlJobResponse,
@@ -285,3 +286,17 @@ def list_website_crawl_jobs(
         )
         for job in jobs
     ]
+
+
+def summarize_website_crawl_jobs(db: Session) -> JobQueueStatusSummary:
+    counts = dict(
+        db.execute(
+            select(WebsiteCrawlJob.status, func.count())
+            .where(WebsiteCrawlJob.status.in_(("running", "failed")))
+            .group_by(WebsiteCrawlJob.status)
+        ).all()
+    )
+    return JobQueueStatusSummary(
+        running_count=counts.get("running", 0),
+        failed_count=counts.get("failed", 0),
+    )

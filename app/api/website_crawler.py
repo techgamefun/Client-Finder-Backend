@@ -15,6 +15,7 @@ from app.schemas.website_crawl import (
 from app.schemas.job_queue import (
     BatchJobRetryRequest,
     BatchJobRetryResponse,
+    JobQueueStatusSummary,
 )
 from app.services.crawl_jobs import (
     create_website_crawl_job,
@@ -23,6 +24,7 @@ from app.services.crawl_jobs import (
     list_website_crawl_jobs,
     retry_failed_website_crawl_jobs,
     retry_website_crawl_job,
+    summarize_website_crawl_jobs,
 )
 
 
@@ -77,6 +79,13 @@ def list_crawl_jobs(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[WebsiteCrawlJobResponse]:
     return list_website_crawl_jobs(db, limit)
+
+
+@router.get("/jobs/summary", response_model=JobQueueStatusSummary)
+def website_crawl_job_summary(
+    db: Annotated[Session, Depends(get_db)],
+) -> JobQueueStatusSummary:
+    return summarize_website_crawl_jobs(db)
 
 
 @router.post(

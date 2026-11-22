@@ -151,3 +151,7 @@ class CompanyResponse(BaseModel):
     created_by_email: str | None = None
     contacts: list[ContactResponse]
     pagespeed_scans: list[PageSpeedScanSummary] = Field(default_factory=list)
+
+
+class CompanyNavigationSummaryResponse(BaseModel):
+    leads_needing_review: int

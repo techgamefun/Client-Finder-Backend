@@ -67,6 +67,8 @@ def client(monkeypatch):
                 "organization_name": "Test Organization",
                 "email": "admin@example.test",
                 "password": "test-password-long-enough",
+                "first_name": "Test",
+                "last_name": "Admin",
             },
         )
         assert bootstrap_response.status_code == 200

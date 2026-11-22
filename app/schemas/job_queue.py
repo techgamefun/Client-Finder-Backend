@@ -15,3 +15,8 @@ class BatchJobRetryFailure(BaseModel):
 class BatchJobRetryResponse(BaseModel):
     retried_job_ids: list[UUID]
     failures: list[BatchJobRetryFailure]
+
+
+class JobQueueStatusSummary(BaseModel):
+    running_count: int
+    failed_count: int

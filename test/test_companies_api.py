@@ -48,6 +48,44 @@ def test_list_companies(client):
     assert response.json()[0]["name"] == "Example Company"
 
 
+def test_company_navigation_summary_counts_review_leads_with_contacts(
+    client,
+):
+    with TestingSessionLocal() as db:
+        review_with_contact = Company(
+            name="Review with contact",
+            lead_status="needs_review",
+        )
+        review_without_contact = Company(
+            name="Review without contact",
+            lead_status="needs_review",
+        )
+        new_with_contact = Company(
+            name="New with contact",
+            lead_status="new",
+        )
+        db.add_all(
+            [
+                review_with_contact,
+                review_without_contact,
+                new_with_contact,
+            ]
+        )
+        db.flush()
+        db.add_all(
+            [
+                Contact(company_id=review_with_contact.id),
+                Contact(company_id=new_with_contact.id),
+            ]
+        )
+        db.commit()
+
+    response = client.get("/api/v1/companies/navigation-summary")
+
+    assert response.status_code == 200
+    assert response.json() == {"leads_needing_review": 1}
+
+
 def test_duplicate_domain_returns_conflict(client):
     payload = {
         "name": "Example Company",

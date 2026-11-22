@@ -3,7 +3,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -11,6 +11,7 @@ from app.api.deps import get_db, require_authenticated_context
 from app.models import Company, Contact, PageSpeedScan
 from app.schemas.company import (
     CompanyCreate,
+    CompanyNavigationSummaryResponse,
     CompanyResponse,
     CompanyUpdate,
     ContactCreate,
@@ -320,6 +321,27 @@ def list_companies(
     )
 
     return list(db.scalars(statement).all())
+
+
+@router.get(
+    "/navigation-summary",
+    response_model=CompanyNavigationSummaryResponse,
+)
+def company_navigation_summary(
+    db: DatabaseSession,
+) -> CompanyNavigationSummaryResponse:
+    has_contacts = exists(
+        select(Contact.id).where(Contact.company_id == Company.id)
+    )
+    count = db.scalar(
+        select(func.count(Company.id)).where(
+            Company.lead_status == "needs_review",
+            has_contacts,
+        )
+    )
+    return CompanyNavigationSummaryResponse(
+        leads_needing_review=count or 0,
+    )
 
 
 @router.get("/{company_id}", response_model=CompanyResponse)
