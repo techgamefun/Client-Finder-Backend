@@ -479,9 +479,14 @@ In another terminal, start a worker with the same environment configuration:
 .\.venv\Scripts\python.exe -m app.worker
 ```
 
-Run one or more workers to process queued crawls and PageSpeed scans. The
-worker calls the separate crawler service for crawl jobs, so
-`WEB_CRAWLER_SERVICE_URL` must point to a running crawler service.
+Run one or more workers to process queued crawls and PageSpeed scans. For one
+crawler, set `WEB_CRAWLER_SERVICE_URL`. To distribute crawls across multiple
+crawler services, set `WEB_CRAWLER_SERVICE_URLS` to a comma-separated list of
+their base URLs; `/health` suffixes are accepted and removed. The list takes
+precedence over the single-URL setting. `CRAWL_JOB_CONCURRENCY` controls the
+maximum number of queued crawls per worker (default 5, maximum 10). Set this
+to match the number of available crawler services, and account for each worker
+process applying its own limit.
 
 ### Run the worker in the API service
 
@@ -495,8 +500,8 @@ On Render's free web-service plan, the worker runs only while the web service is
 awake. Render may spin the service down after 15 minutes without inbound
 traffic; queued jobs remain in PostgreSQL and can be processed after a request
 wakes the service again. The worker's startup log says
-`Background job worker started.` Ensure
-`WEB_CRAWLER_SERVICE_URL` points to the deployed crawler service.
+`Background job worker started.` Ensure the crawler URL setting points to the
+deployed crawler service or services.
 
 ## API usage
 

@@ -1,4 +1,7 @@
 import asyncio
+from uuid import uuid4
+
+import pytest
 
 from app import main, worker
 from app.http_clients import HTTPClientPool
@@ -49,3 +52,60 @@ def test_lifespan_starts_and_stops_in_process_worker(monkeypatch):
         assert worker_stopped.is_set()
 
     asyncio.run(exercise_lifespan())
+
+
+def test_worker_runs_configured_number_of_crawls_concurrently(monkeypatch):
+    concurrency = 5
+    job_ids = [str(uuid4()) for _ in range(concurrency)]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    current_jobs = 0
+    maximum_jobs = 0
+
+    async def dequeue_crawl_job():
+        return job_ids.pop(0) if job_ids else None
+
+    async def no_job():
+        return None
+
+    async def no_work():
+        return False
+
+    async def process_crawl_job(_job_id):
+        nonlocal current_jobs, maximum_jobs
+        current_jobs += 1
+        maximum_jobs = max(maximum_jobs, current_jobs)
+        if current_jobs == concurrency:
+            started.set()
+        try:
+            await release.wait()
+        finally:
+            current_jobs -= 1
+
+    monkeypatch.setattr(worker, "validate_redis_configuration", lambda: None)
+    monkeypatch.setattr(worker, "dequeue_job", dequeue_crawl_job)
+    monkeypatch.setattr(worker, "dequeue_pagespeed_job", no_job)
+    monkeypatch.setattr(worker, "dequeue_corpus_analysis_job", no_job)
+    monkeypatch.setattr(worker, "_find_recoverable_job", lambda: None)
+    monkeypatch.setattr(worker, "_find_recoverable_pagespeed_job", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "_find_recoverable_corpus_analysis_job",
+        lambda: None,
+    )
+    monkeypatch.setattr(worker, "process_due_gmail_monitoring", no_work)
+    monkeypatch.setattr(worker, "process_due_campaign_recipient", no_work)
+    monkeypatch.setattr(worker, "process_job", process_crawl_job)
+    monkeypatch.setattr(worker.settings, "crawl_job_concurrency", concurrency)
+
+    async def exercise_worker():
+        task = asyncio.create_task(worker._run_worker_loop())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            assert maximum_jobs == concurrency
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise_worker())

@@ -1,4 +1,5 @@
 import re
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -56,6 +57,16 @@ class Settings(BaseSettings):
         default="http://localhost:8001",
         validation_alias="WEB_CRAWLER_SERVICE_URL",
     )
+    crawler_service_urls: str | None = Field(
+        default=None,
+        validation_alias="WEB_CRAWLER_SERVICE_URLS",
+    )
+    crawl_job_concurrency: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        validation_alias="CRAWL_JOB_CONCURRENCY",
+    )
     crawler_service_shared_token: str | None = Field(
         default=None,
         validation_alias="CRAWLER_SERVICE_SHARED_TOKEN",
@@ -84,6 +95,26 @@ class Settings(BaseSettings):
     @classmethod
     def validate_refresh_token_expiry(cls, value: str) -> str:
         parse_token_expiry(value, maximum_seconds=_REFRESH_TOKEN_MAX_SECONDS)
+        return value
+
+    @field_validator("crawler_service_urls")
+    @classmethod
+    def validate_crawler_service_urls(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        urls = [url.strip().rstrip("/") for url in value.split(",")]
+        if not urls or any(not url for url in urls):
+            raise ValueError(
+                "WEB_CRAWLER_SERVICE_URLS must be a comma-separated URL list.",
+            )
+        for url in urls:
+            if url.casefold().endswith("/health"):
+                url = url[:-len("/health")].rstrip("/")
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError(
+                    "Each WEB_CRAWLER_SERVICE_URLS entry must be an HTTP(S) URL.",
+                )
         return value
 
     @field_validator("vapid_subject")

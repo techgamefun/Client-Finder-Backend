@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from itertools import count
 
 import httpx
 from fastapi import HTTPException, status
@@ -25,6 +26,32 @@ CRAWLER_FAILURE_CODES = {
     "timeout",
     "blocked",
 }
+_crawler_service_index = count()
+
+
+def _crawler_service_base_urls() -> tuple[str, ...]:
+    configured_urls = settings.crawler_service_urls
+    if configured_urls is None or not configured_urls.strip():
+        return (settings.crawler_service_url.rstrip("/"),)
+
+    urls = []
+    for configured_url in configured_urls.split(","):
+        url = configured_url.strip().rstrip("/")
+        if not url:
+            continue
+        if url.casefold().endswith("/health"):
+            url = url[:-len("/health")].rstrip("/")
+        urls.append(url)
+    if not urls:
+        raise ValueError(
+            "WEB_CRAWLER_SERVICE_URLS must contain at least one URL.",
+        )
+    return tuple(dict.fromkeys(urls))
+
+
+def _next_crawler_service_url() -> str:
+    urls = _crawler_service_base_urls()
+    return urls[next(_crawler_service_index) % len(urls)]
 
 
 class CrawlData(BaseModel):
@@ -58,7 +85,7 @@ async def crawl_website(
     max_pages: int | None = None,
     max_depth: int | None = None,
 ) -> CrawlData:
-    service_url = f"{settings.crawler_service_url.rstrip('/')}/crawl"
+    service_url = f"{_next_crawler_service_url()}/crawl"
     payload: dict[str, object] = {"website_url": website_url}
     if max_pages is not None:
         payload["max_pages"] = max_pages

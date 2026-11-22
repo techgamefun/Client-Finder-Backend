@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import exists, select, update
 from starlette.concurrency import run_in_threadpool
 
+from app.config import settings
 from app.database import SessionLocal
 from app.http_clients import (
     HTTPClientPool,
@@ -554,6 +555,13 @@ async def process_job(job_id: UUID) -> None:
         reset_tenant_context(tenant_token)
 
 
+async def _process_queued_crawl_job(job_id: UUID) -> None:
+    try:
+        await process_job(job_id)
+    except Exception:
+        logger.exception("Could not process crawl job %s.", job_id)
+
+
 def _claim_pagespeed_job(
     job_id: UUID,
 ) -> tuple[list[UUID], UUID | None, str, str, TenantContext, str] | None:
@@ -763,99 +771,125 @@ async def _run_worker_loop() -> None:
     prefer_pagespeed = False
     prefer_campaign = False
     last_monitor_poll = 0.0
+    active_crawl_tasks: set[asyncio.Task[None]] = set()
 
-    while True:
-        if time.monotonic() - last_monitor_poll >= 10:
-            last_monitor_poll = time.monotonic()
-            await process_due_gmail_monitoring()
+    try:
+        while True:
+            active_crawl_tasks = {
+                task for task in active_crawl_tasks if not task.done()
+            }
+            if time.monotonic() - last_monitor_poll >= 10:
+                last_monitor_poll = time.monotonic()
+                await process_due_gmail_monitoring()
 
-        campaign_checked = False
-        if prefer_campaign:
-            prefer_campaign = False
-            campaign_checked = True
-            if await process_due_campaign_recipient():
-                continue
+            campaign_checked = False
+            if prefer_campaign:
+                prefer_campaign = False
+                campaign_checked = True
+                if await process_due_campaign_recipient():
+                    continue
 
-        job_id: UUID | None = None
-        job_type: str | None = None
-        queue_readers = (
-            (
-                (dequeue_corpus_analysis_job, "keywords"),
-                (dequeue_pagespeed_job, "pagespeed"),
-                (dequeue_job, "crawl"),
-            )
-            if prefer_pagespeed
-            else (
-                (dequeue_job, "crawl"),
-                (dequeue_pagespeed_job, "pagespeed"),
-                (dequeue_corpus_analysis_job, "keywords"),
-            )
-        )
-        prefer_pagespeed = not prefer_pagespeed
-        for dequeue, queue_type in (
-            queue_readers if redis_enabled else ()
-        ):
-            try:
-                queued_id = await dequeue()
-            except RedisQueueError:
-                logger.exception("Could not poll the Redis %s queue.", queue_type)
-                redis_enabled = False
-                break
-            if queued_id is None:
-                continue
-            try:
-                job_id = UUID(queued_id)
-                job_type = queue_type
-                break
-            except ValueError:
-                logger.error(
-                    "Discarding invalid %s job ID from Redis.",
-                    queue_type,
-                )
-
-        if job_id is None:
-            recovery_readers = (
+            job_id: UUID | None = None
+            job_type: str | None = None
+            queue_readers = (
                 (
-                    (_find_recoverable_corpus_analysis_job, "keywords"),
-                    (_find_recoverable_pagespeed_job, "pagespeed"),
-                    (_find_recoverable_job, "crawl"),
+                    (dequeue_corpus_analysis_job, "keywords"),
+                    (dequeue_pagespeed_job, "pagespeed"),
+                    (dequeue_job, "crawl"),
                 )
                 if prefer_pagespeed
                 else (
-                    (_find_recoverable_job, "crawl"),
-                    (_find_recoverable_pagespeed_job, "pagespeed"),
-                    (_find_recoverable_corpus_analysis_job, "keywords"),
+                    (dequeue_job, "crawl"),
+                    (dequeue_pagespeed_job, "pagespeed"),
+                    (dequeue_corpus_analysis_job, "keywords"),
                 )
             )
-            for recover, recovery_type in recovery_readers:
-                try:
-                    job_id = await run_in_threadpool(recover)
-                except Exception:
-                    logger.exception(
-                        "Could not recover pending %s jobs.",
-                        recovery_type,
-                    )
+            prefer_pagespeed = not prefer_pagespeed
+            for dequeue, queue_type in (
+                queue_readers if redis_enabled else ()
+            ):
+                if (
+                    queue_type == "crawl"
+                    and len(active_crawl_tasks)
+                    >= settings.crawl_job_concurrency
+                ):
                     continue
-                if job_id is not None:
-                    job_type = recovery_type
+                try:
+                    queued_id = await dequeue()
+                except RedisQueueError:
+                    logger.exception("Could not poll the Redis %s queue.", queue_type)
+                    redis_enabled = False
                     break
+                if queued_id is None:
+                    continue
+                try:
+                    job_id = UUID(queued_id)
+                    job_type = queue_type
+                    break
+                except ValueError:
+                    logger.error(
+                        "Discarding invalid %s job ID from Redis.",
+                        queue_type,
+                    )
 
-        if job_id is None:
-            if not campaign_checked and await process_due_campaign_recipient():
+            if job_id is None:
+                recovery_readers = (
+                    (
+                        (_find_recoverable_corpus_analysis_job, "keywords"),
+                        (_find_recoverable_pagespeed_job, "pagespeed"),
+                        (_find_recoverable_job, "crawl"),
+                    )
+                    if prefer_pagespeed
+                    else (
+                        (_find_recoverable_job, "crawl"),
+                        (_find_recoverable_pagespeed_job, "pagespeed"),
+                        (_find_recoverable_corpus_analysis_job, "keywords"),
+                    )
+                )
+                for recover, recovery_type in recovery_readers:
+                    if (
+                        recovery_type == "crawl"
+                        and len(active_crawl_tasks)
+                        >= settings.crawl_job_concurrency
+                    ):
+                        continue
+                    try:
+                        job_id = await run_in_threadpool(recover)
+                    except Exception:
+                        logger.exception(
+                            "Could not recover pending %s jobs.",
+                            recovery_type,
+                        )
+                        continue
+                    if job_id is not None:
+                        job_type = recovery_type
+                        break
+
+            if job_id is None:
+                if not campaign_checked and await process_due_campaign_recipient():
+                    continue
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 continue
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            continue
 
-        prefer_campaign = True
-        try:
-            if job_type == "pagespeed":
-                await process_pagespeed_job(job_id)
-            elif job_type == "keywords":
-                await process_corpus_analysis_job(job_id)
-            else:
-                await process_job(job_id)
-        except Exception:
-            logger.exception("Could not process %s job %s.", job_type, job_id)
+            prefer_campaign = True
+            if job_type == "crawl":
+                active_crawl_tasks.add(
+                    asyncio.create_task(_process_queued_crawl_job(job_id))
+                )
+                continue
+
+            try:
+                if job_type == "pagespeed":
+                    await process_pagespeed_job(job_id)
+                elif job_type == "keywords":
+                    await process_corpus_analysis_job(job_id)
+            except Exception:
+                logger.exception("Could not process %s job %s.", job_type, job_id)
+    finally:
+        for task in active_crawl_tasks:
+            task.cancel()
+        if active_crawl_tasks:
+            await asyncio.gather(*active_crawl_tasks, return_exceptions=True)
 
 
 async def run_worker() -> None:
