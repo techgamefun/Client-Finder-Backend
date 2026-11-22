@@ -13,6 +13,7 @@ from app.models import (
     Contact,
     EmailCampaign,
     EmailCampaignRecipient,
+    OrganizationMembership,
     PageSpeedScanJob,
     SearchKeyword,
     User,
@@ -826,7 +827,12 @@ def build_overview(
             (
                 UserProviderCredential.user_id == owner_user_id
                 if owner_user_id is not None
-                else User.organization_id == organization_id
+                else User.id.in_(
+                    select(OrganizationMembership.user_id).where(
+                        OrganizationMembership.organization_id == organization_id,
+                        OrganizationMembership.is_active.is_(True),
+                    )
+                )
             ),
         )
     )
@@ -1105,7 +1111,7 @@ def build_admin_overview(
         select(
             User.id,
             User.email,
-            User.role,
+            OrganizationMembership.role,
             User.is_active,
             _count_range(
                 SearchKeyword,
@@ -1151,8 +1157,12 @@ def build_admin_overview(
             ).label("crawls_completed"),
             emails_sent.label("emails_sent"),
         )
-        .where(User.organization_id == organization_id)
-        .order_by(User.role, User.email)
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .where(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.is_active.is_(True),
+        )
+        .order_by(OrganizationMembership.role, User.email)
     ).all()
     organization_overview = build_overview(
         db,
@@ -1204,17 +1214,21 @@ def build_member_activity(
             detail="tz must be a valid IANA timezone.",
         ) from exc
 
-    member = db.scalar(
-        select(User).where(
+    member_row = db.execute(
+        select(User, OrganizationMembership)
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .where(
             User.id == user_id,
-            User.organization_id == context.organization_id,
+            OrganizationMembership.organization_id == context.organization_id,
+            OrganizationMembership.is_active.is_(True),
         )
-    )
-    if member is None:
+    ).one_or_none()
+    if member_row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Organization member not found.",
         )
+    member, _membership = member_row
 
     current_time = _as_utc(now or _utc_now()).astimezone(user_timezone)
     end_date = current_time.date()

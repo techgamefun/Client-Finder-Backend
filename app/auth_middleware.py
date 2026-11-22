@@ -114,12 +114,19 @@ def _validate_access_token(
     token: str,
 ) -> TenantContext | None:
     with session_factory() as db:
+        tenant_context = db.info.pop("tenant_context", None)
+        tenant_token = set_tenant_context(None)
         checkout_started_at = perf_counter()
-        db.connection()
-        record_database_checkout(
-            (perf_counter() - checkout_started_at) * 1000,
-        )
-        return validate_access_token(token, db)
+        try:
+            db.connection()
+            record_database_checkout(
+                (perf_counter() - checkout_started_at) * 1000,
+            )
+            return validate_access_token(token, db)
+        finally:
+            reset_tenant_context(tenant_token)
+            if tenant_context is not None:
+                db.info["tenant_context"] = tenant_context
 
 
 def _add_server_timing(

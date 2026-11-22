@@ -17,6 +17,7 @@ from app.models import (
     EmailCampaignRecipient,
     User,
     UserGmailAssignment,
+    OrganizationMembership,
 )
 from app.services.campaign_service import maybe_complete_campaign
 from app.services.email_suppression import add_suppression, normalize_email
@@ -65,14 +66,20 @@ def _claim_monitor_account() -> tuple[UUID, TenantContext] | None:
             db.commit()
             return None
         assignment = db.execute(
-            select(UserGmailAssignment, User)
+            select(UserGmailAssignment, User, OrganizationMembership)
             .join(User, User.id == UserGmailAssignment.user_id)
+            .join(
+                OrganizationMembership,
+                OrganizationMembership.user_id == User.id,
+            )
             .where(
                 UserGmailAssignment.gmail_account_id == account.id,
                 UserGmailAssignment.org_id == account.org_id,
+                OrganizationMembership.organization_id == account.org_id,
+                OrganizationMembership.is_active.is_(True),
                 User.is_active.is_(True),
             )
-            .order_by(User.role.desc(), User.email)
+            .order_by(OrganizationMembership.role.desc(), User.email)
             .limit(1)
         ).first()
         if assignment is None:
@@ -80,7 +87,7 @@ def _claim_monitor_account() -> tuple[UUID, TenantContext] | None:
             account.last_monitor_error = "No active user is assigned to this Gmail account."
             db.commit()
             return None
-        _, user = assignment
+        _, user, membership = assignment
         account.last_monitor_at = now
         account.last_monitor_error = None
         delivery = (
@@ -89,7 +96,7 @@ def _claim_monitor_account() -> tuple[UUID, TenantContext] | None:
                 organization_id=account.org_id,
                 user_id=user.id,
                 email=user.email,
-                role=user.role,
+                role=membership.role,
             ),
         )
         db.commit()

@@ -44,10 +44,23 @@ class OrganizationRegistration(CredentialsInput):
         return normalized
 
 
-class OrganizationUserCreate(CredentialsInput):
+class OrganizationInvitationCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    role: Role = "user"
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized.count("@") != 1 or any(char.isspace() for char in normalized):
+            raise ValueError("Enter a valid email address.")
+        return normalized
+
+
+class OrganizationInvitationAccept(BaseModel):
+    password: str = Field(min_length=12, max_length=256)
     first_name: str | None = Field(default=None, max_length=100)
     last_name: str | None = Field(default=None, max_length=100)
-    role: Role = "user"
 
     @field_validator("first_name", "last_name")
     @classmethod
@@ -56,8 +69,42 @@ class OrganizationUserCreate(CredentialsInput):
         return normalized or None
 
 
+class OrganizationInvitationResponse(BaseModel):
+    invitation_url: str
+    email: str
+    role: Role
+    expires_at: datetime
+
+
+class OrganizationInvitationPreview(BaseModel):
+    organization_name: str
+    email: str
+    role: Role
+    expires_at: datetime
+
+
+class OrganizationInvitationListItem(BaseModel):
+    id: UUID
+    email: str
+    role: Role
+    created_at: datetime
+    expires_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrganizationOption(BaseModel):
+    id: UUID
+    name: str
+    role: Role
+
+
 class OrganizationUserRoleUpdate(BaseModel):
     role: Role
+
+
+class OrganizationSelection(BaseModel):
+    organization_id: UUID
 
 
 class OrganizationProfileUpdate(BaseModel):
@@ -107,6 +154,7 @@ class AuthUserResponse(BaseModel):
 
 class AuthSessionResponse(BaseModel):
     user: AuthUserResponse
+    organizations: list[OrganizationOption]
     organization_id: UUID
     organization_name: str
     organization_description: str | None

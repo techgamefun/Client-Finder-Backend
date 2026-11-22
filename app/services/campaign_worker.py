@@ -14,6 +14,7 @@ from app.models import (
     EmailCampaign,
     EmailCampaignRecipient,
     EmailTemplate,
+    OrganizationMembership,
     User,
 )
 from app.services.campaign_service import (
@@ -130,17 +131,24 @@ def _claim_due_campaign_recipient() -> CampaignRecipientDelivery | None:
                 recipient.updated_at = now
                 db.commit()
                 return None
-        user = (
-            db.scalar(
-                select(User).where(
-                    User.id == campaign.created_by,
-                    User.organization_id == campaign.org_id,
+        user_membership = (
+            db.execute(
+                select(User, OrganizationMembership)
+                .join(
+                    OrganizationMembership,
+                    OrganizationMembership.user_id == User.id,
                 )
-            )
+                .where(
+                    User.id == campaign.created_by,
+                    OrganizationMembership.organization_id == campaign.org_id,
+                    OrganizationMembership.is_active.is_(True),
+                    User.is_active.is_(True),
+                )
+            ).one_or_none()
             if campaign is not None
             else None
         )
-        if campaign is None or user is None:
+        if campaign is None or user_membership is None:
             recipient.status = "failed"
             recipient.error_message = (
                 "The campaign owner or campaign could not be loaded."
@@ -151,6 +159,7 @@ def _claim_due_campaign_recipient() -> CampaignRecipientDelivery | None:
             db.commit()
             return None
 
+        user, membership = user_membership
         recipient.status = "processing"
         recipient.attempts += 1
         recipient.updated_at = now
@@ -160,7 +169,7 @@ def _claim_due_campaign_recipient() -> CampaignRecipientDelivery | None:
                 organization_id=campaign.org_id,
                 user_id=user.id,
                 email=user.email,
-                role=user.role,
+                role=membership.role,
             ),
         )
         db.commit()
@@ -204,11 +213,23 @@ def _deliver_campaign_recipient(delivery: CampaignRecipientDelivery) -> None:
                 db.commit()
                 return
 
-            user = db.scalar(
-                select(User).where(
-                    User.id == campaign.created_by,
-                    User.organization_id == campaign.org_id,
+            user_membership = db.execute(
+                select(User, OrganizationMembership)
+                .join(
+                    OrganizationMembership,
+                    OrganizationMembership.user_id == User.id,
                 )
+                .where(
+                    User.id == campaign.created_by,
+                    OrganizationMembership.organization_id == campaign.org_id,
+                    OrganizationMembership.is_active.is_(True),
+                    User.is_active.is_(True),
+                )
+            ).one_or_none()
+            user, membership = (
+                user_membership
+                if user_membership is not None
+                else (None, None)
             )
             step_template_id = (
                 campaign.template_id
@@ -225,7 +246,7 @@ def _deliver_campaign_recipient(delivery: CampaignRecipientDelivery) -> None:
                     EmailTemplate.org_id == campaign.org_id,
                 )
             )
-            if user is None or not user.is_active:
+            if user is None or membership is None:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="The campaign owner is no longer active.",
@@ -244,7 +265,7 @@ def _deliver_campaign_recipient(delivery: CampaignRecipientDelivery) -> None:
                 db,
                 organization_id=campaign.org_id,
                 user_email=user.email,
-                role=user.role,
+                role=membership.role,
                 email=sender_email,
             )
             lead_context = build_lead_context(

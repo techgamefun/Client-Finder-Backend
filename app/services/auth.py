@@ -4,7 +4,7 @@ import hmac
 import json
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, Response, status
@@ -13,7 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import parse_token_expiry, settings
-from app.models import AuthRefreshSession, Organization, User
+from app.models import (
+    AuthRefreshSession,
+    Organization,
+    OrganizationInvitation,
+    OrganizationMembership,
+    User,
+)
 from app.schemas.auth import CredentialsInput, OrganizationRegistration
 from app.services.excluded_domains import seed_system_excluded_domains
 from app.tenant_context import TenantContext
@@ -87,25 +93,31 @@ def register_organization(
     )
 
 
-def create_organization_user(
+def create_organization_membership(
     *,
     organization_id: UUID,
-    email: str,
-    password: str,
+    user_id: UUID,
     role: str,
-    first_name: str | None,
-    last_name: str | None,
     db: Session,
-) -> User:
-    return _create_user(
-        db,
-        organization_id=organization_id,
-        email=email,
-        password=password,
-        role=role,
-        first_name=first_name,
-        last_name=last_name,
+) -> OrganizationMembership:
+    membership = db.scalar(
+        select(OrganizationMembership).where(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.user_id == user_id,
+        )
     )
+    if membership is None:
+        membership = OrganizationMembership(
+            organization_id=organization_id,
+            user_id=user_id,
+            role=role,
+        )
+        db.add(membership)
+    else:
+        membership.role = role
+        membership.is_active = True
+        membership.joined_at = datetime.now(timezone.utc)
+    return membership
 
 
 def _create_user(
@@ -128,6 +140,13 @@ def _create_user(
     )
     db.add(user)
     try:
+        db.flush()
+        create_organization_membership(
+            organization_id=organization_id,
+            user_id=user.id,
+            role=role,
+            db=db,
+        )
         db.commit()
         db.refresh(user)
     except IntegrityError as exc:
@@ -189,7 +208,25 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
-def create_auth_tokens(user: User, db: Session) -> tuple[str, str]:
+def create_auth_tokens(
+    user: User,
+    db: Session,
+    *,
+    organization_id: UUID | None = None,
+) -> tuple[str, str]:
+    active_organization_id = organization_id or user.organization_id
+    membership = db.scalar(
+        select(OrganizationMembership).where(
+            OrganizationMembership.user_id == user.id,
+            OrganizationMembership.organization_id == active_organization_id,
+            OrganizationMembership.is_active.is_(True),
+        )
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not an active member of this organization.",
+        )
     issued_at = int(time.time())
     refresh_id = secrets.token_urlsafe(32)
     access_duration = access_token_duration_seconds()
@@ -214,11 +251,13 @@ def create_auth_tokens(user: User, db: Session) -> tuple[str, str]:
     return (
         _issue_token(
             user,
+            organization_id=active_organization_id,
             token_type="access",
             expires_at=issued_at + access_duration,
         ),
         _issue_token(
             user,
+            organization_id=active_organization_id,
             token_type="refresh",
             expires_at=issued_at + refresh_duration,
             token_id=refresh_id,
@@ -226,7 +265,10 @@ def create_auth_tokens(user: User, db: Session) -> tuple[str, str]:
     )
 
 
-def rotate_refresh_token(token: str, db: Session) -> tuple[User, str, str]:
+def rotate_refresh_token(
+    token: str,
+    db: Session,
+) -> tuple[User, UUID, str, str]:
     payload = _decode_token(token, expected_type="refresh")
     token_id = payload.get("jti")
     if not isinstance(token_id, str):
@@ -250,17 +292,26 @@ def rotate_refresh_token(token: str, db: Session) -> tuple[User, str, str]:
         db.rollback()
         raise _invalid_refresh_token()
 
-    user = _user_from_token_payload(payload, db)
+    token_context = _context_from_token_payload(payload, db)
+    if token_context is None:
+        db.rollback()
+        raise _invalid_refresh_token()
+    user = db.get(User, token_context.user_id)
     if user is None:
         db.rollback()
         raise _invalid_refresh_token()
-    access_token, refresh_token = create_auth_tokens(user, db)
-    return user, access_token, refresh_token
+    access_token, refresh_token = create_auth_tokens(
+        user,
+        db,
+        organization_id=token_context.organization_id,
+    )
+    return user, token_context.organization_id, access_token, refresh_token
 
 
 def _issue_token(
     user: User,
     *,
+    organization_id: UUID,
     token_type: str,
     expires_at: int,
     token_id: str | None = None,
@@ -268,7 +319,7 @@ def _issue_token(
     secret = _token_secret(token_type)
     payload = {
         "sub": str(user.id),
-        "org": str(user.organization_id),
+        "org": str(organization_id),
         "ver": user.auth_version,
         "exp": expires_at,
     }
@@ -299,15 +350,7 @@ def validate_access_token(token: str, db: Session) -> TenantContext | None:
         if exc.status_code == status.HTTP_401_UNAUTHORIZED:
             return None
         raise
-    user = _user_from_token_payload(payload, db)
-    if user is None:
-        return None
-    return TenantContext(
-        organization_id=user.organization_id,
-        user_id=user.id,
-        email=user.email,
-        role=user.role,
-    )
+    return _context_from_token_payload(payload, db)
 
 
 def revoke_refresh_token(token: str, db: Session) -> None:
@@ -367,10 +410,10 @@ def _decode_token(
         raise _invalid_refresh_token() from exc
 
 
-def _user_from_token_payload(
+def _context_from_token_payload(
     payload: dict[str, object],
     db: Session,
-) -> User | None:
+) -> TenantContext | None:
     try:
         user_id = UUID(str(payload["sub"]))
         organization_id = UUID(str(payload["org"]))
@@ -381,11 +424,24 @@ def _user_from_token_payload(
     if (
         user is None
         or not user.is_active
-        or user.organization_id != organization_id
         or user.auth_version != auth_version
     ):
         return None
-    return user
+    membership = db.scalar(
+        select(OrganizationMembership).where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.is_active.is_(True),
+        )
+    )
+    if membership is None:
+        return None
+    return TenantContext(
+        organization_id=organization_id,
+        user_id=user.id,
+        email=user.email,
+        role=membership.role,
+    )
 
 
 def set_auth_cookies(

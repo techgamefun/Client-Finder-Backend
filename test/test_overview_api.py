@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from urllib.parse import parse_qs, urlsplit
 
 from app import main
 from conftest import TestingSessionLocal
@@ -9,6 +10,7 @@ from app.models import (
     Company,
     Contact,
     Organization,
+    OrganizationMembership,
     SearchKeyword,
     User,
     Website,
@@ -17,6 +19,26 @@ from app.models import (
 )
 from app.services import overview as overview_service
 from app.tenant_context import TenantContext
+
+
+def _invite_member(client: TestClient, email: str, password: str) -> str:
+    invitation = client.post(
+        "/api/v1/auth/invitations",
+        json={"email": email, "role": "user"},
+    )
+    assert invitation.status_code == 201
+    token = parse_qs(urlsplit(invitation.json()["invitation_url"]).query)["token"][0]
+    with TestClient(main.app) as invitee:
+        accepted = invitee.post(
+            f"/api/v1/auth/invitations/{token}/accept",
+            json={
+                "first_name": "Overview",
+                "last_name": "Member",
+                "password": password,
+            },
+        )
+    assert accepted.status_code == 200
+    return accepted.json()["user"]["id"]
 
 
 def test_overview_empty_organization(client):
@@ -188,6 +210,13 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
         )
         db.add(other_user)
         db.flush()
+        db.add(
+            OrganizationMembership(
+                organization_id=context.organization_id,
+                user_id=other_user.id,
+                role="user",
+            )
+        )
         db.add_all(
             [
                 SearchKeyword(
@@ -266,15 +295,11 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
 
 
 def test_admin_overview_endpoint_requires_admin(client):
-    member = client.post(
-        "/api/v1/auth/users",
-        json={
-            "email": "overview-member@example.test",
-            "password": "overview-member-password",
-            "role": "user",
-        },
+    member_id = _invite_member(
+        client,
+        "overview-member@example.test",
+        "overview-member-password",
     )
-    assert member.status_code == 201
 
     with TestClient(main.app) as member_client:
         login = member_client.post(
@@ -289,7 +314,7 @@ def test_admin_overview_endpoint_requires_admin(client):
             "/api/v1/overview/admin?range=30d&tz=UTC"
         )
         member_activity = member_client.get(
-            f"/api/v1/overview/admin/users/{member.json()['id']}/activity"
+            f"/api/v1/overview/admin/users/{member_id}/activity"
         )
 
     assert response.status_code == 403
@@ -313,6 +338,13 @@ def test_admin_member_activity_returns_daily_service_counts(
         )
         db.add(member)
         db.flush()
+        db.add(
+            OrganizationMembership(
+                organization_id=context.organization_id,
+                user_id=member.id,
+                role="user",
+            )
+        )
         company = Company(
             name="Activity Company",
             domain="activity.example",

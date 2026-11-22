@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    select,
     String,
     Table,
     Text,
@@ -95,6 +96,106 @@ class User(Base):
         CheckConstraint(
             "role IN ('admin', 'user')",
             name="ck_users_role_allowed",
+        ),
+    )
+
+
+class OrganizationMembership(Base):
+    __tablename__ = "organization_memberships"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "user_id",
+            name="uq_organization_memberships_org_user",
+        ),
+        CheckConstraint(
+            "role IN ('admin', 'user')",
+            name="ck_organization_memberships_role_allowed",
+        ),
+    )
+
+
+class OrganizationInvitation(Base):
+    __tablename__ = "organization_invitations"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+    )
+    invited_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('admin', 'user')",
+            name="ck_organization_invitations_role_allowed",
+        ),
+        Index(
+            "ix_organization_invitations_org_email",
+            "organization_id",
+            "email",
         ),
     )
 
@@ -1563,6 +1664,20 @@ def _scope_tenant_queries(execute_state: Any) -> None:
 
     statement = execute_state.statement
     if execute_state.is_select:
+        organization_id = context.organization_id
+        statement = statement.options(
+            with_loader_criteria(
+                User,
+                lambda entity: entity.id.in_(
+                    select(OrganizationMembership.user_id).where(
+                        OrganizationMembership.organization_id
+                        == organization_id,
+                        OrganizationMembership.is_active.is_(True),
+                    )
+                ),
+                include_aliases=True,
+            )
+        )
         for model in _TENANT_MODELS:
             organization_id = context.organization_id
             statement = statement.options(
@@ -1586,7 +1701,17 @@ def _scope_tenant_queries(execute_state: Any) -> None:
 
     mapper = execute_state.bind_arguments.get("mapper")
     model = mapper.class_ if mapper is not None else None
-    if model in _TENANT_MODELS:
+    if model is User:
+        execute_state.statement = statement.where(
+            model.id.in_(
+                select(OrganizationMembership.user_id).where(
+                    OrganizationMembership.organization_id
+                    == context.organization_id,
+                    OrganizationMembership.is_active.is_(True),
+                )
+            )
+        )
+    elif model in _TENANT_MODELS:
         execute_state.statement = statement.where(
             model.organization_id == context.organization_id
         )

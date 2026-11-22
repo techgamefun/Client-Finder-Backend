@@ -1,6 +1,7 @@
 
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import pytest
@@ -36,6 +37,32 @@ TestingSessionLocal = sessionmaker(
     autoflush=False,
     expire_on_commit=False,
 )
+
+
+def create_invited_member(
+    admin_client: TestClient,
+    *,
+    email: str,
+    password: str,
+    role: str = "user",
+) -> dict:
+    invitation = admin_client.post(
+        "/api/v1/auth/invitations",
+        json={"email": email, "role": role},
+    )
+    assert invitation.status_code == 201
+    token = parse_qs(urlparse(invitation.json()["invitation_url"]).query)["token"][0]
+    with TestClient(app) as invitee:
+        accepted = invitee.post(
+            f"/api/v1/auth/invitations/{token}/accept",
+            json={
+                "first_name": "Test",
+                "last_name": "Member",
+                "password": password,
+            },
+        )
+    assert accepted.status_code == 200
+    return accepted.json()
 
 
 @pytest.fixture

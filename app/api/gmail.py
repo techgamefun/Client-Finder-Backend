@@ -25,6 +25,7 @@ from app.models import (
     ConnectedGmailAccount,
     EmailCampaignDelivery,
     EmailCampaignRecipient,
+    OrganizationMembership,
     User,
     UserGmailAssignment,
 )
@@ -466,9 +467,12 @@ def assign_gmail_account(
             detail="The connected Gmail account was not found.",
         )
     user = db.scalar(
-        select(User).where(
+        select(User)
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .where(
             User.id == payload.user_id,
-            User.organization_id == context.organization_id,
+            OrganizationMembership.organization_id == context.organization_id,
+            OrganizationMembership.is_active.is_(True),
             User.is_active.is_(True),
         )
     )
@@ -526,10 +530,13 @@ def _validate_admin_state(
     db: Session,
 ) -> User:
     admin = db.scalar(
-        select(User).where(
+        select(User)
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .where(
             User.id == oauth_state.admin_user_id,
-            User.organization_id == oauth_state.org_id,
-            User.role == "admin",
+            OrganizationMembership.organization_id == oauth_state.org_id,
+            OrganizationMembership.role == "admin",
+            OrganizationMembership.is_active.is_(True),
             User.is_active.is_(True),
         )
     )

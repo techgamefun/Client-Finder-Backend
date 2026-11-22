@@ -1,3 +1,5 @@
+from urllib.parse import parse_qs, urlparse
+
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -8,6 +10,35 @@ from app.services.auth import (
     access_token_duration_seconds,
     refresh_token_duration_seconds,
 )
+
+
+def _invite_user(
+    admin_client: TestClient,
+    *,
+    email: str,
+    password: str,
+    first_name: str,
+    last_name: str,
+    role: str = "user",
+):
+    invitation = admin_client.post(
+        "/api/v1/auth/invitations",
+        json={"email": email, "role": role},
+    )
+    assert invitation.status_code == 201
+    invitation_url = urlparse(invitation.json()["invitation_url"])
+    token = parse_qs(invitation_url.query)["token"][0]
+    with TestClient(app) as invitee:
+        accepted = invitee.post(
+            f"/api/v1/auth/invitations/{token}/accept",
+            json={
+                "first_name": first_name,
+                "last_name": last_name,
+                "password": password,
+            },
+        )
+    assert accepted.status_code == 200
+    return accepted
 
 
 def test_refresh_rotates_tokens_and_revokes_the_previous_refresh_token(client):
@@ -157,15 +188,13 @@ def test_password_change_revokes_other_sessions(client):
 
 
 def test_organizations_cannot_read_or_overwrite_each_others_data(client):
-    first_member = client.post(
-        "/api/v1/auth/users",
-        json={
-            "email": "first-member@example.test",
-            "password": "member-password-long",
-            "role": "user",
-        },
+    first_member = _invite_user(
+        client,
+        email="first-member@example.test",
+        password="member-password-long",
+        first_name="First",
+        last_name="Member",
     )
-    assert first_member.status_code == 201
 
     first_company = client.post(
         "/api/v1/companies",
@@ -196,7 +225,7 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
             == "Second tenant profile"
         )
         cross_tenant_role_change = second_client.patch(
-            f"/api/v1/auth/users/{first_member.json()['id']}/role",
+            f"/api/v1/auth/users/{first_member.json()['user']['id']}/role",
             json={"role": "admin"},
         )
         assert cross_tenant_role_change.status_code == 404
@@ -240,20 +269,16 @@ def test_organization_description_member_names_and_admin_role_changes(client):
         == "A practical description."
     )
 
-    created = client.post(
-        "/api/v1/auth/users",
-        json={
-            "first_name": "Taylor",
-            "last_name": "Reed",
-            "email": "taylor.reed@example.test",
-            "password": "member-password-long",
-            "role": "user",
-        },
+    created = _invite_user(
+        client,
+        first_name="Taylor",
+        last_name="Reed",
+        email="taylor.reed@example.test",
+        password="member-password-long",
     )
-    assert created.status_code == 201
-    assert created.json()["first_name"] == "Taylor"
-    assert created.json()["last_name"] == "Reed"
-    user_id = created.json()["id"]
+    assert created.json()["user"]["first_name"] == "Taylor"
+    assert created.json()["user"]["last_name"] == "Reed"
+    user_id = created.json()["user"]["id"]
 
     promoted = client.patch(
         f"/api/v1/auth/users/{user_id}/role",
@@ -278,19 +303,15 @@ def test_organization_description_member_names_and_admin_role_changes(client):
 
 
 def test_user_roles_and_provider_keys_are_scoped(client):
-    created = client.post(
-        "/api/v1/auth/users",
-        json={
-            "first_name": "Morgan",
-            "last_name": "Lane",
-            "email": "member@example.test",
-            "password": "member-password-long",
-            "role": "user",
-        },
+    created = _invite_user(
+        client,
+        first_name="Morgan",
+        last_name="Lane",
+        email="member@example.test",
+        password="member-password-long",
     )
-    assert created.status_code == 201
-    assert created.json()["first_name"] == "Morgan"
-    assert created.json()["last_name"] == "Lane"
+    assert created.json()["user"]["first_name"] == "Morgan"
+    assert created.json()["user"]["last_name"] == "Lane"
 
     with TestClient(app) as member_client:
         login = member_client.post(
@@ -304,7 +325,7 @@ def test_user_roles_and_provider_keys_are_scoped(client):
         assert member_client.get("/api/v1/auth/users").status_code == 403
         assert (
             member_client.patch(
-                f"/api/v1/auth/users/{created.json()['id']}/role",
+                f"/api/v1/auth/users/{created.json()['user']['id']}/role",
                 json={"role": "admin"},
             ).status_code
             == 403

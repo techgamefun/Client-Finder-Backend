@@ -19,7 +19,7 @@ from app.models import (
 )
 from app.services import gmail
 from app.api import email_templates as email_templates_api
-from conftest import TestingSessionLocal
+from conftest import TestingSessionLocal, create_invited_member
 
 
 def _session_ids(client):
@@ -124,15 +124,11 @@ def test_email_template_crud_and_organization_scoping(client):
         f"/api/v1/orgs/{uuid4()}/templates"
     ).status_code == 404
 
-    created_user = client.post(
-        "/api/v1/auth/users",
-        json={
-            "email": "template-member@example.test",
-            "password": "template-member-password-long",
-            "role": "user",
-        },
+    create_invited_member(
+        client,
+        email="template-member@example.test",
+        password="template-member-password-long",
     )
-    assert created_user.status_code == 201
     with TestClient(main.app) as member_client:
         login = member_client.post(
             "/api/v1/auth/login",

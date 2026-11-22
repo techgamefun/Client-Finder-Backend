@@ -20,6 +20,26 @@ from app.tenant_context import TenantContext
 from conftest import TestingSessionLocal
 
 
+def _invite_member(client: TestClient, email: str, password: str) -> str:
+    invitation = client.post(
+        "/api/v1/auth/invitations",
+        json={"email": email, "role": "user"},
+    )
+    assert invitation.status_code == 201
+    token = parse_qs(urlsplit(invitation.json()["invitation_url"]).query)["token"][0]
+    with TestClient(main.app) as invitee:
+        accepted = invitee.post(
+            f"/api/v1/auth/invitations/{token}/accept",
+            json={
+                "first_name": "Test",
+                "last_name": "Member",
+                "password": password,
+            },
+        )
+    assert accepted.status_code == 200
+    return accepted.json()["user"]["id"]
+
+
 def test_gmail_body_decoder_preserves_unpadded_base64_tail():
     encoded = base64.urlsafe_b64encode(b"Hi").decode("ascii").rstrip("=")
 
@@ -174,16 +194,11 @@ def test_gmail_oauth_connect_and_admin_assignment(client, monkeypatch):
         )
         gmail_account_id = account.id
 
-    created_user = client.post(
-        "/api/v1/auth/users",
-        json={
-            "email": "gmail-user@example.test",
-            "password": "gmail-user-password-long",
-            "role": "user",
-        },
+    user_id = _invite_member(
+        client,
+        "gmail-user@example.test",
+        "gmail-user-password-long",
     )
-    assert created_user.status_code == 201
-    user_id = created_user.json()["id"]
     assignment = client.post(
         f"/api/v1/gmail/accounts/{gmail_account_id}/assignments",
         json={"user_id": user_id},
@@ -472,15 +487,11 @@ def test_gmail_oauth_and_assignment_require_admin(client, monkeypatch):
     _configure_google_oauth(monkeypatch)
     admin_session = client.get("/api/v1/auth/me").json()
     account_id = uuid4()
-    user = client.post(
-        "/api/v1/auth/users",
-        json={
-            "email": "gmail-member@example.test",
-            "password": "gmail-member-password-long",
-            "role": "user",
-        },
+    user_id = _invite_member(
+        client,
+        "gmail-member@example.test",
+        "gmail-member-password-long",
     )
-    assert user.status_code == 201
 
     with TestClient(main.app) as member_client:
         login = member_client.post(
@@ -495,7 +506,7 @@ def test_gmail_oauth_and_assignment_require_admin(client, monkeypatch):
             "/api/v1/auth/google/login",
             params={
                 "org_id": admin_session["organization_id"],
-                "admin_user_id": user.json()["id"],
+                "admin_user_id": user_id,
             },
             headers={"referer": "http://localhost:3000/settings"},
             follow_redirects=False,
@@ -503,7 +514,7 @@ def test_gmail_oauth_and_assignment_require_admin(client, monkeypatch):
         assert oauth_start.status_code == 403
         assignment = member_client.post(
             f"/api/v1/gmail/accounts/{account_id}/assignments",
-            json={"user_id": user.json()["id"]},
+            json={"user_id": user_id},
         )
         assert assignment.status_code == 403
 

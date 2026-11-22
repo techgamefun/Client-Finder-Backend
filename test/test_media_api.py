@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.api import media as media_api
+from conftest import create_invited_member
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + (b"\x00" * 16)
@@ -89,15 +90,11 @@ def test_admin_can_upload_and_remove_organization_branding(client, monkeypatch):
 
 
 def test_organization_image_upload_requires_an_admin(client, monkeypatch):
-    member = client.post(
-        "/api/v1/auth/users",
-        json={
-            "email": "media-member@example.test",
-            "password": "media-member-password",
-            "role": "user",
-        },
+    create_invited_member(
+        client,
+        email="media-member@example.test",
+        password="media-member-password",
     )
-    assert member.status_code == 201
 
     upload_calls: list[str] = []
 

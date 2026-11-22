@@ -21,6 +21,8 @@ def test_token_database_lookup_runs_off_the_event_loop(monkeypatch):
     )
 
     class SessionContext:
+        info = {}
+
         def __enter__(self):
             return self
 
