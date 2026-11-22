@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_db, require_authenticated_context
 from app.models import Company, Contact, PageSpeedScan
@@ -43,7 +44,7 @@ from app.services.normalization import (
     normalize_domain,
 )
 from app.services.pagespeed_jobs import get_pagespeed_scan_job
-from app.services.pagespeed import PageSpeedError, scan_pagespeed
+from app.services.pagespeed import PageSpeedError, PageSpeedScanData, scan_pagespeed
 from app.services.application_settings import get_user_provider_api_key
 from app.services.website_crawler import get_website_crawl
 from app.services.website_registry import upsert_website
@@ -454,7 +455,7 @@ async def crawl_company_website(
     company_id: UUID,
     db: DatabaseSession,
 ) -> WebsiteCrawlJobResponse:
-    company = db.get(Company, company_id)
+    company = await run_in_threadpool(db.get, Company, company_id)
     if company is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -473,7 +474,7 @@ async def crawl_company_website(
         db,
         discovery_source="company_profile",
     )
-    return get_website_crawl_job(job.id, db)
+    return await run_in_threadpool(get_website_crawl_job, job.id, db)
 
 
 @router.get(
@@ -533,7 +534,7 @@ async def create_pagespeed_scan(
     payload: PageSpeedScanRequest,
     db: DatabaseSession,
 ) -> PageSpeedScan:
-    company = db.get(Company, company_id)
+    company = await run_in_threadpool(db.get, Company, company_id)
     if company is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -548,7 +549,11 @@ async def create_pagespeed_scan(
         )
 
     try:
-        api_key = get_user_provider_api_key(db, "pagespeed")
+        api_key = await run_in_threadpool(
+            get_user_provider_api_key,
+            db,
+            "pagespeed",
+        )
         result = await scan_pagespeed(website_url, payload.strategy, api_key)
     except PageSpeedError as exc:
         raise HTTPException(
@@ -556,8 +561,21 @@ async def create_pagespeed_scan(
             detail=str(exc),
         ) from exc
 
+    return await run_in_threadpool(
+        _persist_pagespeed_scan,
+        company.id,
+        result,
+        db,
+    )
+
+
+def _persist_pagespeed_scan(
+    company_id: UUID,
+    result: PageSpeedScanData,
+    db: Session,
+) -> PageSpeedScan:
     scan = PageSpeedScan(
-        company_id=company.id,
+        company_id=company_id,
         website_url=result.website_url,
         strategy=result.strategy,
         category_scores=result.category_scores,
@@ -570,7 +588,6 @@ async def create_pagespeed_scan(
     except SQLAlchemyError:
         db.rollback()
         raise
-
     return scan
 
 

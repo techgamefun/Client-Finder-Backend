@@ -7,8 +7,10 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.http_clients import async_http_client
 from app.models import Website
 from app.schemas.website import WebsiteReclassificationBatchResponse
 from app.schemas.website_crawl import CrawlPageClassification
@@ -41,6 +43,32 @@ class SavedClassificationBatchResponse(BaseModel):
 
 
 async def reclassify_saved_website(website_id: UUID, db: Session) -> Website:
+    payload = await run_in_threadpool(
+        _load_saved_classification_payload,
+        website_id,
+        db,
+    )
+    response = await _post_classifier("classify-saved", payload)
+    try:
+        classification = SavedClassificationResponse.model_validate(response.json())
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The crawler service returned an invalid saved classification.",
+        ) from exc
+
+    return await run_in_threadpool(
+        _persist_saved_classification,
+        website_id,
+        classification,
+        db,
+    )
+
+
+def _load_saved_classification_payload(
+    website_id: UUID,
+    db: Session,
+) -> dict[str, object]:
     website = db.scalar(
         select(Website)
         .options(selectinload(Website.crawl))
@@ -64,50 +92,40 @@ async def reclassify_saved_website(website_id: UUID, db: Session) -> Website:
             detail="The saved crawl has no homepage classification signals.",
         )
 
-    response = await _post_classifier("classify-saved", payload)
-    try:
-        classification = SavedClassificationResponse.model_validate(response.json())
-    except (ValidationError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="The crawler service returned an invalid saved classification.",
-        ) from exc
+    return payload
 
+
+def _persist_saved_classification(
+    website_id: UUID,
+    classification: SavedClassificationResponse,
+    db: Session,
+) -> Website:
+    website = db.scalar(
+        select(Website)
+        .options(selectinload(Website.crawl))
+        .where(Website.id == website_id)
+    )
+    if website is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website not found.",
+        )
     website.page_type = (
         page_type_from_crawl_category(classification.site_type) or "other"
     )
     website.site_topic = classification.website_topics
     website.classification_manual = False
     db.commit()
-    db.refresh(website)
     return website
 
 
 async def reclassify_unclassified_websites(
     db: Session,
 ) -> WebsiteReclassificationBatchResponse:
-    websites = list(
-        db.scalars(
-            select(Website)
-            .options(selectinload(Website.crawl))
-            .where(Website.crawl_id.is_not(None))
-        ).all()
+    eligible_ids, payloads, skipped_count = await run_in_threadpool(
+        _load_unclassified_classification_payloads,
+        db,
     )
-    eligible = [
-        website
-        for website in websites
-        if not website.page_type or not website.site_topic
-    ]
-
-    payloads: list[dict[str, object]] = []
-    skipped_count = 0
-    for website in eligible:
-        payload = _saved_classification_payload(website)
-        if payload is None:
-            skipped_count += 1
-            continue
-        payload["website_id"] = str(website.id)
-        payloads.append(payload)
 
     classifications: dict[UUID, SavedClassificationBatchItem] = {}
     for batch_payloads in _classification_payload_batches(payloads):
@@ -142,23 +160,62 @@ async def reclassify_unclassified_websites(
             (item.website_id, item) for item in batch.websites
         )
 
+    recomputed_count = await run_in_threadpool(
+        _persist_classification_batch,
+        classifications,
+        db,
+    )
+
+    return WebsiteReclassificationBatchResponse(
+        eligible_count=len(eligible_ids),
+        recomputed_count=recomputed_count,
+        skipped_count=skipped_count,
+    )
+
+
+def _load_unclassified_classification_payloads(
+    db: Session,
+) -> tuple[list[UUID], list[dict[str, object]], int]:
+    websites = db.scalars(
+        select(Website)
+        .options(selectinload(Website.crawl))
+        .where(Website.crawl_id.is_not(None))
+    ).all()
+    eligible = [
+        website
+        for website in websites
+        if not website.page_type or not website.site_topic
+    ]
+    payloads: list[dict[str, object]] = []
+    skipped_count = 0
     for website in eligible:
-        classification = classifications.get(website.id)
-        if classification is None:
+        payload = _saved_classification_payload(website)
+        if payload is None:
+            skipped_count += 1
             continue
+        payload["website_id"] = str(website.id)
+        payloads.append(payload)
+    return [website.id for website in eligible], payloads, skipped_count
+
+
+def _persist_classification_batch(
+    classifications: dict[UUID, SavedClassificationBatchItem],
+    db: Session,
+) -> int:
+    if not classifications:
+        return 0
+    websites = db.scalars(
+        select(Website).where(Website.id.in_(classifications))
+    ).all()
+    for website in websites:
+        classification = classifications[website.id]
         website.page_type = (
             page_type_from_crawl_category(classification.site_type) or "other"
         )
         website.site_topic = classification.website_topics
         website.classification_manual = False
-    if classifications:
-        db.commit()
-
-    return WebsiteReclassificationBatchResponse(
-        eligible_count=len(eligible),
-        recomputed_count=len(classifications),
-        skipped_count=skipped_count,
-    )
+    db.commit()
+    return len(websites)
 
 
 def _classification_payload_batches(
@@ -190,7 +247,7 @@ def _classification_payload_batches(
 async def _post_classifier(path: str, payload: dict[str, object]) -> httpx.Response:
     service_url = f"{settings.crawler_service_url.rstrip('/')}/{path}"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with async_http_client(timeout=30.0) as client:
             response = await client.post(service_url, json=payload)
     except httpx.TimeoutException as exc:
         raise HTTPException(

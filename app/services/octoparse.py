@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -8,21 +9,23 @@ from fastapi import HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
-from app.models import DiscoveryProviderJob
+from app.http_clients import async_http_client
+from app.models import ApplicationSettings, DiscoveryProviderJob
 from app.schemas.discovery import (
     DiscoveryProvider,
     DiscoveryProviderJobResponse,
     DiscoveryResult,
 )
 from app.schemas.settings import (
+    OctoparseTemplateConfiguration,
     OctoparseTemplateOption,
     OctoparseTemplateSearchResponse,
     OctoparseUsageResponse,
 )
 from app.services.application_settings import (
     get_octoparse_api_key,
-    get_application_settings,
     get_user_provider_api_key,
 )
 
@@ -30,6 +33,31 @@ from app.services.application_settings import (
 OCTOPARSE_API_BASE_URL = "https://openapi.octoparse.com"
 OCTOPARSE_EXTERNAL_USER_ID = "business-intelligence-agent"
 OCTOPARSE_REQUEST_TIMEOUT = 30.0
+
+
+@dataclass(frozen=True)
+class OctoparseSearchConfig:
+    api_key: str
+    template: OctoparseTemplateConfiguration
+
+
+def get_octoparse_search_config(db: Session) -> OctoparseSearchConfig:
+    api_key = _get_api_key(db)
+    app_settings = db.scalar(select(ApplicationSettings).limit(1))
+    template_data = (
+        app_settings.octoparse_template
+        if app_settings is not None
+        else None
+    )
+    if template_data is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Select and configure an Octoparse template in Settings first.",
+        )
+    return OctoparseSearchConfig(
+        api_key=api_key,
+        template=OctoparseTemplateConfiguration.model_validate(template_data),
+    )
 
 
 def get_octoparse_usage(db: Session) -> OctoparseUsageResponse:
@@ -86,9 +114,9 @@ async def search_octoparse_templates(
     keyword: str,
     db: Session,
 ) -> OctoparseTemplateSearchResponse:
-    api_key = _get_api_key(db)
+    api_key = await run_in_threadpool(_get_api_key, db)
     try:
-        async with httpx.AsyncClient(timeout=OCTOPARSE_REQUEST_TIMEOUT) as client:
+        async with async_http_client(timeout=OCTOPARSE_REQUEST_TIMEOUT) as client:
             response = await client.get(
                 f"{OCTOPARSE_API_BASE_URL}/api/agentTools/searchTemplates",
                 params={"keyword": keyword, "page": 1, "limit": 20},
@@ -151,15 +179,13 @@ async def start_octoparse_search(
     query: str,
     max_results: int,
     db: Session,
+    *,
+    config: OctoparseSearchConfig | None = None,
 ) -> tuple[str, str | None, dict[str, str | None]]:
-    api_key = _get_api_key(db)
-    app_settings = get_application_settings(db)
-    template = app_settings.octoparse_template
-    if template is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Select and configure an Octoparse template in Settings first.",
-        )
+    if config is None:
+        config = await run_in_threadpool(get_octoparse_search_config, db)
+    api_key = config.api_key
+    template = config.template
 
     parameters = dict(template.additional_parameters)
     parameters[template.query_field] = query
@@ -171,7 +197,7 @@ async def start_octoparse_search(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=OCTOPARSE_REQUEST_TIMEOUT) as client:
+        async with async_http_client(timeout=OCTOPARSE_REQUEST_TIMEOUT) as client:
             response = await client.post(
                 f"{OCTOPARSE_API_BASE_URL}/api/agentTools/executeTask",
                 json=payload,
@@ -239,13 +265,15 @@ async def poll_octoparse_job(
         return _serialize_job(job)
 
     try:
-        api_key = _get_api_key(db, user_id=job.created_by_user_id)
+        api_key = await run_in_threadpool(
+            _get_api_key,
+            db,
+            user_id=job.created_by_user_id,
+        )
     except HTTPException as exc:
         job.status = "failed"
         job.error = str(exc.detail)
-        db.commit()
-        db.refresh(job)
-        return _serialize_job(job)
+        return await run_in_threadpool(_persist_job, job, db)
     params: dict[str, str | int] = {
         "taskId": job.external_task_id,
         "exportFileType": "JSON",
@@ -256,7 +284,7 @@ async def poll_octoparse_job(
     url = f"{OCTOPARSE_API_BASE_URL}/api/agentTools/exportData?{urlencode(params)}"
 
     try:
-        async with httpx.AsyncClient(timeout=OCTOPARSE_REQUEST_TIMEOUT) as client:
+        async with async_http_client(timeout=OCTOPARSE_REQUEST_TIMEOUT) as client:
             response = await client.get(
                 url,
                 headers={"x-api-key": api_key},
@@ -275,9 +303,7 @@ async def poll_octoparse_job(
     if response.status_code in {401, 403}:
         job.status = "failed"
         job.error = "Octoparse rejected the configured API key."
-        db.commit()
-        db.refresh(job)
-        return _serialize_job(job)
+        return await run_in_threadpool(_persist_job, job, db)
 
     data = _response_data(response, "export status")
     task_status = data.get("status")
@@ -321,9 +347,7 @@ async def poll_octoparse_job(
         job.status = "failed"
         job.error = "Octoparse returned an unrecognized export status."
 
-    db.commit()
-    db.refresh(job)
-    return _serialize_job(job)
+    return await run_in_threadpool(_persist_job, job, db)
 
 
 def _get_api_key(db: Session, *, user_id=None) -> str:
@@ -465,6 +489,15 @@ def _serialize_job(job: DiscoveryProviderJob) -> DiscoveryProviderJobResponse:
         error=job.error,
         warning=job.warning,
     )
+
+
+def _persist_job(
+    job: DiscoveryProviderJob,
+    db: Session,
+) -> DiscoveryProviderJobResponse:
+    db.commit()
+    db.refresh(job)
+    return _serialize_job(job)
 
 
 def _optional_string(value: Any) -> str | None:

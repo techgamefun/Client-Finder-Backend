@@ -30,6 +30,9 @@ def test_octoparse_template_search_is_public_and_normalizes_templates(
         async def __aexit__(self, *_args):
             return None
 
+        async def aclose(self):
+            return None
+
         async def get(self, url: str, params: dict, headers: dict):
             assert url.endswith("/api/agentTools/searchTemplates")
             assert params == {
@@ -121,6 +124,9 @@ def test_octoparse_search_starts_and_polls_configured_template(
             return self
 
         async def __aexit__(self, *_args):
+            return None
+
+        async def aclose(self):
             return None
 
         async def post(self, url: str, json: dict, headers: dict):
@@ -230,6 +236,9 @@ def test_octoparse_start_failure_includes_provider_diagnostic(
             return self
 
         async def __aexit__(self, *_args):
+            return None
+
+        async def aclose(self):
             return None
 
         async def post(self, url: str, json: dict, headers: dict):

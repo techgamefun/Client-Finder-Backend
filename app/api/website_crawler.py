@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_db
 from app.schemas.website_crawl import (
@@ -70,7 +71,7 @@ async def crawl_website(
     db: Annotated[Session, Depends(get_db)],
 ) -> WebsiteCrawlJobResponse:
     job = await create_website_crawl_job(str(payload.website_url), db)
-    return get_website_crawl_job(job.id, db)
+    return await run_in_threadpool(get_website_crawl_job, job.id, db)
 
 
 @router.get("/jobs", response_model=list[WebsiteCrawlJobResponse])

@@ -5,6 +5,7 @@ from typing import Any, Literal
 import httpx
 
 from app.config import settings
+from app.http_clients import async_http_client
 
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ async def fetch_hypestat_profiles(
         f"{settings.crawler_service_url.rstrip('/')}/hypestat/domains"
     )
     results: dict[str, HypeStatFetchResult] = {}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with async_http_client(timeout=30.0) as client:
         for offset in range(0, len(domains), _BATCH_SIZE):
             batch = domains[offset : offset + _BATCH_SIZE]
             try:

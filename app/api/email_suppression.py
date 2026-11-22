@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_db, require_admin_context
 from app.models import Organization, SuppressedContact
@@ -75,6 +76,15 @@ async def one_click_unsubscribe(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The one-click unsubscribe request is malformed.",
         )
+    await run_in_threadpool(
+        _persist_one_click_unsubscribe,
+        token,
+        db,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _persist_one_click_unsubscribe(token: str, db: Session) -> None:
     claims = verify_unsubscribe_token(token)
     email = unsubscribe_email(claims)
     add_suppression(
@@ -85,7 +95,6 @@ async def one_click_unsubscribe(
         reason="unsubscribe",
     )
     db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

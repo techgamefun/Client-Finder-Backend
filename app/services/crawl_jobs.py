@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.models import WebsiteCrawlJob
 from app.schemas.job_queue import (
@@ -29,6 +30,28 @@ logger = logging.getLogger(__name__)
 
 
 async def create_website_crawl_jobs(
+    website_urls: list[str],
+    db: Session,
+) -> list[WebsiteCrawlJob]:
+    jobs = await run_in_threadpool(
+        _create_website_crawl_jobs_sync,
+        website_urls,
+        db,
+    )
+    job_ids = [str(job.id) for job in jobs if job.status == "queued"]
+    if job_ids:
+        try:
+            await enqueue_crawl_jobs(job_ids)
+        except RedisQueueError:
+            logger.exception(
+                "Could not dispatch %s website crawl jobs; they remain queued "
+                "for worker recovery.",
+                len(job_ids),
+            )
+    return jobs
+
+
+def _create_website_crawl_jobs_sync(
     website_urls: list[str],
     db: Session,
 ) -> list[WebsiteCrawlJob]:
@@ -68,20 +91,36 @@ async def create_website_crawl_jobs(
         jobs.append(job)
 
     db.commit()
-    job_ids = [str(job.id) for job in jobs if job.status == "queued"]
-    if job_ids:
-        try:
-            await enqueue_crawl_jobs(job_ids)
-        except RedisQueueError:
-            logger.exception(
-                "Could not dispatch %s website crawl jobs; they remain queued "
-                "for worker recovery.",
-                len(job_ids),
-            )
     return jobs
 
 
 async def create_website_crawl_job(
+    website_url: str,
+    db: Session,
+    *,
+    discovery_source: str = "manual",
+    discovery_provider: str | None = None,
+) -> WebsiteCrawlJob:
+    job = await run_in_threadpool(
+        _create_website_crawl_job_sync,
+        website_url,
+        db,
+        discovery_source=discovery_source,
+        discovery_provider=discovery_provider,
+    )
+    if job.status == "queued":
+        try:
+            await enqueue_job(str(job.id))
+        except RedisQueueError:
+            logger.exception(
+                "Could not dispatch website crawl job %s; it remains queued for "
+                "worker recovery.",
+                job.id,
+            )
+    return job
+
+
+def _create_website_crawl_job_sync(
     website_url: str,
     db: Session,
     *,
@@ -108,16 +147,6 @@ async def create_website_crawl_job(
     db.add(job)
     db.commit()
     db.refresh(job)
-
-    if job.status == "queued":
-        try:
-            await enqueue_job(str(job.id))
-        except RedisQueueError:
-            logger.exception(
-                "Could not dispatch website crawl job %s; it remains queued for "
-                "worker recovery.",
-                job.id,
-            )
     return job
 
 
@@ -152,6 +181,26 @@ async def retry_website_crawl_job(
     job_id: UUID,
     db: Session,
 ) -> WebsiteCrawlJobResponse:
+    retried_job_id = await run_in_threadpool(
+        _retry_website_crawl_job_sync,
+        job_id,
+        db,
+    )
+    try:
+        await enqueue_job(str(retried_job_id))
+    except RedisQueueError:
+        logger.exception(
+            "Could not dispatch retried website crawl job %s; it remains "
+            "queued for worker recovery.",
+            retried_job_id,
+        )
+    return await run_in_threadpool(get_website_crawl_job, retried_job_id, db)
+
+
+def _retry_website_crawl_job_sync(
+    job_id: UUID,
+    db: Session,
+) -> UUID:
     job = db.scalar(
         select(WebsiteCrawlJob)
         .where(WebsiteCrawlJob.id == job_id)
@@ -182,22 +231,36 @@ async def retry_website_crawl_job(
     job.completed_at = None
     job.updated_at = now
     db.commit()
-
-    try:
-        await enqueue_job(str(job.id))
-    except RedisQueueError:
-        logger.exception(
-            "Could not dispatch retried website crawl job %s; it remains "
-            "queued for worker recovery.",
-            job.id,
-        )
-    return get_website_crawl_job(job.id, db)
+    return job.id
 
 
 async def retry_failed_website_crawl_jobs(
     job_ids: list[UUID],
     db: Session,
 ) -> BatchJobRetryResponse:
+    response, retried_job_ids = await run_in_threadpool(
+        _retry_failed_website_crawl_jobs_sync,
+        job_ids,
+        db,
+    )
+    if retried_job_ids:
+        try:
+            await enqueue_crawl_jobs(
+                [str(job_id) for job_id in retried_job_ids]
+            )
+        except RedisQueueError:
+            logger.exception(
+                "Could not dispatch %s retried website crawl jobs; they "
+                "remain queued for worker recovery.",
+                len(retried_job_ids),
+            )
+    return response
+
+
+def _retry_failed_website_crawl_jobs_sync(
+    job_ids: list[UUID],
+    db: Session,
+) -> tuple[BatchJobRetryResponse, list[UUID]]:
     unique_job_ids = list(dict.fromkeys(job_ids))
     jobs = db.scalars(
         select(WebsiteCrawlJob)
@@ -242,21 +305,12 @@ async def retry_failed_website_crawl_jobs(
             retried_job_ids.append(job_id)
 
     db.commit()
-    if retried_job_ids:
-        try:
-            await enqueue_crawl_jobs(
-                [str(job_id) for job_id in retried_job_ids]
-            )
-        except RedisQueueError:
-            logger.exception(
-                "Could not dispatch %s retried website crawl jobs; they "
-                "remain queued for worker recovery.",
-                len(retried_job_ids),
-            )
-
-    return BatchJobRetryResponse(
-        retried_job_ids=retried_job_ids,
-        failures=failures,
+    return (
+        BatchJobRetryResponse(
+            retried_job_ids=retried_job_ids,
+            failures=failures,
+        ),
+        retried_job_ids,
     )
 
 

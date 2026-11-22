@@ -5,6 +5,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import HTTPException
 
+from app.http_clients import async_http_client
 from app.services.public_url import _validate_public_url
 
 
@@ -54,7 +55,7 @@ async def scan_pagespeed(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with async_http_client(timeout=60.0) as client:
             response = await client.get(PAGESPEED_API_URL, params=params)
             response.raise_for_status()
     except httpx.TimeoutException as exc:

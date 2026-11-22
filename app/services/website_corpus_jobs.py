@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.models import Website, WebsiteCorpusAnalysisJob
 from app.schemas.job_queue import BatchJobRetryFailure, BatchJobRetryResponse
@@ -112,6 +113,19 @@ async def retry_website_corpus_analysis_job(
     job_id: UUID,
     db: Session,
 ) -> WebsiteCorpusAnalysisJobResponse:
+    job_id, response = await run_in_threadpool(
+        _retry_website_corpus_analysis_job_sync,
+        job_id,
+        db,
+    )
+    await enqueue_website_corpus_analysis_jobs([job_id])
+    return response
+
+
+def _retry_website_corpus_analysis_job_sync(
+    job_id: UUID,
+    db: Session,
+) -> tuple[UUID, WebsiteCorpusAnalysisJobResponse]:
     row = db.execute(
         select(WebsiteCorpusAnalysisJob, Website)
         .join(Website, Website.id == WebsiteCorpusAnalysisJob.website_id)
@@ -138,14 +152,27 @@ async def retry_website_corpus_analysis_job(
     job.completed_at = None
     job.updated_at = now
     db.commit()
-    await enqueue_website_corpus_analysis_jobs([job.id])
-    return serialize_website_corpus_analysis_job(job, website)
+    return job.id, serialize_website_corpus_analysis_job(job, website)
 
 
 async def retry_failed_website_corpus_analysis_jobs(
     job_ids: list[UUID],
     db: Session,
 ) -> BatchJobRetryResponse:
+    response, retried_job_ids = await run_in_threadpool(
+        _retry_failed_website_corpus_analysis_jobs_sync,
+        job_ids,
+        db,
+    )
+    if retried_job_ids:
+        await enqueue_website_corpus_analysis_jobs(retried_job_ids)
+    return response
+
+
+def _retry_failed_website_corpus_analysis_jobs_sync(
+    job_ids: list[UUID],
+    db: Session,
+) -> tuple[BatchJobRetryResponse, list[UUID]]:
     unique_job_ids = list(dict.fromkeys(job_ids))
     jobs = db.scalars(
         select(WebsiteCorpusAnalysisJob)
@@ -185,8 +212,10 @@ async def retry_failed_website_corpus_analysis_jobs(
             retried_job_ids.append(job_id)
 
     db.commit()
-    await enqueue_website_corpus_analysis_jobs(retried_job_ids)
-    return BatchJobRetryResponse(
-        retried_job_ids=retried_job_ids,
-        failures=failures,
+    return (
+        BatchJobRetryResponse(
+            retried_job_ids=retried_job_ids,
+            failures=failures,
+        ),
+        retried_job_ids,
     )

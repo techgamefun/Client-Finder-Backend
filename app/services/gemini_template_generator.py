@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.schemas.email_templates import (
     EmailTemplateDraftResponse,
 )
+from app.http_clients import async_http_client
 from app.services.email_templates import (
     TEMPLATE_VARIABLES,
     validate_email_template_syntax,
@@ -67,7 +68,7 @@ async def generate_email_template_draft(
     }
 
     try:
-        async with httpx.AsyncClient(
+        async with async_http_client(
             timeout=GEMINI_TIMEOUT_SECONDS,
         ) as client:
             response = await client.post(

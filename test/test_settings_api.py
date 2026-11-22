@@ -113,6 +113,9 @@ def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
         async def __aexit__(self, *_args):
             return None
 
+        async def aclose(self):
+            return None
+
         async def get(self, url: str, headers: dict[str, str]):
             assert url == discovery.TAVILY_USAGE_URL
             assert headers == {

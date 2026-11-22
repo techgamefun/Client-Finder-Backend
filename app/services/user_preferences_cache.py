@@ -5,6 +5,7 @@ from uuid import UUID
 import httpx
 
 from app.config import settings
+from app.http_clients import sync_http_client
 
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ def _execute(*command: str) -> object:
         raise RuntimeError("Redis preference cache is not configured.")
 
     try:
-        with httpx.Client(timeout=1.0) as client:
+        with sync_http_client(timeout=1.0) as client:
             response = client.post(
                 f"{url.rstrip('/')}",
                 headers={"Authorization": f"Bearer {token}"},

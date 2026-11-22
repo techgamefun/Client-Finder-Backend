@@ -271,18 +271,42 @@ def _upsert_crawl(
     return record
 
 
-def _pagespeed_target_url(result: DiscoveryResult, db: Session) -> str:
-    normalized_name = normalize_company_name(result.title.strip()[:200])
-    if normalized_name:
-        company = db.scalar(
-            select(Company)
-            .where(Company.normalized_name == normalized_name)
-            .limit(1)
+def _pagespeed_target_urls(
+    results: Sequence[DiscoveryResult],
+    db: Session,
+) -> dict[str, str]:
+    normalized_names = {
+        normalized_name
+        for result in results
+        if (
+            normalized_name := normalize_company_name(
+                result.title.strip()[:200],
+            )
         )
-        if company and company.website:
-            return _homepage_url(company.website)
+    }
+    websites_by_name: dict[str, str] = {}
+    if normalized_names:
+        company_rows = db.execute(
+            select(Company.normalized_name, Company.website)
+            .where(
+                Company.normalized_name.in_(normalized_names),
+                Company.website.is_not(None),
+            )
+            .order_by(Company.created_at.desc(), Company.id.desc())
+        ).all()
+        for normalized_name, website in company_rows:
+            if normalized_name is not None and website is not None:
+                websites_by_name.setdefault(normalized_name, website)
 
-    return _homepage_url(str(result.url))
+    return {
+        str(result.url): _homepage_url(
+            websites_by_name.get(
+                normalize_company_name(result.title.strip()[:200]) or "",
+                str(result.url),
+            )
+        )
+        for result in results
+    }
 
 
 async def ingest_search_results(
@@ -290,7 +314,11 @@ async def ingest_search_results(
     db: Session,
 ) -> DiscoveryIngestResponse:
     if request.search_id is not None:
-        search_keyword = db.get(SearchKeyword, request.search_id)
+        search_keyword = await run_in_threadpool(
+            db.get,
+            SearchKeyword,
+            request.search_id,
+        )
         if search_keyword is None or search_keyword.keyword != request.query:
             raise HTTPException(
                 status_code=422,
@@ -308,7 +336,7 @@ async def ingest_search_results(
         results = request.results
 
     semaphore = asyncio.Semaphore(10)
-    crawl_settings = get_crawl_settings(db)
+    crawl_settings = await run_in_threadpool(get_crawl_settings, db)
     crawl_failures: list[DiscoveryCrawlFailure] = []
     crawls_by_url: dict[str, CrawlData] = {}
 
@@ -349,10 +377,11 @@ async def ingest_search_results(
         *(crawl_result(result) for result in unique_results)
     )
 
-    pagespeed_targets_by_source = {
-        str(result.url): _pagespeed_target_url(result, db)
-        for result in unique_results
-    }
+    pagespeed_targets_by_source = await run_in_threadpool(
+        _pagespeed_target_urls,
+        unique_results,
+        db,
+    )
     crawl_results = await crawl_results_task
     for source_url, crawl, failure in crawl_results:
         if crawl is not None:

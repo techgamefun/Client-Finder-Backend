@@ -9,6 +9,12 @@ from sqlalchemy import exists, select, update
 from starlette.concurrency import run_in_threadpool
 
 from app.database import SessionLocal
+from app.http_clients import (
+    HTTPClientPool,
+    current_http_client_pool,
+    install_http_client_pool,
+    reset_http_client_pool,
+)
 from app.models import (
     PageSpeedScan,
     PageSpeedScanJob,
@@ -742,7 +748,7 @@ async def process_pagespeed_job(job_id: UUID) -> None:
         reset_tenant_context(tenant_token)
 
 
-async def run_worker() -> None:
+async def _run_worker_loop() -> None:
     try:
         validate_redis_configuration()
         redis_enabled = True
@@ -850,6 +856,20 @@ async def run_worker() -> None:
                 await process_job(job_id)
         except Exception:
             logger.exception("Could not process %s job %s.", job_type, job_id)
+
+
+async def run_worker() -> None:
+    if current_http_client_pool() is not None:
+        await _run_worker_loop()
+        return
+
+    pool = HTTPClientPool()
+    token = install_http_client_pool(pool)
+    try:
+        await _run_worker_loop()
+    finally:
+        reset_http_client_pool(token)
+        await pool.aclose()
 
 
 if __name__ == "__main__":

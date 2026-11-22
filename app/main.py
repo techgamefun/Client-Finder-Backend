@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import SessionLocal, database_url
+from app.http_clients import HTTPClientPool, install_http_client_pool, reset_http_client_pool
 from app.auth_middleware import authenticate_request
 from app.services.auth import validate_auth_configuration
 
@@ -46,7 +47,7 @@ def should_auto_migrate() -> bool:
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     validate_auth_configuration()
     if should_auto_migrate() and command is not None and Config is not None:
         alembic_cfg = Config("alembic.ini")
@@ -54,23 +55,27 @@ async def lifespan(_: FastAPI):
         command.upgrade(alembic_cfg, "head")
         logger.info("Database migrations completed.")
 
+    http_client_pool = HTTPClientPool()
+    app.state.http_client_pool = http_client_pool
+    pool_token = install_http_client_pool(http_client_pool)
     worker_task: asyncio.Task[None] | None = None
-    if settings.run_worker_in_api:
-        from app.worker import run_worker
-
-        logger.info("Starting the background worker inside the API process.")
-        worker_task = asyncio.create_task(
-            run_worker(),
-            name="website-crawl-and-pagespeed-worker",
-        )
-
     try:
+        if settings.run_worker_in_api:
+            from app.worker import run_worker
+
+            logger.info("Starting the background worker inside the API process.")
+            worker_task = asyncio.create_task(
+                run_worker(),
+                name="website-crawl-and-pagespeed-worker",
+            )
         yield
     finally:
         if worker_task is not None:
             worker_task.cancel()
             with suppress(asyncio.CancelledError):
                 await worker_task
+        reset_http_client_pool(pool_token)
+        await http_client_pool.aclose()
 
 
 app = FastAPI(

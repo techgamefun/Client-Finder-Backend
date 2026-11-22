@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.http_clients import async_http_client
 from app.models import Company, WebsiteCrawl
 from app.schemas.website_crawl import CrawlPageClassification
 from app.services.application_settings import get_crawl_settings
@@ -64,7 +65,7 @@ async def crawl_website(
     if max_depth is not None:
         payload["max_depth"] = max_depth
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with async_http_client(timeout=90.0) as client:
             response = await client.post(
                 service_url,
                 json=payload,

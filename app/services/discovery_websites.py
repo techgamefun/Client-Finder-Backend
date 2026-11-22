@@ -1,9 +1,11 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.models import (
     SearchKeyword,
@@ -15,10 +17,10 @@ from app.schemas.discovery import (
     DiscoveryWebsiteSaveRequest,
     DiscoveryWebsiteSaveResponse,
 )
-from app.services.crawl_jobs import create_website_crawl_job
-from app.services.normalization import normalize_domain
-from app.services.hypestat import fetch_hypestat_profiles
 from app.services.application_settings import get_hypestat_settings
+from app.services.crawl_jobs import create_website_crawl_job
+from app.services.hypestat import HypeStatFetchResult, fetch_hypestat_profiles
+from app.services.normalization import normalize_domain
 from app.services.website_registry import (
     canonical_website_url,
     upsert_website,
@@ -26,10 +28,81 @@ from app.services.website_registry import (
 )
 
 
+@dataclass(frozen=True)
+class _WebsiteSavePreparation:
+    unique_count: int
+    crawl_queue: list[tuple[DiscoveryWebsiteInput, str]]
+    hypestat_targets: list[tuple[UUID, str]]
+    hypestat_api_key: str | None
+    hypestat_profiles_reused: int
+    crawl_jobs_already_present: int
+
+
 async def save_discovered_websites(
     request: DiscoveryWebsiteSaveRequest,
     db: Session,
 ) -> DiscoveryWebsiteSaveResponse:
+    prepared = await run_in_threadpool(
+        _prepare_discovered_websites,
+        request,
+        db,
+    )
+    for result, canonical_url in prepared.crawl_queue:
+        await create_website_crawl_job(
+            canonical_url,
+            db,
+            discovery_source=result.provider.value,
+            discovery_provider=result.provider.value,
+        )
+
+    hypestat_results = (
+        await fetch_hypestat_profiles(
+            [domain for _, domain in prepared.hypestat_targets],
+            prepared.hypestat_api_key,
+        )
+        if prepared.hypestat_targets
+        else {}
+    )
+    if prepared.hypestat_targets:
+        await run_in_threadpool(
+            _persist_hypestat_profiles,
+            prepared.hypestat_targets,
+            hypestat_results,
+            db,
+        )
+
+    hypestat_statuses = [
+        (hypestat_results.get(domain) or hypestat_results.get(domain.casefold()))
+        for _, domain in prepared.hypestat_targets
+    ]
+    return DiscoveryWebsiteSaveResponse(
+        query=request.query,
+        results_found=len(request.results),
+        websites_saved=prepared.unique_count,
+        crawl_jobs_enqueued=len(prepared.crawl_queue),
+        crawl_jobs_already_present=prepared.crawl_jobs_already_present,
+        domains_skipped=len(request.results) - prepared.unique_count,
+        hypestat_profiles_requested=len(prepared.hypestat_targets),
+        hypestat_profiles_reused=prepared.hypestat_profiles_reused,
+        hypestat_profiles_succeeded=sum(
+            result is not None and result.status == "succeeded"
+            for result in hypestat_statuses
+        ),
+        hypestat_profiles_queued=sum(
+            result is not None and result.status == "queued"
+            for result in hypestat_statuses
+        ),
+        hypestat_profiles_failed=sum(
+            result is None or result.status not in {"succeeded", "queued"}
+            for result in hypestat_statuses
+        ),
+    )
+
+
+def _prepare_discovered_websites(
+    request: DiscoveryWebsiteSaveRequest,
+    db: Session,
+) -> _WebsiteSavePreparation:
     if request.search_id is not None:
         search_keyword = db.get(SearchKeyword, request.search_id)
         if search_keyword is None or search_keyword.keyword != request.query:
@@ -107,74 +180,48 @@ async def save_discovered_websites(
             crawl_queue.append((result, canonical_url))
 
     db.commit()
-
-    for result, canonical_url in crawl_queue:
-        await create_website_crawl_job(
-            canonical_url,
-            db,
-            discovery_source=result.provider.value,
-            discovery_provider=result.provider.value,
-        )
-
-    hypestat_results = (
-        await fetch_hypestat_profiles(
-            [domain for _, domain in hypestat_targets],
-            hypestat_settings.api_key,
-        )
-        if hypestat_targets
-        else {}
+    return _WebsiteSavePreparation(
+        unique_count=len(unique_results),
+        crawl_queue=crawl_queue,
+        hypestat_targets=hypestat_targets,
+        hypestat_api_key=hypestat_settings.api_key,
+        hypestat_profiles_reused=hypestat_profiles_reused,
+        crawl_jobs_already_present=crawl_jobs_already_present,
     )
-    hypestat_checked_at = datetime.now(timezone.utc)
-    for website_id, domain in hypestat_targets:
-        hypestat_profile = db.get(WebsiteHypeStatProfile, website_id)
-        if hypestat_profile is None:
+
+
+def _persist_hypestat_profiles(
+    targets: list[tuple[UUID, str]],
+    results: dict[str, HypeStatFetchResult],
+    db: Session,
+) -> None:
+    website_ids = [website_id for website_id, _ in targets]
+    profiles = db.scalars(
+        select(WebsiteHypeStatProfile).where(
+            WebsiteHypeStatProfile.website_id.in_(website_ids),
+        )
+    ).all()
+    profiles_by_website_id = {
+        profile.website_id: profile for profile in profiles
+    }
+    checked_at = datetime.now(timezone.utc)
+    for website_id, domain in targets:
+        profile = profiles_by_website_id.get(website_id)
+        if profile is None:
             raise RuntimeError(
                 f"HypeStat profile row disappeared for website {website_id}."
             )
-        result = hypestat_results.get(domain)
+        result = results.get(domain) or results.get(domain.casefold())
         if result is None:
-            result = hypestat_results.get(domain.casefold())
-        if result is None:
-            result_status = "failed"
-            result_payload = None
-            result_error = "HypeStat lookup returned no result for this website."
+            profile.status = "failed"
+            profile.payload = None
+            profile.error = "HypeStat lookup returned no result for this website."
         else:
-            result_status = result.status
-            result_payload = result.payload
-            result_error = result.error
-        hypestat_profile.status = result_status
-        hypestat_profile.payload = result_payload
-        hypestat_profile.error = result_error
-        hypestat_profile.checked_at = hypestat_checked_at
-        hypestat_profile.fetched_at = (
-            hypestat_checked_at if result_status == "succeeded" else None
+            profile.status = result.status
+            profile.payload = result.payload
+            profile.error = result.error
+        profile.checked_at = checked_at
+        profile.fetched_at = (
+            checked_at if profile.status == "succeeded" else None
         )
-    if hypestat_targets:
-        db.commit()
-
-    hypestat_statuses = [
-        (hypestat_results.get(domain) or hypestat_results.get(domain.casefold()))
-        for _, domain in hypestat_targets
-    ]
-    return DiscoveryWebsiteSaveResponse(
-        query=request.query,
-        results_found=len(request.results),
-        websites_saved=len(unique_results),
-        crawl_jobs_enqueued=len(crawl_queue),
-        crawl_jobs_already_present=crawl_jobs_already_present,
-        domains_skipped=len(request.results) - len(unique_results),
-        hypestat_profiles_requested=len(hypestat_targets),
-        hypestat_profiles_reused=hypestat_profiles_reused,
-        hypestat_profiles_succeeded=sum(
-            result is not None and result.status == "succeeded"
-            for result in hypestat_statuses
-        ),
-        hypestat_profiles_queued=sum(
-            result is not None and result.status == "queued"
-            for result in hypestat_statuses
-        ),
-        hypestat_profiles_failed=sum(
-            result is None or result.status not in {"succeeded", "queued"}
-            for result in hypestat_statuses
-        ),
-    )
+    db.commit()

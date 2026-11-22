@@ -1,6 +1,7 @@
 import httpx
 
 from app.config import settings
+from app.http_clients import async_http_client
 
 
 QUEUE_KEY = "website-crawl:jobs"
@@ -25,7 +26,7 @@ def validate_redis_configuration() -> tuple[str, str]:
 async def _execute(*command: str) -> object:
     url, token = validate_redis_configuration()
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with async_http_client(timeout=10.0) as client:
             response = await client.post(
                 url,
                 headers={"Authorization": f"Bearer {token}"},

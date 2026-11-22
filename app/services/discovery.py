@@ -6,7 +6,9 @@ import httpx
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
+from app.http_clients import async_http_client
 from app.schemas.discovery import (
     DiscoveryProvider,
     DiscoveryProviderFailure,
@@ -19,7 +21,11 @@ from app.services.application_settings import (
     get_selected_discovery_tools,
     get_tavily_api_key,
 )
-from app.services.octoparse import start_octoparse_search
+from app.services.octoparse import (
+    OctoparseSearchConfig,
+    get_octoparse_search_config,
+    start_octoparse_search,
+)
 
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
@@ -32,8 +38,11 @@ async def search_companies(
     max_results: int = 20,
     *,
     options: TavilyDiscoverySearchRequest | None = None,
+    api_key: str | None = None,
+    api_key_is_loaded: bool = False,
 ) -> DiscoverySearchResponse:
-    api_key = get_tavily_api_key(db)
+    if not api_key_is_loaded:
+        api_key = await run_in_threadpool(get_tavily_api_key, db)
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -75,7 +84,7 @@ async def search_companies(
         payload["exclude_domains"] = search_options.exclude_domains
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with async_http_client(timeout=20.0) as client:
             response = await client.post(
                 TAVILY_SEARCH_URL,
                 json=payload,
@@ -188,6 +197,7 @@ class LeadDiscoveryTool(Protocol):
         max_results: int,
         db: Session,
         options: TavilyDiscoverySearchRequest | None = None,
+        provider_config: str | OctoparseSearchConfig | None = None,
     ) -> ProviderSearchOutcome: ...
 
 
@@ -200,12 +210,19 @@ class TavilyDiscoveryTool:
         max_results: int,
         db: Session,
         options: TavilyDiscoverySearchRequest | None = None,
+        provider_config: str | OctoparseSearchConfig | None = None,
     ) -> ProviderSearchOutcome:
         response = await search_companies(
             query,
             db,
             max_results,
             options=options,
+            api_key=(
+                provider_config
+                if isinstance(provider_config, str)
+                else None
+            ),
+            api_key_is_loaded=True,
         )
         return ProviderSearchOutcome(
             results=response.results,
@@ -223,11 +240,17 @@ class OctoparseDiscoveryTool:
         max_results: int,
         db: Session,
         options: TavilyDiscoverySearchRequest | None = None,
+        provider_config: str | OctoparseSearchConfig | None = None,
     ) -> ProviderSearchOutcome:
         task_id, lot_no, result_mapping = await start_octoparse_search(
             query,
             max_results,
             db,
+            config=(
+                provider_config
+                if isinstance(provider_config, OctoparseSearchConfig)
+                else None
+            ),
         )
         return ProviderSearchOutcome(
             results=[],
@@ -263,8 +286,39 @@ async def search_with_selected_tools(
     selected_tools = (
         options.providers
         if options is not None and options.providers is not None
-        else get_selected_discovery_tools(db)
+        else await run_in_threadpool(get_selected_discovery_tools, db)
     )
+    provider_configs: dict[
+        DiscoveryProvider,
+        str | OctoparseSearchConfig | None,
+    ] = {}
+    failures: list[DiscoveryProviderFailure] = []
+    if DiscoveryProvider.TAVILY in selected_tools:
+        try:
+            provider_configs[DiscoveryProvider.TAVILY] = await run_in_threadpool(
+                get_tavily_api_key,
+                db,
+            )
+        except HTTPException as exc:
+            failures.append(
+                DiscoveryProviderFailure(
+                    provider=DiscoveryProvider.TAVILY,
+                    detail=str(exc.detail),
+                )
+            )
+    if DiscoveryProvider.OCTOPARSE in selected_tools:
+        try:
+            provider_configs[DiscoveryProvider.OCTOPARSE] = await run_in_threadpool(
+                get_octoparse_search_config,
+                db,
+            )
+        except HTTPException as exc:
+            failures.append(
+                DiscoveryProviderFailure(
+                    provider=DiscoveryProvider.OCTOPARSE,
+                    detail=str(exc.detail),
+                )
+            )
 
     async def run_tool(
         provider: DiscoveryProvider,
@@ -279,6 +333,7 @@ async def search_with_selected_tools(
                 max_results,
                 db,
                 options=options if provider == DiscoveryProvider.TAVILY else None,
+                provider_config=provider_configs[provider],
             )
         except HTTPException as exc:
             return (
@@ -291,12 +346,14 @@ async def search_with_selected_tools(
             )
         return provider, outcome, None
 
+    providers_to_run = [
+        provider for provider in selected_tools if provider in provider_configs
+    ]
     outcomes = await asyncio.gather(
-        *(run_tool(provider) for provider in selected_tools)
+        *(run_tool(provider) for provider in providers_to_run)
     )
     results: list[DiscoveryResult] = []
     jobs: list[StartedProviderJob] = []
-    failures: list[DiscoveryProviderFailure] = []
     answer: str | None = None
     credits_used: float | None = None
     for _, outcome, failure in outcomes:
@@ -324,7 +381,7 @@ async def search_with_selected_tools(
 
 
 async def get_tavily_usage(db: Session) -> TavilyUsageResponse:
-    api_key = get_tavily_api_key(db)
+    api_key = await run_in_threadpool(get_tavily_api_key, db)
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -332,7 +389,7 @@ async def get_tavily_usage(db: Session) -> TavilyUsageResponse:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with async_http_client(timeout=20.0) as client:
             response = await client.get(
                 TAVILY_USAGE_URL,
                 headers={"Authorization": f"Bearer {api_key}"},

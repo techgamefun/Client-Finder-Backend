@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from starlette.concurrency import run_in_threadpool
 
 from app.database import SessionLocal
+from app.http_clients import install_http_client_pool, reset_http_client_pool
 from app.request_metrics import (
     RequestMetrics,
     begin_request_metrics,
@@ -34,6 +35,12 @@ async def authenticate_request(request: Request, call_next):
     if is_api_request:
         metrics, metrics_token = begin_request_metrics()
 
+    http_client_pool = getattr(request.app.state, "http_client_pool", None)
+    http_client_token = (
+        install_http_client_pool(http_client_pool)
+        if http_client_pool is not None
+        else None
+    )
     request_started_at = perf_counter()
     auth_duration_ms = 0.0
     tenant_token = None
@@ -107,6 +114,8 @@ async def authenticate_request(request: Request, call_next):
             reset_tenant_context(tenant_token)
         if metrics_token is not None:
             reset_request_metrics(metrics_token)
+        if http_client_token is not None:
+            reset_http_client_pool(http_client_token)
 
 
 def _validate_access_token(

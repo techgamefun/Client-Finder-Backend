@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_db
 from app.models import DiscoveryProviderJob, SearchKeyword
@@ -19,7 +20,7 @@ from app.schemas.discovery import (
     DiscoveryWebsiteSaveResponse,
     SearchKeywordResponse,
 )
-from app.services.discovery import search_with_selected_tools
+from app.services.discovery import StartedProviderJob, search_with_selected_tools
 from app.services.discovery_websites import save_discovered_websites
 from app.services.lead_ingestion import ingest_search_results
 from app.services.octoparse import poll_octoparse_job
@@ -30,22 +31,11 @@ router = APIRouter(
 )
 
 
-@router.post(
-    "/search",
-    response_model=DiscoverySearchResponse,
-)
-async def discover_companies(
+def _persist_discovery_search(
     payload: TavilyDiscoverySearchRequest,
-    db: Annotated[Session, Depends(get_db)],
-) -> DiscoverySearchResponse:
-    results, started_jobs, provider_failures, answer, credits_used = (
-        await search_with_selected_tools(
-            query=payload.query,
-            max_results=payload.max_results,
-            db=db,
-            options=payload,
-        )
-    )
+    started_jobs: list[StartedProviderJob],
+    db: Session,
+) -> tuple[UUID, list[DiscoveryProviderJobResponse]]:
     search = SearchKeyword(
         keyword=payload.query,
         searched_at=datetime.now(timezone.utc),
@@ -67,26 +57,48 @@ async def discover_companies(
         ]
         db.add_all(provider_jobs)
         db.commit()
-        db.refresh(search)
-        for job in provider_jobs:
-            db.refresh(job)
+        return search.id, [
+            DiscoveryProviderJobResponse(
+                id=job.id,
+                provider=job.provider,
+                status=job.status,
+            )
+            for job in provider_jobs
+        ]
     except SQLAlchemyError:
         db.rollback()
         raise
+
+
+@router.post(
+    "/search",
+    response_model=DiscoverySearchResponse,
+)
+async def discover_companies(
+    payload: TavilyDiscoverySearchRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> DiscoverySearchResponse:
+    results, started_jobs, provider_failures, answer, credits_used = (
+        await search_with_selected_tools(
+            query=payload.query,
+            max_results=payload.max_results,
+            db=db,
+            options=payload,
+        )
+    )
+    search_id, provider_jobs = await run_in_threadpool(
+        _persist_discovery_search,
+        payload,
+        started_jobs,
+        db,
+    )
     return DiscoverySearchResponse(
         query=payload.query,
         results=results,
-        search_id=search.id,
+        search_id=search_id,
         answer=answer,
         credits_used=credits_used,
-        provider_jobs=[
-            {
-                "id": job.id,
-                "provider": job.provider,
-                "status": job.status,
-            }
-            for job in provider_jobs
-        ],
+        provider_jobs=provider_jobs,
         provider_failures=provider_failures,
     )
 
@@ -99,7 +111,7 @@ async def read_discovery_provider_job(
     job_id: UUID,
     db: Annotated[Session, Depends(get_db)],
 ) -> DiscoveryProviderJobResponse:
-    job = db.get(DiscoveryProviderJob, job_id)
+    job = await run_in_threadpool(db.get, DiscoveryProviderJob, job_id)
     if job is None:
         raise HTTPException(
             status_code=404,

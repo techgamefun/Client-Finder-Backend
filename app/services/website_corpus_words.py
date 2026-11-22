@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.http_clients import sync_http_client
 from app.models import (
     Website,
     WebsiteCorpusAnalysis,
@@ -226,11 +227,11 @@ def _analyze_sites(
             for site in batch
         }
         try:
-            response = httpx.post(
-                f"{settings.crawler_service_url.rstrip('/')}/corpus-words",
-                json={"sites": batch, "top_n": _TOP_N},
-                timeout=_CRAWLER_TIMEOUT_SECONDS,
-            )
+            with sync_http_client(timeout=_CRAWLER_TIMEOUT_SECONDS) as client:
+                response = client.post(
+                    f"{settings.crawler_service_url.rstrip('/')}/corpus-words",
+                    json={"sites": batch, "top_n": _TOP_N},
+                )
         except httpx.TimeoutException as exc:
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,

@@ -420,27 +420,29 @@ def _context_from_token_payload(
         auth_version = int(payload["ver"])
     except (ValueError, KeyError, TypeError):
         return None
-    user = db.get(User, user_id)
-    if (
-        user is None
-        or not user.is_active
-        or user.auth_version != auth_version
-    ):
-        return None
-    membership = db.scalar(
-        select(OrganizationMembership).where(
-            OrganizationMembership.user_id == user_id,
+    row = db.execute(
+        select(User, OrganizationMembership.role)
+        .join(
+            OrganizationMembership,
+            OrganizationMembership.user_id == User.id,
+        )
+        .where(
+            User.id == user_id,
+            User.is_active.is_(True),
+            User.auth_version == auth_version,
             OrganizationMembership.organization_id == organization_id,
             OrganizationMembership.is_active.is_(True),
         )
-    )
-    if membership is None:
+        .limit(1)
+    ).first()
+    if row is None:
         return None
+    user, role = row
     return TenantContext(
         organization_id=organization_id,
         user_id=user.id,
         email=user.email,
-        role=membership.role,
+        role=role,
     )
 
 

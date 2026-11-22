@@ -96,20 +96,10 @@ def get_company_pipeline(
     )
     all_conditions = [*base_conditions, *filter_conditions]
 
-    company_count = db.scalar(select(func.count(Company.id))) or 0
     status_rows = db.execute(
-        select(Company.lead_status, func.count(Company.id))
-        .where(*base_conditions)
-        .group_by(Company.lead_status)
-    ).all()
-    status_counts = {
-        status: count
-        for status, count in status_rows
-    }
-    eligible_count = sum(status_counts.values())
-
-    website_stats = db.execute(
         select(
+            Company.lead_status,
+            func.count(Company.id),
             func.coalesce(
                 func.sum(
                     case(
@@ -128,10 +118,7 @@ def get_company_pipeline(
             func.coalesce(
                 func.sum(
                     case(
-                        (
-                            Company.last_email_sent_at.is_not(None),
-                            1,
-                        ),
+                        (Company.last_email_sent_at.is_not(None), 1),
                         else_=0,
                     ),
                 ),
@@ -139,8 +126,21 @@ def get_company_pipeline(
             ),
         )
         .where(*base_conditions)
-    ).one()
-    with_website_count, contacted_count = website_stats
+        .group_by(Company.lead_status)
+    ).all()
+    status_counts: dict[str, int] = {}
+    with_website_count = 0
+    contacted_count = 0
+    for status, count, websites, contacted in status_rows:
+        status_counts[status] = count
+        with_website_count += websites
+        contacted_count += contacted
+    eligible_count = sum(status_counts.values())
+    company_count = (
+        eligible_count
+        if view == "companies"
+        else db.scalar(select(func.count(Company.id))) or 0
+    )
 
     total_count = db.scalar(
         select(func.count(Company.id)).where(*all_conditions)

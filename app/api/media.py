@@ -12,7 +12,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy import update
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import (
     get_db,
@@ -20,6 +22,7 @@ from app.api.deps import (
     require_authenticated_context,
 )
 from app.config import settings
+from app.http_clients import async_http_client
 from app.models import Organization, User
 from app.schemas.media import ImageAssetResponse
 from app.tenant_context import TenantContext
@@ -57,20 +60,19 @@ async def upload_profile_photo(
     db: DatabaseSession,
     file: ImageFile,
 ) -> ImageAssetResponse:
-    user = db.get(User, context.user_id)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your account is no longer available.",
-        )
+    await run_in_threadpool(_ensure_user_exists, db, context.user_id)
     content, content_type = await _read_image(file)
     image_url = await _upload_image(
         content,
         content_type,
-        f"users/{user.id}/profile-photo",
+        f"users/{context.user_id}/profile-photo",
     )
-    user.profile_photo_url = image_url
-    db.commit()
+    await run_in_threadpool(
+        _save_user_profile_photo,
+        db,
+        context.user_id,
+        image_url,
+    )
     return ImageAssetResponse(url=image_url)
 
 
@@ -79,15 +81,14 @@ async def delete_profile_photo(
     context: CurrentContext,
     db: DatabaseSession,
 ) -> None:
-    user = db.get(User, context.user_id)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your account is no longer available.",
-        )
-    await _delete_image(f"users/{user.id}/profile-photo")
-    user.profile_photo_url = None
-    db.commit()
+    await run_in_threadpool(_ensure_user_exists, db, context.user_id)
+    await _delete_image(f"users/{context.user_id}/profile-photo")
+    await run_in_threadpool(
+        _save_user_profile_photo,
+        db,
+        context.user_id,
+        None,
+    )
 
 
 @router.post(
@@ -100,18 +101,24 @@ async def upload_organization_image(
     db: DatabaseSession,
     file: ImageFile,
 ) -> ImageAssetResponse:
-    organization = _get_organization(db, context.organization_id)
+    await run_in_threadpool(
+        _ensure_organization_exists,
+        db,
+        context.organization_id,
+    )
     content, content_type = await _read_image(file)
     image_url = await _upload_image(
         content,
         content_type,
-        f"organizations/{organization.id}/{asset_name}",
+        f"organizations/{context.organization_id}/{asset_name}",
     )
-    if asset_name == "logo":
-        organization.logo_url = image_url
-    else:
-        organization.banner_url = image_url
-    db.commit()
+    await run_in_threadpool(
+        _save_organization_image,
+        db,
+        context.organization_id,
+        asset_name,
+        image_url,
+    )
     return ImageAssetResponse(url=image_url)
 
 
@@ -124,16 +131,79 @@ async def delete_organization_image(
     context: AdminContext,
     db: DatabaseSession,
 ) -> None:
-    organization = _get_organization(db, context.organization_id)
-    await _delete_image(f"organizations/{organization.id}/{asset_name}")
-    if asset_name == "logo":
-        organization.logo_url = None
-    else:
-        organization.banner_url = None
+    await run_in_threadpool(
+        _ensure_organization_exists,
+        db,
+        context.organization_id,
+    )
+    await _delete_image(
+        f"organizations/{context.organization_id}/{asset_name}",
+    )
+    await run_in_threadpool(
+        _save_organization_image,
+        db,
+        context.organization_id,
+        asset_name,
+        None,
+    )
+
+
+def _save_user_profile_photo(
+    db: Session,
+    user_id: UUID,
+    image_url: str | None,
+) -> None:
+    result = db.execute(
+        update(User)
+        .where(User.id == user_id)
+        .values(profile_photo_url=image_url)
+    )
+    if result.rowcount != 1:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your account is no longer available.",
+        )
     db.commit()
 
 
-def _get_organization(db: Session, organization_id: UUID) -> Organization:
+def _save_organization_image(
+    db: Session,
+    organization_id: UUID,
+    asset_name: Literal["logo", "banner"],
+    image_url: str | None,
+) -> None:
+    values = (
+        {"logo_url": image_url}
+        if asset_name == "logo"
+        else {"banner_url": image_url}
+    )
+    result = db.execute(
+        update(Organization)
+        .where(Organization.id == organization_id)
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found.",
+        )
+    db.commit()
+
+
+def _ensure_user_exists(db: Session, user_id: UUID) -> User:
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your account is no longer available.",
+        )
+    return user
+
+
+def _ensure_organization_exists(
+    db: Session,
+    organization_id: UUID,
+) -> Organization:
     organization = db.get(Organization, organization_id)
     if organization is None:
         raise HTTPException(
@@ -201,7 +271,7 @@ async def _cloudinary_post(
         f"{quote(cloud_name, safe='')}/image/{action}"
     )
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
+        async with async_http_client(timeout=45) as client:
             response = await client.post(
                 url,
                 data=parameters,

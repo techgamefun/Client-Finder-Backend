@@ -9,6 +9,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import (
     get_db,
@@ -52,6 +53,8 @@ from app.services.gmail import (
     reply_to_gmail_message,
 )
 from app.services.gmail_oauth import (
+    GoogleOAuthTokens,
+    GoogleProfile,
     GoogleOAuthState,
     decode_google_oauth_state,
     exchange_google_authorization_code,
@@ -96,7 +99,11 @@ async def google_oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The Google OAuth state cookie is missing or invalid.",
         )
-    user, membership = _validate_oauth_state(oauth_state, db)
+    user_id, user_email, membership_role = await run_in_threadpool(
+        _validate_oauth_state,
+        oauth_state,
+        db,
+    )
     current_context = get_tenant_context()
     if current_context is not None and (
         current_context.organization_id != oauth_state.org_id
@@ -108,7 +115,7 @@ async def google_oauth_callback(
         )
 
     if error is not None:
-        return _frontend_redirect("error", membership.role)
+        return _frontend_redirect("error", membership_role)
     if not code:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -120,78 +127,22 @@ async def google_oauth_callback(
     tenant_token = set_tenant_context(
         TenantContext(
             organization_id=oauth_state.org_id,
-            user_id=user.id,
-            email=user.email,
-            role=membership.role,
+            user_id=user_id,
+            email=user_email,
+            role=membership_role,
         )
     )
     try:
-        account = db.scalar(
-            select(ConnectedGmailAccount).where(
-                ConnectedGmailAccount.google_account_id
-                == profile.google_account_id
-            )
+        already_connected = await run_in_threadpool(
+            _persist_google_account,
+            oauth_state,
+            user_id,
+            membership_role,
+            profile,
+            tokens,
+            db,
         )
-        if account is not None and account.org_id != oauth_state.org_id:
-            return _frontend_redirect("already-connected", membership.role)
-        if account is not None and account.owner_user_id not in (
-            None,
-            user.id,
-        ):
-            return _frontend_redirect("already-connected", membership.role)
-        if (
-            account is not None
-            and account.owner_user_id is None
-            and membership.role != "admin"
-        ):
-            return _frontend_redirect("already-connected", membership.role)
-        if account is None and not tokens.refresh_token:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Google did not return a refresh token. Reconnect and approve offline access.",
-            )
-
-        now = datetime.now(timezone.utc)
-        if account is None:
-            account = ConnectedGmailAccount(
-                org_id=oauth_state.org_id,
-                owner_user_id=user.id if membership.role != "admin" else None,
-                email_address=profile.email_address,
-                google_account_id=profile.google_account_id,
-                encrypted_refresh_token=encrypt_refresh_token(
-                    tokens.refresh_token or ""
-                ),
-                token_updated_at=now,
-            )
-            db.add(account)
-            db.flush()
-        else:
-            account.email_address = profile.email_address
-            if tokens.refresh_token:
-                account.encrypted_refresh_token = encrypt_refresh_token(
-                    tokens.refresh_token
-                )
-                account.token_updated_at = now
-        if account.owner_user_id == user.id:
-            assignment = db.scalar(
-                select(UserGmailAssignment).where(
-                    UserGmailAssignment.org_id == oauth_state.org_id,
-                    UserGmailAssignment.gmail_account_id == account.id,
-                    UserGmailAssignment.user_id == user.id,
-                )
-            )
-            if assignment is None:
-                db.add(
-                    UserGmailAssignment(
-                        org_id=oauth_state.org_id,
-                        user_id=user.id,
-                        gmail_account_id=account.id,
-                        assigned_by=user.id,
-                    )
-                )
-        db.commit()
     except IntegrityError as exc:
-        db.rollback()
         logger.info("Google account connection conflicted with an existing record.")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -200,7 +151,9 @@ async def google_oauth_callback(
     finally:
         reset_tenant_context(tenant_token)
 
-    return _frontend_redirect("connected", membership.role)
+    if already_connected:
+        return _frontend_redirect("already-connected", membership_role)
+    return _frontend_redirect("connected", membership_role)
 
 
 @router.get("/accounts", response_model=list[ConnectedGmailAccountResponse])
@@ -567,7 +520,7 @@ def remove_gmail_assignment(
 def _validate_oauth_state(
     oauth_state: GoogleOAuthState,
     db: Session,
-) -> tuple[User, OrganizationMembership]:
+) -> tuple[UUID, str, str]:
     user_membership = db.execute(
         select(User, OrganizationMembership)
         .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
@@ -583,7 +536,84 @@ def _validate_oauth_state(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="The user in the Google OAuth request is no longer an active organization member.",
         )
-    return user_membership
+    user, membership = user_membership
+    return user.id, user.email, membership.role
+
+
+def _persist_google_account(
+    oauth_state: GoogleOAuthState,
+    user_id: UUID,
+    membership_role: str,
+    profile: GoogleProfile,
+    tokens: GoogleOAuthTokens,
+    db: Session,
+) -> bool:
+    try:
+        account = db.scalar(
+            select(ConnectedGmailAccount).where(
+                ConnectedGmailAccount.google_account_id
+                == profile.google_account_id
+            )
+        )
+        if account is not None and account.org_id != oauth_state.org_id:
+            return True
+        if account is not None and account.owner_user_id not in (None, user_id):
+            return True
+        if (
+            account is not None
+            and account.owner_user_id is None
+            and membership_role != "admin"
+        ):
+            return True
+        if account is None and not tokens.refresh_token:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Google did not return a refresh token. Reconnect and approve offline access.",
+            )
+
+        now = datetime.now(timezone.utc)
+        if account is None:
+            account = ConnectedGmailAccount(
+                org_id=oauth_state.org_id,
+                owner_user_id=user_id if membership_role != "admin" else None,
+                email_address=profile.email_address,
+                google_account_id=profile.google_account_id,
+                encrypted_refresh_token=encrypt_refresh_token(
+                    tokens.refresh_token or ""
+                ),
+                token_updated_at=now,
+            )
+            db.add(account)
+            db.flush()
+        else:
+            account.email_address = profile.email_address
+            if tokens.refresh_token:
+                account.encrypted_refresh_token = encrypt_refresh_token(
+                    tokens.refresh_token
+                )
+                account.token_updated_at = now
+        if account.owner_user_id == user_id:
+            assignment = db.scalar(
+                select(UserGmailAssignment).where(
+                    UserGmailAssignment.org_id == oauth_state.org_id,
+                    UserGmailAssignment.gmail_account_id == account.id,
+                    UserGmailAssignment.user_id == user_id,
+                )
+            )
+            if assignment is None:
+                db.add(
+                    UserGmailAssignment(
+                        org_id=oauth_state.org_id,
+                        user_id=user_id,
+                        gmail_account_id=account.id,
+                        assigned_by=user_id,
+                    )
+                )
+        db.commit()
+        return False
+    except IntegrityError:
+        db.rollback()
+        raise
 
 
 def _frontend_redirect(

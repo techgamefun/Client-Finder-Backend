@@ -13,6 +13,7 @@ import httpx
 from fastapi import HTTPException, status
 
 from app.config import settings
+from app.http_clients import async_http_client
 
 
 GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -131,7 +132,7 @@ def decode_google_oauth_state(state: str) -> GoogleOAuthState:
 async def exchange_google_authorization_code(code: str) -> GoogleOAuthTokens:
     client_id, client_secret, redirect_uri, _ = _oauth_configuration()
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with async_http_client(timeout=20.0) as client:
             response = await client.post(
                 GOOGLE_TOKEN_URL,
                 data={
@@ -175,7 +176,7 @@ async def exchange_google_authorization_code(code: str) -> GoogleOAuthTokens:
 
 async def fetch_google_profile(access_token: str) -> GoogleProfile:
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with async_http_client(timeout=20.0) as client:
             response = await client.get(
                 GOOGLE_USERINFO_URL,
                 headers={"Authorization": f"Bearer {access_token}"},

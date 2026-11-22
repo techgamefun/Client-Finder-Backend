@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.models import (
     Company,
@@ -136,6 +137,19 @@ async def retry_pagespeed_scan_job(
     job_id: UUID,
     db: Session,
 ) -> PageSpeedScanJobResponse:
+    job_id, response = await run_in_threadpool(
+        _retry_pagespeed_scan_job_sync,
+        job_id,
+        db,
+    )
+    await enqueue_pagespeed_jobs([job_id])
+    return response
+
+
+def _retry_pagespeed_scan_job_sync(
+    job_id: UUID,
+    db: Session,
+) -> tuple[UUID, PageSpeedScanJobResponse]:
     job = db.scalar(
         select(PageSpeedScanJob)
         .options(selectinload(PageSpeedScanJob.companies))
@@ -164,14 +178,27 @@ async def retry_pagespeed_scan_job(
     job.started_at = None
     job.completed_at = None
     db.commit()
-    await enqueue_pagespeed_jobs([job.id])
-    return serialize_pagespeed_scan_job(job)
+    return job.id, serialize_pagespeed_scan_job(job)
 
 
 async def retry_failed_pagespeed_scan_jobs(
     job_ids: list[UUID],
     db: Session,
 ) -> BatchJobRetryResponse:
+    response, retried_job_ids = await run_in_threadpool(
+        _retry_failed_pagespeed_scan_jobs_sync,
+        job_ids,
+        db,
+    )
+    if retried_job_ids:
+        await enqueue_pagespeed_jobs(retried_job_ids)
+    return response
+
+
+def _retry_failed_pagespeed_scan_jobs_sync(
+    job_ids: list[UUID],
+    db: Session,
+) -> tuple[BatchJobRetryResponse, list[UUID]]:
     unique_job_ids = list(dict.fromkeys(job_ids))
     jobs = db.scalars(
         select(PageSpeedScanJob)
@@ -216,10 +243,12 @@ async def retry_failed_pagespeed_scan_jobs(
             retried_job_ids.append(job_id)
 
     db.commit()
-    await enqueue_pagespeed_jobs(retried_job_ids)
-    return BatchJobRetryResponse(
-        retried_job_ids=retried_job_ids,
-        failures=failures,
+    return (
+        BatchJobRetryResponse(
+            retried_job_ids=retried_job_ids,
+            failures=failures,
+        ),
+        retried_job_ids,
     )
 
 
