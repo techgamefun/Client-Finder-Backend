@@ -1,9 +1,10 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from conftest import TestingSessionLocal
-from app.models import Company, Contact, Website, WebsiteCrawl
+from app.models import Company, Contact, LeadBatch, Website, WebsiteCrawl
 
 
 def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
@@ -89,7 +90,18 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
     )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert {
+        key: response.json()[key]
+        for key in (
+            "requested_count",
+            "created_count",
+            "already_existing_count",
+            "status_updated_count",
+            "skipped_listing_count",
+            "skipped_uncrawled_count",
+            "not_found_count",
+        )
+    } == {
         "requested_count": 5,
         "created_count": 1,
         "already_existing_count": 1,
@@ -98,9 +110,14 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
         "skipped_uncrawled_count": 1,
         "not_found_count": 1,
     }
+    initial_batch_id = response.json()["batch_id"]
+    assert initial_batch_id
+    assert response.json()["batch_name"].startswith("Website import · ")
 
     with TestingSessionLocal() as db:
-        companies = db.scalars(select(Company)).all()
+        companies = db.scalars(
+            select(Company).options(selectinload(Company.lead_batches))
+        ).all()
         contacts = db.scalars(select(Contact)).all()
         websites = {
             website.id: website.status
@@ -113,6 +130,9 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
     assert created_company.name == "new.example"
     assert created_company.website == "https://new.example/"
     assert created_company.lead_status == "new"
+    assert [str(batch.id) for batch in created_company.lead_batches] == [
+        initial_batch_id,
+    ]
     new_contacts = [
         contact for contact in contacts if contact.company_id == created_company.id
     ]
@@ -144,12 +164,111 @@ def test_add_filtered_websites_to_leads_creates_companies_and_skips_ineligible(
     assert repeated_response.status_code == 200
     assert repeated_response.json()["created_count"] == 0
     assert repeated_response.json()["already_existing_count"] == 1
+    assert repeated_response.json()["batch_id"] != initial_batch_id
     with TestingSessionLocal() as db:
         repeated_company = db.scalar(
             select(Company).where(Company.domain == "new.example")
         )
         assert repeated_company is not None
         assert len(repeated_company.contacts) == 2
+        assert len(repeated_company.lead_batches) == 2
+        assert db.scalar(select(LeadBatch).where(
+            LeadBatch.id == UUID(repeated_response.json()["batch_id"])
+        )) is not None
+
+    batches_response = client.get("/api/v1/companies/lead-batches")
+    assert batches_response.status_code == 200
+    assert len(batches_response.json()["items"]) == 2
+    assert sorted(item["lead_count"] for item in batches_response.json()["items"]) == [
+        1,
+        2,
+    ]
+
+    group_response = client.get(
+        "/api/v1/companies/pipeline",
+        params={
+            "view": "leads",
+            "batch_id": initial_batch_id,
+            "page": 1,
+            "page_size": 10,
+        },
+    )
+    assert group_response.status_code == 200
+    assert group_response.json()["total_count"] == 2
+    assert all(
+        initial_batch_id
+        in [batch["id"] for batch in company["lead_batches"]]
+        for company in group_response.json()["items"]
+    )
+
+
+def test_website_import_can_use_a_custom_or_existing_lead_group(client):
+    with TestingSessionLocal() as db:
+        first_crawl = WebsiteCrawl(
+            website_url="https://named-group.example/",
+            emails=["hello@named-group.example"],
+        )
+        second_crawl = WebsiteCrawl(
+            website_url="https://existing-group.example/",
+            emails=["hello@existing-group.example"],
+        )
+        db.add_all([first_crawl, second_crawl])
+        db.flush()
+        first_website = Website(
+            website_url=first_crawl.website_url,
+            domain="named-group.example",
+            crawl_id=first_crawl.id,
+        )
+        second_website = Website(
+            website_url=second_crawl.website_url,
+            domain="existing-group.example",
+            crawl_id=second_crawl.id,
+        )
+        db.add_all([first_website, second_website])
+        db.commit()
+        first_website_id = first_website.id
+        second_website_id = second_website.id
+
+    custom_group_response = client.post(
+        "/api/v1/websites/add-to-leads",
+        json={
+            "website_ids": [str(first_website_id)],
+            "batch_name": "  Conference prospects  ",
+        },
+    )
+    assert custom_group_response.status_code == 200
+    custom_group = custom_group_response.json()
+    assert custom_group["batch_name"] == "Conference prospects"
+
+    existing_group_response = client.post(
+        "/api/v1/websites/add-to-leads",
+        json={
+            "website_ids": [str(second_website_id)],
+            "batch_id": custom_group["batch_id"],
+        },
+    )
+    assert existing_group_response.status_code == 200
+    assert existing_group_response.json()["batch_id"] == custom_group["batch_id"]
+    assert existing_group_response.json()["batch_name"] == "Conference prospects"
+
+    with TestingSessionLocal() as db:
+        group = db.scalar(
+            select(LeadBatch).where(
+                LeadBatch.id == UUID(custom_group["batch_id"])
+            )
+        )
+        assert group is not None
+        assert group.name == "Conference prospects"
+        assert len(group.companies) == 2
+
+    blank_name_response = client.post(
+        "/api/v1/websites/add-to-leads",
+        json={
+            "website_ids": [str(second_website_id)],
+            "batch_name": "   ",
+        },
+    )
+    assert blank_name_response.status_code == 422
 
 
 def test_website_status_can_be_updated_to_checked(client):

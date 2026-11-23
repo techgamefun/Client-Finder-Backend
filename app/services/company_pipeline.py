@@ -1,10 +1,11 @@
 from typing import Literal
+from uuid import UUID
 
 from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.models import Company, Contact
+from app.models import Company, Contact, lead_batch_companies
 from app.schemas.company import (
     CompanyPipelineResponse,
     CompanyPipelineSelectionResponse,
@@ -19,6 +20,7 @@ COMPANY_DETAILS = (
     selectinload(Company.created_by_user),
     selectinload(Company.contacts),
     selectinload(Company.pagespeed_scans),
+    selectinload(Company.lead_batches),
 )
 MAX_CAMPAIGN_SELECTION = 5_000
 
@@ -54,6 +56,8 @@ def _filter_conditions(
     status_filter: str | None,
     email_status: EmailStatusFilter,
     website: WebsiteFilter,
+    batch_id: UUID | None,
+    ungrouped: bool,
 ) -> list[ColumnElement[bool]]:
     conditions: list[ColumnElement[bool]] = []
     search_expression = _search_expression(query)
@@ -73,6 +77,23 @@ def _filter_conditions(
         conditions.append(
             Company.website.is_(None) & Company.domain.is_(None),
         )
+    if batch_id is not None:
+        conditions.append(
+            exists(
+                select(lead_batch_companies.c.company_id).where(
+                    lead_batch_companies.c.company_id == Company.id,
+                    lead_batch_companies.c.lead_batch_id == batch_id,
+                )
+            )
+        )
+    elif ungrouped:
+        conditions.append(
+            ~exists(
+                select(lead_batch_companies.c.company_id).where(
+                    lead_batch_companies.c.company_id == Company.id,
+                )
+            )
+        )
     return conditions
 
 
@@ -84,6 +105,8 @@ def get_company_pipeline(
     status_filter: str | None,
     email_status: EmailStatusFilter,
     website: WebsiteFilter,
+    batch_id: UUID | None,
+    ungrouped: bool,
     page: int,
     page_size: int,
 ) -> CompanyPipelineResponse:
@@ -93,6 +116,8 @@ def get_company_pipeline(
         status_filter=status_filter,
         email_status=email_status,
         website=website,
+        batch_id=batch_id,
+        ungrouped=ungrouped,
     )
     all_conditions = [*base_conditions, *filter_conditions]
 
@@ -178,6 +203,8 @@ def get_company_pipeline_selection(
     status_filter: str | None,
     email_status: EmailStatusFilter,
     website: WebsiteFilter,
+    batch_id: UUID | None,
+    ungrouped: bool,
 ) -> CompanyPipelineSelectionResponse:
     conditions = [
         *_base_conditions(view),
@@ -186,6 +213,8 @@ def get_company_pipeline_selection(
             status_filter=status_filter,
             email_status=email_status,
             website=website,
+            batch_id=batch_id,
+            ungrouped=ungrouped,
         ),
     ]
     total_count = db.scalar(

@@ -192,7 +192,19 @@ class WebsiteReclassificationBatchResponse(BaseModel):
 
 
 class WebsiteAddToLeadsRequest(BaseModel):
-    website_ids: list[UUID] = Field(min_length=1)
+    website_ids: list[UUID] = Field(min_length=1, max_length=500)
+    batch_id: UUID | None = None
+    batch_name: str | None = Field(default=None, max_length=160)
+
+    @field_validator("batch_name")
+    @classmethod
+    def trim_batch_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Group name cannot be blank.")
+        return normalized
 
 
 class WebsiteAddToLeadsResponse(BaseModel):
@@ -203,6 +215,8 @@ class WebsiteAddToLeadsResponse(BaseModel):
     skipped_listing_count: int
     skipped_uncrawled_count: int
     not_found_count: int
+    batch_id: UUID | None = None
+    batch_name: str | None = None
 
 
 class WebsiteBatchStatusUpdateRequest(BaseModel):

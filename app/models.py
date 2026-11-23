@@ -843,6 +843,23 @@ pagespeed_scan_job_companies = Table(
     ),
 )
 
+lead_batch_companies = Table(
+    "lead_batch_companies",
+    Base.metadata,
+    Column(
+        "lead_batch_id",
+        Uuid(as_uuid=True),
+        ForeignKey("lead_batches.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "company_id",
+        Uuid(as_uuid=True),
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
 
 class EmailCampaignDelivery(Base):
     __tablename__ = "email_campaign_deliveries"
@@ -956,6 +973,10 @@ class Company(TenantOwnedMixin, Base):
         cascade="all, delete-orphan",
         order_by="desc(PageSpeedScan.scanned_at)",
     )
+    lead_batches: Mapped[list["LeadBatch"]] = relationship(
+        secondary=lead_batch_companies,
+        back_populates="companies",
+    )
 
     @property
     def created_by_email(self) -> str | None:
@@ -975,6 +996,34 @@ class Company(TenantOwnedMixin, Base):
         Index("ix_companies_industry", "industry"),
         Index(
             "ix_companies_organization_created_at",
+            "organization_id",
+            "created_at",
+        ),
+    )
+
+
+class LeadBatch(TenantOwnedMixin, Base):
+    __tablename__ = "lead_batches"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    companies: Mapped[list[Company]] = relationship(
+        secondary=lead_batch_companies,
+        back_populates="lead_batches",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_lead_batches_organization_created_at",
             "organization_id",
             "created_at",
         ),

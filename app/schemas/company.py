@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import (
@@ -133,6 +134,76 @@ class ContactResponse(BaseModel):
     is_publicly_listed: bool
 
 
+class LeadBatchSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    created_at: datetime
+
+
+class LeadBatchListItem(BaseModel):
+    id: UUID
+    name: str
+    created_at: datetime
+    lead_count: int
+
+
+class LeadBatchCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    company_ids: list[UUID] = Field(default_factory=list, max_length=5000)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Group name cannot be blank.")
+        return normalized
+
+    @field_validator("company_ids")
+    @classmethod
+    def company_ids_must_be_unique(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("Company IDs must be unique.")
+        return value
+
+
+class LeadBatchUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Group name cannot be blank.")
+        return normalized
+
+
+class LeadBatchMembershipUpdate(BaseModel):
+    company_ids: list[UUID] = Field(min_length=1, max_length=5000)
+    action: Literal["add", "move", "ungroup"]
+    batch_id: UUID | None = None
+
+    @field_validator("company_ids")
+    @classmethod
+    def company_ids_must_be_unique(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("Company IDs must be unique.")
+        return value
+
+    @model_validator(mode="after")
+    def require_batch_for_group_actions(self) -> "LeadBatchMembershipUpdate":
+        if self.action in ("add", "move") and self.batch_id is None:
+            raise ValueError("Choose a group for this action.")
+        return self
+
+
+class LeadBatchMembershipUpdateResponse(BaseModel):
+    updated_count: int
+
+
 class CompanyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -151,6 +222,7 @@ class CompanyResponse(BaseModel):
     created_by_email: str | None = None
     contacts: list[ContactResponse]
     pagespeed_scans: list[PageSpeedScanSummary] = Field(default_factory=list)
+    lead_batches: list[LeadBatchSummaryResponse] = Field(default_factory=list)
 
 
 class CompanyNavigationSummaryResponse(BaseModel):
@@ -168,6 +240,10 @@ class CompanyPipelineResponse(BaseModel):
     status_counts: dict[str, int]
     with_website_count: int
     contacted_count: int
+
+
+class LeadBatchListResponse(BaseModel):
+    items: list[LeadBatchListItem]
 
 
 class CompanyPipelineSelectionResponse(BaseModel):

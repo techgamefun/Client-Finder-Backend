@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
 from uuid import UUID
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Company, Website
+from app.models import Company, LeadBatch, Website
 from app.schemas.website import WebsiteAddToLeadsResponse
 from app.services.contact_import import add_crawl_contacts
 from app.services.normalization import normalize_company_name
@@ -15,6 +17,8 @@ QUERY_BATCH_SIZE = 500
 def add_websites_to_leads(
     db: Session,
     website_ids: list[UUID],
+    batch_id: UUID | None = None,
+    batch_name: str | None = None,
 ) -> WebsiteAddToLeadsResponse:
     unique_ids = list(dict.fromkeys(website_ids))
     websites: dict[UUID, Website] = {}
@@ -46,7 +50,10 @@ def add_websites_to_leads(
         domain_batch = domains[offset : offset + QUERY_BATCH_SIZE]
         companies = db.scalars(
             select(Company)
-            .options(selectinload(Company.contacts))
+            .options(
+                selectinload(Company.contacts),
+                selectinload(Company.lead_batches),
+            )
             .where(Company.domain.in_(domain_batch))
         ).all()
         existing_companies_by_domain.update(
@@ -58,6 +65,21 @@ def add_websites_to_leads(
     created_count = 0
     already_existing_count = 0
     status_updated_count = 0
+    lead_batch = db.get(LeadBatch, batch_id) if batch_id else None
+    if batch_id is not None and lead_batch is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lead batch not found.",
+        )
+    if eligible_websites and lead_batch is None:
+        created_at = datetime.now(timezone.utc)
+        lead_batch = LeadBatch(
+            name=batch_name
+            or f"Website import · {created_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        )
+        db.add(lead_batch)
+        db.flush()
+
     for website in eligible_websites:
         company = existing_companies_by_domain.get(website.domain)
         if company is not None:
@@ -73,6 +95,12 @@ def add_websites_to_leads(
             db.add(company)
             existing_companies_by_domain[website.domain] = company
             created_count += 1
+
+        if lead_batch is not None and all(
+            existing_batch.id != lead_batch.id
+            for existing_batch in company.lead_batches
+        ):
+            company.lead_batches.append(lead_batch)
 
         if website.crawl is not None:
             add_crawl_contacts(
@@ -93,4 +121,6 @@ def add_websites_to_leads(
         skipped_listing_count=skipped_listing_count,
         skipped_uncrawled_count=skipped_uncrawled_count,
         not_found_count=len(unique_ids) - len(websites),
+        batch_id=lead_batch.id if lead_batch is not None else None,
+        batch_name=lead_batch.name if lead_batch is not None else None,
     )

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from conftest import TestingSessionLocal
 from app import worker as website_crawl_worker
@@ -133,6 +134,97 @@ def test_company_pipeline_selection_returns_all_server_filtered_leads(client):
         str(first_id),
         str(second_id),
     }
+
+
+def test_lead_groups_can_be_named_renamed_and_manage_members(client):
+    first = client.post(
+        "/api/v1/companies",
+        json={"name": "First grouped lead"},
+    ).json()
+    second = client.post(
+        "/api/v1/companies",
+        json={"name": "Second grouped lead"},
+    ).json()
+
+    created = client.post(
+        "/api/v1/companies/lead-batches",
+        json={
+            "name": "  Regional prospects  ",
+            "company_ids": [first["id"]],
+        },
+    )
+    empty_group = client.post(
+        "/api/v1/companies/lead-batches",
+        json={"name": "Later follow-up"},
+    )
+    assert created.status_code == 201
+    assert created.json()["name"] == "Regional prospects"
+    assert empty_group.status_code == 201
+    initial_group_id = created.json()["id"]
+    empty_group_id = empty_group.json()["id"]
+
+    add_response = client.post(
+        "/api/v1/companies/lead-batches/members",
+        json={
+            "action": "add",
+            "batch_id": initial_group_id,
+            "company_ids": [second["id"]],
+        },
+    )
+    assert add_response.status_code == 200
+    assert add_response.json()["updated_count"] == 1
+
+    move_response = client.post(
+        "/api/v1/companies/lead-batches/members",
+        json={
+            "action": "move",
+            "batch_id": empty_group_id,
+            "company_ids": [first["id"]],
+        },
+    )
+    assert move_response.status_code == 200
+    assert move_response.json()["updated_count"] == 1
+
+    ungroup_response = client.post(
+        "/api/v1/companies/lead-batches/members",
+        json={
+            "action": "ungroup",
+            "company_ids": [second["id"]],
+        },
+    )
+    assert ungroup_response.status_code == 200
+    assert ungroup_response.json()["updated_count"] == 1
+
+    renamed = client.patch(
+        f"/api/v1/companies/lead-batches/{initial_group_id}",
+        json={"name": "  Qualified prospects "},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Qualified prospects"
+
+    with TestingSessionLocal() as db:
+        first_company = db.scalar(
+            select(Company)
+            .options(selectinload(Company.lead_batches))
+            .where(Company.id == UUID(first["id"]))
+        )
+        second_company = db.scalar(
+            select(Company)
+            .options(selectinload(Company.lead_batches))
+            .where(Company.id == UUID(second["id"]))
+        )
+        assert first_company is not None
+        assert second_company is not None
+        assert [batch.id for batch in first_company.lead_batches] == [
+            UUID(empty_group_id),
+        ]
+        assert second_company.lead_batches == []
+
+    invalid_name = client.patch(
+        f"/api/v1/companies/lead-batches/{empty_group_id}",
+        json={"name": "   "},
+    )
+    assert invalid_name.status_code == 422
 
 
 def test_company_pipeline_returns_only_requested_page(client):

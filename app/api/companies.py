@@ -9,7 +9,13 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_db, require_authenticated_context
-from app.models import Company, Contact, PageSpeedScan
+from app.models import (
+    Company,
+    Contact,
+    LeadBatch,
+    PageSpeedScan,
+    lead_batch_companies,
+)
 from app.schemas.company import (
     CompanyCreate,
     CompanyNavigationSummaryResponse,
@@ -20,6 +26,13 @@ from app.schemas.company import (
     ContactCreate,
     ContactResponse,
     ContactUpdate,
+    LeadBatchCreate,
+    LeadBatchListItem,
+    LeadBatchListResponse,
+    LeadBatchMembershipUpdate,
+    LeadBatchMembershipUpdateResponse,
+    LeadBatchSummaryResponse,
+    LeadBatchUpdate,
     LeadStatusUpdate,
 )
 from app.schemas.pagespeed import (
@@ -65,6 +78,7 @@ COMPANY_DETAILS = (
     selectinload(Company.created_by_user),
     selectinload(Company.contacts),
     selectinload(Company.pagespeed_scans),
+    selectinload(Company.lead_batches),
 )
 
 
@@ -341,6 +355,8 @@ def list_company_pipeline(
     ] = None,
     email_status: Literal["all", "contacted", "not_contacted"] = "all",
     website: Literal["all", "with_website", "without_website"] = "all",
+    batch_id: UUID | None = None,
+    ungrouped: bool = False,
     page: int = Query(default=1, ge=1),
     page_size: Annotated[int, Query(ge=10, le=50)] = 10,
 ) -> CompanyPipelineResponse:
@@ -356,6 +372,8 @@ def list_company_pipeline(
         status_filter=status_filter,
         email_status=email_status,
         website=website,
+        batch_id=batch_id,
+        ungrouped=ungrouped,
         page=page,
         page_size=page_size,
     )
@@ -375,6 +393,8 @@ def select_company_pipeline_results(
     ] = None,
     email_status: Literal["all", "contacted", "not_contacted"] = "all",
     website: Literal["all", "with_website", "without_website"] = "all",
+    batch_id: UUID | None = None,
+    ungrouped: bool = False,
 ) -> CompanyPipelineSelectionResponse:
     return get_company_pipeline_selection(
         db,
@@ -383,7 +403,192 @@ def select_company_pipeline_results(
         status_filter=status_filter,
         email_status=email_status,
         website=website,
+        batch_id=batch_id,
+        ungrouped=ungrouped,
     )
+
+
+@router.get("/lead-batches", response_model=LeadBatchListResponse)
+def list_lead_batches(db: DatabaseSession) -> LeadBatchListResponse:
+    batches = db.scalars(
+        select(LeadBatch).order_by(
+            LeadBatch.created_at.desc(),
+            LeadBatch.id.desc(),
+        )
+    ).all()
+    if not batches:
+        return LeadBatchListResponse(items=[])
+
+    batch_ids = [batch.id for batch in batches]
+    count_rows = db.execute(
+        select(
+            lead_batch_companies.c.lead_batch_id,
+            func.count(lead_batch_companies.c.company_id),
+        )
+        .where(lead_batch_companies.c.lead_batch_id.in_(batch_ids))
+        .group_by(lead_batch_companies.c.lead_batch_id)
+    ).all()
+    counts = {batch_id: count for batch_id, count in count_rows}
+    return LeadBatchListResponse(
+        items=[
+            LeadBatchListItem(
+                id=batch.id,
+                name=batch.name,
+                created_at=batch.created_at,
+                lead_count=counts.get(batch.id, 0),
+            )
+            for batch in batches
+        ]
+    )
+
+
+@router.post(
+    "/lead-batches",
+    response_model=LeadBatchSummaryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_lead_batch(
+    payload: LeadBatchCreate,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> LeadBatch:
+    companies = _get_companies_for_lead_batch(
+        payload.company_ids,
+        context.organization_id,
+        db,
+    )
+    batch = LeadBatch(
+        name=payload.name,
+        companies=companies,
+    )
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+    return batch
+
+
+@router.patch(
+    "/lead-batches/{batch_id}",
+    response_model=LeadBatchSummaryResponse,
+)
+def update_lead_batch(
+    batch_id: UUID,
+    payload: LeadBatchUpdate,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> LeadBatch:
+    batch = _get_lead_batch_or_404(
+        batch_id,
+        context.organization_id,
+        db,
+    )
+    batch.name = payload.name
+    db.commit()
+    db.refresh(batch)
+    return batch
+
+
+@router.post(
+    "/lead-batches/members",
+    response_model=LeadBatchMembershipUpdateResponse,
+)
+def update_lead_batch_members(
+    payload: LeadBatchMembershipUpdate,
+    context: CurrentContext,
+    db: DatabaseSession,
+) -> LeadBatchMembershipUpdateResponse:
+    batch = (
+        _get_lead_batch_or_404(
+            payload.batch_id,
+            context.organization_id,
+            db,
+        )
+        if payload.batch_id is not None
+        else None
+    )
+    companies = _get_companies_for_lead_batch(
+        payload.company_ids,
+        context.organization_id,
+        db,
+    )
+
+    updated_count = 0
+    for company in companies:
+        current_batches = company.lead_batches
+        if payload.action == "ungroup":
+            next_batches = []
+        elif payload.action == "move":
+            if batch is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Choose a group for this action.",
+                )
+            next_batches = [batch]
+        else:
+            if batch is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Choose a group for this action.",
+                )
+            next_batches = list(current_batches)
+            if all(
+                existing_batch.id != batch.id
+                for existing_batch in next_batches
+            ):
+                next_batches.append(batch)
+
+        if [item.id for item in current_batches] != [
+            item.id for item in next_batches
+        ]:
+            company.lead_batches = next_batches
+            updated_count += 1
+
+    db.commit()
+    return LeadBatchMembershipUpdateResponse(updated_count=updated_count)
+
+
+def _get_lead_batch_or_404(
+    batch_id: UUID,
+    organization_id: UUID,
+    db: Session,
+) -> LeadBatch:
+    batch = db.scalar(
+        select(LeadBatch).where(
+            LeadBatch.id == batch_id,
+            LeadBatch.organization_id == organization_id,
+        )
+    )
+    if batch is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lead group not found.",
+        )
+    return batch
+
+
+def _get_companies_for_lead_batch(
+    company_ids: list[UUID],
+    organization_id: UUID,
+    db: Session,
+) -> list[Company]:
+    if not company_ids:
+        return []
+    companies = list(
+        db.scalars(
+            select(Company)
+            .options(selectinload(Company.lead_batches))
+            .where(
+                Company.id.in_(company_ids),
+                Company.organization_id == organization_id,
+            )
+        ).all()
+    )
+    if len(companies) != len(company_ids):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="One or more selected leads were not found.",
+        )
+    return companies
 
 
 @router.get(

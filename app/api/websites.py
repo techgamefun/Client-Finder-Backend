@@ -332,7 +332,12 @@ def add_to_leads(
     db: WebsiteSession,
 ) -> WebsiteAddToLeadsResponse:
     try:
-        result = add_websites_to_leads(db, payload.website_ids)
+        result = add_websites_to_leads(
+            db,
+            payload.website_ids,
+            batch_id=payload.batch_id,
+            batch_name=payload.batch_name,
+        )
         db.commit()
     except IntegrityError as exc:
         db.rollback()
