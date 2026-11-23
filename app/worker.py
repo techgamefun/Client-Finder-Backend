@@ -32,7 +32,6 @@ from app.services.ahrefs import fetch_website_domain_rating
 from app.services.application_settings import (
     CrawlSettings,
     get_crawl_settings,
-    get_hypestat_settings,
     get_user_provider_api_key,
 )
 from app.tenant_context import (
@@ -396,7 +395,12 @@ def _claim_hypestat_fetch_job(
         if job is None or job.created_by_user_id is None:
             db.rollback()
             return None
-        if not get_hypestat_settings(db).api_key:
+        api_key = get_user_provider_api_key(
+            db,
+            "hypestat",
+            user_id=job.created_by_user_id,
+        )
+        if not api_key:
             db.rollback()
             return None
 

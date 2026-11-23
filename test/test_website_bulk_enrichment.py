@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 from app import worker
 from app.models import (
@@ -316,7 +317,12 @@ def test_hypestat_worker_fetches_and_persists_queued_profile(
         website_id = website.id
         job_id = job.id
 
-    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    worker_session_factory = sessionmaker(
+        bind=TestingSessionLocal.kw["bind"],
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    monkeypatch.setattr(worker, "SessionLocal", worker_session_factory)
 
     def handle_request(request):
         assert request.url.path == "/hypestat/domains"
