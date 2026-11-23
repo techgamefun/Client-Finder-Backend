@@ -86,11 +86,17 @@ def test_worker_runs_configured_number_of_crawls_concurrently(monkeypatch):
     monkeypatch.setattr(worker, "dequeue_job", dequeue_crawl_job)
     monkeypatch.setattr(worker, "dequeue_pagespeed_job", no_job)
     monkeypatch.setattr(worker, "dequeue_corpus_analysis_job", no_job)
+    monkeypatch.setattr(worker, "dequeue_ahrefs_domain_rating_job", no_job)
     monkeypatch.setattr(worker, "_find_recoverable_job", lambda: None)
     monkeypatch.setattr(worker, "_find_recoverable_pagespeed_job", lambda: None)
     monkeypatch.setattr(
         worker,
         "_find_recoverable_corpus_analysis_job",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_find_recoverable_ahrefs_domain_rating_job",
         lambda: None,
     )
     monkeypatch.setattr(worker, "process_due_gmail_monitoring", no_work)

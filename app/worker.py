@@ -20,23 +20,29 @@ from app.models import (
     PageSpeedScan,
     PageSpeedScanJob,
     UserProviderCredential,
+    Website,
+    WebsiteAhrefsDomainRatingJob,
+    WebsiteCrawl,
     WebsiteCrawlJob,
     WebsiteCorpusAnalysis,
     WebsiteCorpusAnalysisJob,
-    Website,
-    WebsiteCrawl,
 )
-from app.services.application_settings import get_user_provider_api_key
+from app.services.ahrefs import fetch_website_domain_rating
+from app.services.application_settings import (
+    CrawlSettings,
+    get_crawl_settings,
+    get_user_provider_api_key,
+)
 from app.tenant_context import (
     TenantContext,
     reset_tenant_context,
     set_tenant_context,
 )
-from app.services.application_settings import CrawlSettings, get_crawl_settings
-from app.services.campaign_worker import process_due_campaign_recipient
 from app.services.campaign_monitor import process_due_gmail_monitoring
+from app.services.campaign_worker import process_due_campaign_recipient
 from app.services.redis_queue import (
     RedisQueueError,
+    dequeue_ahrefs_domain_rating_job,
     dequeue_corpus_analysis_job,
     dequeue_job,
     dequeue_pagespeed_job,
@@ -61,6 +67,10 @@ from app.services.website_crawler import (
     CrawlData,
     _persist_crawl,
     crawl_website,
+)
+from app.services.website_ahrefs_jobs import (
+    create_website_ahrefs_domain_rating_job,
+    enqueue_website_ahrefs_domain_rating_jobs,
 )
 from app.services.website_corpus_jobs import (
     create_website_corpus_analysis_job,
@@ -170,7 +180,7 @@ def _find_recoverable_job() -> UUID | None:
 def _save_success(
     job_id: UUID,
     crawl_data: CrawlData,
-) -> tuple[list[UUID], list[UUID]]:
+) -> tuple[list[UUID], list[UUID], list[UUID]]:
     with SessionLocal() as db:
         crawl = _persist_crawl(crawl_data, db)
         job = db.get(WebsiteCrawlJob, job_id)
@@ -192,6 +202,11 @@ def _save_success(
             crawl.crawled_at,
             db,
         )
+        ahrefs_job = create_website_ahrefs_domain_rating_job(
+            website.id,
+            crawl.crawled_at,
+            db,
+        )
         now = datetime.now(timezone.utc)
         job.status = "succeeded"
         job.crawl_id = crawl.id
@@ -202,6 +217,7 @@ def _save_success(
         return (
             pagespeed_job_ids,
             [corpus_job.id] if corpus_job is not None else [],
+            [ahrefs_job.id] if ahrefs_job is not None else [],
         )
 
 
@@ -318,6 +334,141 @@ def _find_recoverable_corpus_analysis_job() -> UUID | None:
         )
 
 
+def _claim_ahrefs_domain_rating_job(
+    job_id: UUID,
+) -> tuple[UUID, TenantContext] | None:
+    started_at = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        job = db.get(WebsiteAhrefsDomainRatingJob, job_id)
+        if job is None or job.created_by_user_id is None:
+            db.rollback()
+            return None
+        api_key = get_user_provider_api_key(
+            db,
+            "ahrefs",
+            user_id=job.created_by_user_id,
+        )
+        if not api_key:
+            db.rollback()
+            return None
+
+        result = db.execute(
+            update(WebsiteAhrefsDomainRatingJob)
+            .where(
+                WebsiteAhrefsDomainRatingJob.id == job_id,
+                WebsiteAhrefsDomainRatingJob.status == "queued",
+            )
+            .values(
+                status="running",
+                attempts=WebsiteAhrefsDomainRatingJob.attempts + 1,
+                started_at=started_at,
+                updated_at=started_at,
+                error=None,
+            )
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return None
+
+        job_data = (
+            job.website_id,
+            TenantContext(
+                organization_id=job.organization_id,
+                user_id=job.created_by_user_id,
+                email="",
+                role="system",
+            ),
+        )
+        db.commit()
+        return job_data
+
+
+def _find_recoverable_ahrefs_domain_rating_job() -> UUID | None:
+    now = datetime.now(timezone.utc)
+    lease_cutoff = now - timedelta(seconds=JOB_LEASE_SECONDS)
+    with SessionLocal() as db:
+        db.execute(
+            update(WebsiteAhrefsDomainRatingJob)
+            .where(
+                WebsiteAhrefsDomainRatingJob.status == "running",
+                WebsiteAhrefsDomainRatingJob.updated_at < lease_cutoff,
+                WebsiteAhrefsDomainRatingJob.attempts >= MAX_JOB_ATTEMPTS,
+            )
+            .values(
+                status="failed",
+                error=(
+                    "The worker stopped before Ahrefs Domain Rating "
+                    "could be fetched."
+                ),
+                completed_at=now,
+                updated_at=now,
+            )
+        )
+        db.execute(
+            update(WebsiteAhrefsDomainRatingJob)
+            .where(
+                WebsiteAhrefsDomainRatingJob.status == "running",
+                WebsiteAhrefsDomainRatingJob.updated_at < lease_cutoff,
+                WebsiteAhrefsDomainRatingJob.attempts < MAX_JOB_ATTEMPTS,
+            )
+            .values(
+                status="queued",
+                started_at=None,
+                error="Retrying after the worker stopped unexpectedly.",
+                updated_at=now,
+            )
+        )
+        db.commit()
+
+        recovery_cutoff = now - timedelta(seconds=RECOVERY_GRACE_SECONDS)
+        return db.scalar(
+            select(WebsiteAhrefsDomainRatingJob.id)
+            .where(
+                WebsiteAhrefsDomainRatingJob.status == "queued",
+                WebsiteAhrefsDomainRatingJob.created_at < recovery_cutoff,
+                exists(
+                    select(UserProviderCredential.id).where(
+                        UserProviderCredential.user_id
+                        == WebsiteAhrefsDomainRatingJob.created_by_user_id,
+                        UserProviderCredential.provider == "ahrefs",
+                    )
+                ),
+            )
+            .order_by(WebsiteAhrefsDomainRatingJob.created_at)
+            .limit(1)
+        )
+
+
+def _save_ahrefs_domain_rating_success(job_id: UUID) -> None:
+    with SessionLocal() as db:
+        job = db.get(WebsiteAhrefsDomainRatingJob, job_id)
+        if job is None:
+            raise RuntimeError(
+                f"Ahrefs Domain Rating job {job_id} no longer exists."
+            )
+        now = datetime.now(timezone.utc)
+        job.status = "succeeded"
+        job.error = None
+        job.updated_at = now
+        job.completed_at = now
+        db.commit()
+
+
+def _save_ahrefs_domain_rating_failure(job_id: UUID, detail: str) -> None:
+    with SessionLocal() as db:
+        job = db.get(WebsiteAhrefsDomainRatingJob, job_id)
+        if job is None:
+            raise RuntimeError(
+                f"Ahrefs Domain Rating job {job_id} no longer exists."
+            )
+        now = datetime.now(timezone.utc)
+        job.status = "failed"
+        job.error = detail
+        job.updated_at = now
+        job.completed_at = now
+        db.commit()
+
+
 def _save_corpus_analysis_success(
     job_id: UUID,
     words: list[WebsiteCorpusWordStat],
@@ -370,6 +521,43 @@ def _save_corpus_analysis_failure(job_id: UUID, detail: str) -> None:
         job.updated_at = now
         job.completed_at = now
         db.commit()
+
+
+async def process_ahrefs_domain_rating_job(job_id: UUID) -> None:
+    job_data = await run_in_threadpool(
+        _claim_ahrefs_domain_rating_job,
+        job_id,
+    )
+    if job_data is None:
+        return
+    website_id, context = job_data
+    tenant_token = set_tenant_context(context)
+    try:
+        with SessionLocal() as db:
+            await fetch_website_domain_rating(website_id, db)
+        await run_in_threadpool(
+            _save_ahrefs_domain_rating_success,
+            job_id,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        await run_in_threadpool(
+            _save_ahrefs_domain_rating_failure,
+            job_id,
+            detail,
+        )
+    except Exception:
+        logger.exception(
+            "Ahrefs Domain Rating job %s failed unexpectedly.",
+            job_id,
+        )
+        await run_in_threadpool(
+            _save_ahrefs_domain_rating_failure,
+            job_id,
+            "Ahrefs Domain Rating fetch failed unexpectedly. Please retry.",
+        )
+    finally:
+        reset_tenant_context(tenant_token)
 
 
 async def process_corpus_analysis_job(job_id: UUID) -> None:
@@ -492,7 +680,11 @@ async def process_job(job_id: UUID) -> None:
             max_pages=crawl_settings.max_pages,
             max_depth=crawl_settings.max_depth,
         )
-        pagespeed_job_ids, corpus_job_ids = await run_in_threadpool(
+        (
+            pagespeed_job_ids,
+            corpus_job_ids,
+            ahrefs_job_ids,
+        ) = await run_in_threadpool(
             _save_success,
             job_id,
             crawl_data,
@@ -506,6 +698,7 @@ async def process_job(job_id: UUID) -> None:
                 job_id,
             )
         await enqueue_website_corpus_analysis_jobs(corpus_job_ids)
+        await enqueue_website_ahrefs_domain_rating_jobs(ahrefs_job_ids)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         failure_code = (exc.headers or {}).get("X-Crawler-Failure-Code")
@@ -782,6 +975,7 @@ async def _run_worker_loop() -> None:
                 (
                     (dequeue_corpus_analysis_job, "keywords"),
                     (dequeue_pagespeed_job, "pagespeed"),
+                    (dequeue_ahrefs_domain_rating_job, "ahrefs"),
                     (dequeue_job, "crawl"),
                 )
                 if prefer_pagespeed
@@ -789,6 +983,7 @@ async def _run_worker_loop() -> None:
                     (dequeue_job, "crawl"),
                     (dequeue_pagespeed_job, "pagespeed"),
                     (dequeue_corpus_analysis_job, "keywords"),
+                    (dequeue_ahrefs_domain_rating_job, "ahrefs"),
                 )
             )
             prefer_pagespeed = not prefer_pagespeed
@@ -824,6 +1019,7 @@ async def _run_worker_loop() -> None:
                     (
                         (_find_recoverable_corpus_analysis_job, "keywords"),
                         (_find_recoverable_pagespeed_job, "pagespeed"),
+                        (_find_recoverable_ahrefs_domain_rating_job, "ahrefs"),
                         (_find_recoverable_job, "crawl"),
                     )
                     if prefer_pagespeed
@@ -831,6 +1027,7 @@ async def _run_worker_loop() -> None:
                         (_find_recoverable_job, "crawl"),
                         (_find_recoverable_pagespeed_job, "pagespeed"),
                         (_find_recoverable_corpus_analysis_job, "keywords"),
+                        (_find_recoverable_ahrefs_domain_rating_job, "ahrefs"),
                     )
                 )
                 for recover, recovery_type in recovery_readers:
@@ -870,6 +1067,8 @@ async def _run_worker_loop() -> None:
                     await process_pagespeed_job(job_id)
                 elif job_type == "keywords":
                     await process_corpus_analysis_job(job_id)
+                elif job_type == "ahrefs":
+                    await process_ahrefs_domain_rating_job(job_id)
             except Exception:
                 logger.exception("Could not process %s job %s.", job_type, job_id)
     finally:

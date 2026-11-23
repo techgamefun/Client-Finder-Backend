@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app import worker
 from app.models import (
     Website,
+    WebsiteAhrefsDomainRatingJob,
     WebsiteCorpusAnalysis,
     WebsiteCorpusAnalysisJob,
     WebsiteCrawl,
@@ -283,7 +284,7 @@ def test_failed_keyword_job_is_visible_and_can_be_retried(
     assert retry_batch.json()["retried_job_ids"] == [str(job_id)]
 
 
-def test_successful_crawl_creates_keyword_job_in_database(
+def test_successful_crawl_creates_keyword_and_ahrefs_jobs_in_database(
     client,
     monkeypatch,
 ):
@@ -310,7 +311,7 @@ def test_successful_crawl_creates_keyword_job_in_database(
     monkeypatch.setattr(worker, "_persist_crawl", persist_crawl)
     monkeypatch.setattr(worker, "create_website_pagespeed_jobs", lambda *_: [])
 
-    _, corpus_job_ids = worker._save_success(
+    _, corpus_job_ids, ahrefs_job_ids = worker._save_success(
         crawl_job_id,
         CrawlData(
             website_url=website_url,
@@ -324,10 +325,14 @@ def test_successful_crawl_creates_keyword_job_in_database(
     )
 
     assert len(corpus_job_ids) == 1
+    assert len(ahrefs_job_ids) == 1
     with TestingSessionLocal() as db:
         saved_job = db.get(WebsiteCorpusAnalysisJob, corpus_job_ids[0])
         assert saved_job is not None
         assert saved_job.status == "queued"
+        ahrefs_job = db.get(WebsiteAhrefsDomainRatingJob, ahrefs_job_ids[0])
+        assert ahrefs_job is not None
+        assert ahrefs_job.status == "queued"
         saved_crawl_job = db.get(WebsiteCrawlJob, crawl_job_id)
         assert saved_crawl_job is not None
         assert saved_crawl_job.status == "succeeded"

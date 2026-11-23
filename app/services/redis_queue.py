@@ -7,6 +7,7 @@ from app.http_clients import async_http_client
 QUEUE_KEY = "website-crawl:jobs"
 PAGESPEED_QUEUE_KEY = "pagespeed-scan:jobs"
 CORPUS_ANALYSIS_QUEUE_KEY = "website-corpus-analysis:jobs"
+AHREFS_DOMAIN_RATING_QUEUE_KEY = "website-ahrefs-domain-rating:jobs"
 
 
 class RedisQueueError(RuntimeError):
@@ -69,6 +70,11 @@ async def enqueue_corpus_analysis_jobs(job_ids: list[str]) -> None:
         await _execute("LPUSH", CORPUS_ANALYSIS_QUEUE_KEY, *job_ids)
 
 
+async def enqueue_ahrefs_domain_rating_jobs(job_ids: list[str]) -> None:
+    if job_ids:
+        await _execute("LPUSH", AHREFS_DOMAIN_RATING_QUEUE_KEY, *job_ids)
+
+
 async def dequeue_job() -> str | None:
     return await _dequeue_from(QUEUE_KEY)
 
@@ -79,6 +85,10 @@ async def dequeue_pagespeed_job() -> str | None:
 
 async def dequeue_corpus_analysis_job() -> str | None:
     return await _dequeue_from(CORPUS_ANALYSIS_QUEUE_KEY)
+
+
+async def dequeue_ahrefs_domain_rating_job() -> str | None:
+    return await _dequeue_from(AHREFS_DOMAIN_RATING_QUEUE_KEY)
 
 
 async def _dequeue_from(queue_key: str) -> str | None:

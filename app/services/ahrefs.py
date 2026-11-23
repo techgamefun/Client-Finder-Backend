@@ -433,5 +433,64 @@ def _persist_website_domain_rating(
     )
 
 
+async def fetch_website_domain_rating(
+    website_id: UUID,
+    db: Session,
+) -> WebsiteAhrefsMetricsResponse:
+    domain, api_key, _ = await run_in_threadpool(
+        _prepare_website_metrics_fetch,
+        website_id,
+        db,
+    )
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ahrefs is not configured. Add your API key in Settings.",
+        )
+
+    fetched_at = datetime.now(timezone.utc)
+    try:
+        async with async_http_client(timeout=30.0) as client:
+            rating_response, _ = await _request_ahrefs(
+                client,
+                "public/domain-rating-free",
+                api_key,
+                {"target": f"https://{domain}"},
+                billable=False,
+            )
+    except _AhrefsAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Ahrefs rejected the API key for free Domain Rating.",
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Ahrefs Domain Rating request timed out.",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not reach Ahrefs to retrieve Domain Rating.",
+        ) from exc
+
+    try:
+        rating = _DomainRatingResponse.model_validate(rating_response)
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Ahrefs returned an invalid Domain Rating response.",
+        ) from exc
+
+    return await run_in_threadpool(
+        _persist_website_domain_rating,
+        website_id,
+        rating.domain_rating.domain_rating,
+        rating.domain_rating.license,
+        fetched_at,
+        db,
+    )
+
+
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
