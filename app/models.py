@@ -1165,6 +1165,12 @@ class WebsiteCrawl(TenantOwnedMixin, Base):
         nullable=False,
         default=list,
     )
+    source: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="crawler",
+        server_default="crawler",
+    )
     crawled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -1180,6 +1186,10 @@ class WebsiteCrawl(TenantOwnedMixin, Base):
             "organization_id",
             "website_url",
             name="uq_website_crawls_organization_url",
+        ),
+        CheckConstraint(
+            "source IN ('crawler', 'manual')",
+            name="ck_website_crawls_source_allowed",
         ),
     )
 

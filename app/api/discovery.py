@@ -11,6 +11,8 @@ from starlette.concurrency import run_in_threadpool
 from app.api.deps import get_db
 from app.models import DiscoveryProviderJob, SearchKeyword
 from app.schemas.discovery import (
+    DiscoveryDomainRatingRequest,
+    DiscoveryDomainRatingResult,
     DiscoveryIngestRequest,
     DiscoveryIngestResponse,
     DiscoverySearchResponse,
@@ -21,6 +23,7 @@ from app.schemas.discovery import (
     SearchKeywordResponse,
 )
 from app.services.discovery import StartedProviderJob, search_with_selected_tools
+from app.services.ahrefs import fetch_discovery_domain_ratings
 from app.services.discovery_websites import save_discovered_websites
 from app.services.lead_ingestion import ingest_search_results
 from app.services.octoparse import poll_octoparse_job
@@ -101,6 +104,17 @@ async def discover_companies(
         provider_jobs=provider_jobs,
         provider_failures=provider_failures,
     )
+
+
+@router.post(
+    "/domain-ratings",
+    response_model=list[DiscoveryDomainRatingResult],
+)
+async def get_discovery_domain_ratings(
+    payload: DiscoveryDomainRatingRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> list[DiscoveryDomainRatingResult]:
+    return await fetch_discovery_domain_ratings(payload.domains, db)
 
 
 @router.get(

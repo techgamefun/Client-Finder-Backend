@@ -13,6 +13,8 @@ from app.schemas.website_crawl import (
     WebsiteCrawlBatchResponse,
     WebsiteCrawlJobResponse,
     WebsiteCrawlRequest,
+    ManualWebsiteCrawlCompletionRequest,
+    ManualWebsiteCrawlCompletionResponse,
 )
 from app.schemas.job_queue import (
     BatchJobRetryRequest,
@@ -29,6 +31,9 @@ from app.services.crawl_jobs import (
     retry_failed_website_crawl_jobs,
     retry_website_crawl_job,
     summarize_website_crawl_jobs,
+)
+from app.services.manual_website_completion import (
+    complete_failed_website_crawl_manually,
 )
 
 
@@ -93,9 +98,14 @@ def list_crawl_jobs(
     page_size: int = Query(default=25, ge=1, le=100),
     search: Annotated[str, Query(max_length=300)] = "",
     failure_reason: Annotated[str | None, Query(max_length=2000)] = None,
-    status_filter: Literal["queued", "running", "succeeded", "failed"] | None = (
-        Query(default=None, alias="status")
-    ),
+    status_filter: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "manual",
+    ]
+    | None = Query(default=None, alias="status"),
 ) -> QueueJobsPageResponse[WebsiteCrawlJobResponse]:
     return list_website_crawl_jobs(
         db,
@@ -143,6 +153,18 @@ async def retry_crawl_job(
     db: Annotated[Session, Depends(get_db)],
 ) -> WebsiteCrawlJobResponse:
     return await retry_website_crawl_job(job_id, db)
+
+
+@router.post(
+    "/jobs/{job_id}/manual-completion",
+    response_model=ManualWebsiteCrawlCompletionResponse,
+)
+async def complete_crawl_job_manually(
+    job_id: UUID,
+    payload: ManualWebsiteCrawlCompletionRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> ManualWebsiteCrawlCompletionResponse:
+    return await complete_failed_website_crawl_manually(job_id, payload, db)
 
 
 @router.get("/jobs/{job_id}", response_model=WebsiteCrawlJobResponse)

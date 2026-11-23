@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -11,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.http_clients import async_http_client
 from app.models import Website, WebsiteAhrefsMetrics
+from app.schemas.discovery import DiscoveryDomainRatingResult
 from app.schemas.settings import AhrefsUsageResponse
 from app.schemas.website import WebsiteAhrefsMetricsResponse
 from app.services.application_settings import get_user_provider_api_key
@@ -149,7 +151,7 @@ async def fetch_website_ahrefs_metrics(
                     {"target": target},
                     billable=False,
                 )
-            except _AhrefsAccessDenied as exc:
+            except _AhrefsAccessDenied:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=(
@@ -490,6 +492,186 @@ async def fetch_website_domain_rating(
         fetched_at,
         db,
     )
+
+
+async def fetch_discovery_domain_ratings(
+    domains: list[str],
+    db: Session,
+) -> list[DiscoveryDomainRatingResult]:
+    context = get_tenant_context() or db.info.get("tenant_context")
+    if context is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication is required.",
+        )
+
+    unique_domains = list(dict.fromkeys(domains))
+    cached_ratings = await run_in_threadpool(
+        _get_cached_discovery_domain_ratings,
+        unique_domains,
+        context.organization_id,
+        db,
+    )
+    missing_domains = [
+        domain for domain in unique_domains if domain not in cached_ratings
+    ]
+    fetched_ratings: dict[str, DiscoveryDomainRatingResult] = {}
+    if missing_domains:
+        api_key = await run_in_threadpool(
+            get_user_provider_api_key,
+            db,
+            "ahrefs",
+        )
+        if not api_key:
+            fetched_ratings = {
+                domain: DiscoveryDomainRatingResult(
+                    domain=domain,
+                    status="failed",
+                    error=(
+                        "Add your Ahrefs API key in Settings to fetch "
+                        "Domain Rating."
+                    ),
+                )
+                for domain in missing_domains
+            }
+        else:
+            async with async_http_client(timeout=30.0) as client:
+                semaphore = asyncio.Semaphore(4)
+
+                async def fetch_one(
+                    domain: str,
+                ) -> DiscoveryDomainRatingResult:
+                    async with semaphore:
+                        try:
+                            response, _ = await _request_ahrefs(
+                                client,
+                                "public/domain-rating-free",
+                                api_key,
+                                {"target": f"https://{domain}"},
+                                billable=False,
+                            )
+                            rating = _DomainRatingResponse.model_validate(
+                                response
+                            )
+                        except _AhrefsAccessDenied as exc:
+                            return DiscoveryDomainRatingResult(
+                                domain=domain,
+                                status="failed",
+                                error=(
+                                    "Ahrefs rejected the API key for free "
+                                    "Domain Rating."
+                                ),
+                            )
+                        except HTTPException as exc:
+                            detail = (
+                                exc.detail
+                                if isinstance(exc.detail, str)
+                                else str(exc.detail)
+                            )
+                            return DiscoveryDomainRatingResult(
+                                domain=domain,
+                                status="failed",
+                                error=detail,
+                            )
+                        except httpx.TimeoutException:
+                            return DiscoveryDomainRatingResult(
+                                domain=domain,
+                                status="failed",
+                                error="Ahrefs Domain Rating request timed out.",
+                            )
+                        except httpx.RequestError:
+                            return DiscoveryDomainRatingResult(
+                                domain=domain,
+                                status="failed",
+                                error=(
+                                    "Could not reach Ahrefs to retrieve "
+                                    "Domain Rating."
+                                ),
+                            )
+                        except (ValidationError, TypeError, ValueError):
+                            return DiscoveryDomainRatingResult(
+                                domain=domain,
+                                status="failed",
+                                error="Ahrefs returned an invalid Domain Rating.",
+                            )
+
+                        return DiscoveryDomainRatingResult(
+                            domain=domain,
+                            status="succeeded",
+                            domain_rating=rating.domain_rating.domain_rating,
+                            license_url=rating.domain_rating.license,
+                            fetched_at=datetime.now(timezone.utc),
+                        )
+
+                results = await asyncio.gather(
+                    *(fetch_one(domain) for domain in missing_domains)
+                )
+            fetched_ratings = {
+                result.domain: result
+                for result in results
+            }
+            successful_ratings = {
+                domain: result
+                for domain, result in fetched_ratings.items()
+                if result.status == "succeeded"
+            }
+            if successful_ratings:
+                await run_in_threadpool(
+                    _persist_discovery_domain_ratings,
+                    successful_ratings,
+                    context.organization_id,
+                    db,
+                )
+
+    return [
+        cached_ratings.get(domain) or fetched_ratings[domain]
+        for domain in unique_domains
+    ]
+
+
+def _get_cached_discovery_domain_ratings(
+    domains: list[str],
+    organization_id: UUID,
+    db: Session,
+) -> dict[str, DiscoveryDomainRatingResult]:
+    websites = db.scalars(
+        select(Website).where(
+            Website.organization_id == organization_id,
+            Website.domain.in_(domains),
+            Website.ahrefs_domain_rating.is_not(None),
+        )
+    ).all()
+    return {
+        website.domain: DiscoveryDomainRatingResult(
+            domain=website.domain,
+            status="succeeded",
+            domain_rating=website.ahrefs_domain_rating,
+            license_url=website.ahrefs_domain_rating_license_url,
+            fetched_at=website.ahrefs_domain_rating_fetched_at,
+        )
+        for website in websites
+    }
+
+
+def _persist_discovery_domain_ratings(
+    ratings: dict[str, DiscoveryDomainRatingResult],
+    organization_id: UUID,
+    db: Session,
+) -> None:
+    websites = db.scalars(
+        select(Website).where(
+            Website.organization_id == organization_id,
+            Website.domain.in_(ratings),
+            Website.ahrefs_domain_rating.is_(None),
+        )
+    ).all()
+    for website in websites:
+        rating = ratings[website.domain]
+        website.ahrefs_domain_rating = rating.domain_rating
+        website.ahrefs_domain_rating_license_url = rating.license_url
+        website.ahrefs_domain_rating_fetched_at = rating.fetched_at
+    if websites:
+        db.commit()
 
 
 def _as_utc(value: datetime) -> datetime:

@@ -56,6 +56,7 @@ def test_persist_crawl_stores_home_blog_and_service_pages(client):
 
     assert response.home_page_url == "https://example.com/"
     assert response.site_type == "news_editorial"
+    assert response.source == "crawler"
     assert response.home_content == "Welcome to Example."
     assert response.blog_page_url == "https://example.com/blog"
     assert response.blog_content == "Company updates."

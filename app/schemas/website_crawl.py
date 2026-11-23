@@ -51,6 +51,40 @@ class WebsiteCrawlRequest(BaseModel):
     website_url: HttpUrl
 
 
+class ManualWebsiteCrawlCompletionRequest(BaseModel):
+    site_type: str = Field(min_length=1, max_length=64)
+    website_topics: list[str] = Field(default_factory=list, max_length=30)
+    language: str | None = Field(default=None, max_length=35)
+    home_page_url: HttpUrl | None = None
+    home_content: str | None = Field(default=None, max_length=20000)
+    about_page_url: HttpUrl | None = None
+    about_content: str | None = Field(default=None, max_length=20000)
+    blog_page_url: HttpUrl | None = None
+    blog_content: str | None = Field(default=None, max_length=20000)
+    service_page_url: HttpUrl | None = None
+    service_content: str | None = Field(default=None, max_length=20000)
+    contact_page_url: HttpUrl | None = None
+    contact_content: str | None = Field(default=None, max_length=20000)
+    goals_page_url: HttpUrl | None = None
+    goals_content: str | None = Field(default=None, max_length=20000)
+    emails: list[str] = Field(default_factory=list, max_length=100)
+    phones: list[str] = Field(default_factory=list, max_length=100)
+    social_links: list[HttpUrl] = Field(default_factory=list, max_length=100)
+
+    @field_validator("site_type")
+    @classmethod
+    def site_type_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Site type is required.")
+        return normalized
+
+    @field_validator("website_topics", "emails", "phones")
+    @classmethod
+    def normalize_manual_values(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
 class WebsiteCrawlBatchRequest(BaseModel):
     website_urls: list[HttpUrl] = Field(min_length=1, max_length=100)
 
@@ -78,6 +112,7 @@ class WebsiteCrawlResponse(BaseModel):
     emails: list[str] = Field(default_factory=list)
     phones: list[str] = Field(default_factory=list)
     social_links: list[str] = Field(default_factory=list)
+    source: Literal["crawler", "manual"] = "crawler"
     crawled_at: datetime
     site_type: str | None = None
 
@@ -85,7 +120,7 @@ class WebsiteCrawlResponse(BaseModel):
 class WebsiteCrawlJobResponse(BaseModel):
     id: UUID
     website_url: str
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: Literal["queued", "running", "succeeded", "failed", "manual"]
     attempts: int
     error: str | None
     created_at: datetime
@@ -93,6 +128,25 @@ class WebsiteCrawlJobResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     result: WebsiteCrawlResponse | None
+
+
+ManualEnrichmentStatus = Literal[
+    "queued",
+    "already_available",
+    "already_queued",
+    "not_configured",
+    "disabled",
+]
+
+
+class ManualWebsiteCrawlCompletionResponse(BaseModel):
+    job_id: UUID
+    website_id: UUID
+    crawl_id: UUID
+    status: Literal["manual"]
+    ahrefs_domain_rating: ManualEnrichmentStatus
+    hypestat: ManualEnrichmentStatus
+    pagespeed: ManualEnrichmentStatus
 
 
 class WebsiteCrawlBatchJobResponse(BaseModel):

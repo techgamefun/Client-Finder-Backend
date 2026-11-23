@@ -155,6 +155,36 @@ class DiscoveryResult(BaseModel):
     published_date: str | None = None
 
 
+class DiscoveryDomainRatingRequest(BaseModel):
+    domains: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("domains")
+    @classmethod
+    def domains_must_be_valid(
+        cls,
+        value: list[str],
+    ) -> list[str]:
+        normalized_domains = []
+        for domain in value:
+            normalized = domain.strip().casefold()
+            if normalized.startswith("www."):
+                normalized = normalized[4:]
+            if not _DOMAIN_PATTERN.fullmatch(normalized):
+                raise ValueError("Domains must be valid hostnames.")
+            if normalized not in normalized_domains:
+                normalized_domains.append(normalized)
+        return normalized_domains
+
+
+class DiscoveryDomainRatingResult(BaseModel):
+    domain: str
+    status: Literal["succeeded", "failed"]
+    domain_rating: float | None = None
+    license_url: str | None = None
+    fetched_at: datetime | None = None
+    error: str | None = None
+
+
 class DiscoveryProviderFailure(BaseModel):
     provider: DiscoveryProvider
     detail: str

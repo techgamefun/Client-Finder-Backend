@@ -186,6 +186,7 @@ def _persist_crawl(
 
             if data.site_type is not None:
                 crawl.site_type = data.site_type
+            crawl.source = "crawler"
             crawl.home_page_url = data.home_page_url
             crawl.home_content = data.home_content
             crawl.about_page_url = data.about_page_url

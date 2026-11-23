@@ -115,6 +115,119 @@ def test_ahrefs_usage_is_unavailable_for_public_only_key(client, monkeypatch):
     assert response.json() is None
 
 
+def test_discovery_domain_ratings_use_saved_values_and_fetch_missing(
+    client,
+    monkeypatch,
+):
+    api_key = _save_ahrefs_key()
+    with TestingSessionLocal() as db:
+        cached = Website(
+            website_url="https://cached-rating.example/",
+            domain="cached-rating.example",
+            ahrefs_domain_rating=21.5,
+            ahrefs_domain_rating_license_url="https://ahrefs.com/cached",
+            ahrefs_domain_rating_fetched_at=datetime.now(timezone.utc),
+        )
+        missing = Website(
+            website_url="https://missing-rating.example/",
+            domain="missing-rating.example",
+        )
+        db.add_all([cached, missing])
+        db.commit()
+        missing_website_id = missing.id
+
+    requests = []
+
+    def handle_request(request):
+        requests.append(request)
+        assert request.url.path.endswith("/public/domain-rating-free")
+        assert request.url.params["target"] == (
+            "https://missing-rating.example"
+        )
+        assert request.headers["authorization"] == f"Bearer {api_key}"
+        return httpx.Response(
+            200,
+            json={
+                "domain_rating": {
+                    "domain_rating": 43.5,
+                    "license": "https://ahrefs.com/missing",
+                }
+            },
+        )
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "app.services.ahrefs.httpx.AsyncClient",
+        lambda timeout: real_async_client(
+            transport=httpx.MockTransport(handle_request),
+            timeout=timeout,
+        ),
+    )
+
+    response = client.post(
+        "/api/v1/discovery/domain-ratings",
+        json={
+            "domains": [
+                "cached-rating.example",
+                "missing-rating.example",
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "domain": "cached-rating.example",
+            "status": "succeeded",
+            "domain_rating": 21.5,
+            "license_url": "https://ahrefs.com/cached",
+            "fetched_at": response.json()[0]["fetched_at"],
+            "error": None,
+        },
+        {
+            "domain": "missing-rating.example",
+            "status": "succeeded",
+            "domain_rating": 43.5,
+            "license_url": "https://ahrefs.com/missing",
+            "fetched_at": response.json()[1]["fetched_at"],
+            "error": None,
+        },
+    ]
+    assert response.json()[0]["fetched_at"] is not None
+    assert response.json()[1]["fetched_at"] is not None
+    assert len(requests) == 1
+    with TestingSessionLocal() as db:
+        saved_website = db.get(Website, missing_website_id)
+        assert saved_website is not None
+        assert saved_website.ahrefs_domain_rating == 43.5
+        assert saved_website.ahrefs_domain_rating_license_url == (
+            "https://ahrefs.com/missing"
+        )
+        assert saved_website.ahrefs_domain_rating_fetched_at is not None
+
+
+def test_discovery_domain_ratings_explain_missing_api_key(client):
+    response = client.post(
+        "/api/v1/discovery/domain-ratings",
+        json={"domains": ["unrated.example"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "domain": "unrated.example",
+            "status": "failed",
+            "domain_rating": None,
+            "license_url": None,
+            "fetched_at": None,
+            "error": (
+                "Add your Ahrefs API key in Settings to fetch "
+                "Domain Rating."
+            ),
+        }
+    ]
+
+
 def test_ahrefs_site_metrics_are_cached_and_returned_in_website_detail(
     client,
     monkeypatch,
