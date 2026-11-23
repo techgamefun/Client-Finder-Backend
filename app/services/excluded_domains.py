@@ -110,7 +110,7 @@ def seed_system_excluded_domains(
         reset_tenant_context(context_token)
 
 
-def delete_queued_jobs_for_domains(
+def delete_queued_and_failed_jobs_for_domains(
     db: Session,
     domains: set[str],
 ) -> int:
@@ -118,7 +118,9 @@ def delete_queued_jobs_for_domains(
         return 0
 
     jobs = db.scalars(
-        select(WebsiteCrawlJob).where(WebsiteCrawlJob.status == "queued")
+        select(WebsiteCrawlJob).where(
+            WebsiteCrawlJob.status.in_(("queued", "failed"))
+        )
     ).all()
     job_ids: list[UUID] = []
     for job in jobs:
@@ -138,7 +140,7 @@ def delete_queued_jobs_for_domains(
     result = db.execute(
         delete(WebsiteCrawlJob).where(
             WebsiteCrawlJob.id.in_(job_ids),
-            WebsiteCrawlJob.status == "queued",
+            WebsiteCrawlJob.status.in_(("queued", "failed")),
         )
     )
     return result.rowcount or 0
@@ -212,7 +214,7 @@ def record_unreachable_domain_failure(
             where=excluded_table.c.source == "auto_crawler",
         )
         db.execute(exclusion_statement)
-        delete_queued_jobs_for_domains(db, {hostname})
+        delete_queued_and_failed_jobs_for_domains(db, {hostname})
 
     db.commit()
     return failure_count

@@ -216,6 +216,38 @@ def test_adding_exclusion_deletes_existing_queued_jobs(client, monkeypatch):
         assert saved_job is None
 
 
+def test_adding_exclusion_deletes_queued_and_failed_jobs_only(client):
+    with TestingSessionLocal() as db:
+        jobs = {
+            job.status: job
+            for job in (
+                WebsiteCrawlJob(
+                    website_url=f"https://{status}.example.test/",
+                    status=status,
+                )
+                for status in ("queued", "failed", "running", "succeeded")
+            )
+        }
+        db.add_all(jobs.values())
+        db.commit()
+        job_ids = {status: job.id for status, job in jobs.items()}
+
+    response = client.post(
+        "/api/v1/excluded-domains",
+        json={
+            "domain": "example.test",
+            "reason": "Manual Exclusion",
+        },
+    )
+
+    assert response.status_code == 201
+    with TestingSessionLocal() as db:
+        assert db.get(WebsiteCrawlJob, job_ids["queued"]) is None
+        assert db.get(WebsiteCrawlJob, job_ids["failed"]) is None
+        assert db.get(WebsiteCrawlJob, job_ids["running"]) is not None
+        assert db.get(WebsiteCrawlJob, job_ids["succeeded"]) is not None
+
+
 def test_batch_crawl_reports_excluded_targets_without_creating_jobs(
     client,
     monkeypatch,
