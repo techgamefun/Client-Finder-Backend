@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from app.http_clients import async_http_client
 from app.models import Website, WebsiteAhrefsMetrics
 from app.schemas.settings import AhrefsUsageResponse
+from app.schemas.website import WebsiteAhrefsMetricsResponse
 from app.services.application_settings import get_user_provider_api_key
 from app.tenant_context import get_tenant_context
 
@@ -50,7 +51,18 @@ class _BacklinksMetricsResponse(BaseModel):
     metrics: _BacklinksMetrics
 
 
-async def get_ahrefs_usage(db: Session) -> AhrefsUsageResponse:
+class _AhrefsAccessDenied(Exception):
+    def __init__(self, endpoint: str, status_code: int) -> None:
+        self.endpoint = endpoint
+        self.status_code = status_code
+        super().__init__(
+            f"Ahrefs rejected {endpoint} with HTTP {status_code}."
+        )
+
+
+async def get_ahrefs_usage(
+    db: Session,
+) -> AhrefsUsageResponse | None:
     api_key = await run_in_threadpool(
         get_user_provider_api_key,
         db,
@@ -81,10 +93,7 @@ async def get_ahrefs_usage(db: Session) -> AhrefsUsageResponse:
         ) from exc
 
     if response.status_code in (401, 403):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Ahrefs rejected the configured API key.",
-        )
+        return None
     if response.status_code == 429:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -111,7 +120,7 @@ async def get_ahrefs_usage(db: Session) -> AhrefsUsageResponse:
 async def fetch_website_ahrefs_metrics(
     website_id: UUID,
     db: Session,
-) -> WebsiteAhrefsMetrics:
+) -> WebsiteAhrefsMetricsResponse:
     domain, api_key, cached_metrics = await run_in_threadpool(
         _prepare_website_metrics_fetch,
         website_id,
@@ -122,7 +131,7 @@ async def fetch_website_ahrefs_metrics(
         cached_metrics is not None
         and _as_utc(cached_metrics.fetched_at) >= now - AHREFS_CACHE_TTL
     ):
-        return cached_metrics
+        return WebsiteAhrefsMetricsResponse.model_validate(cached_metrics)
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -130,39 +139,60 @@ async def fetch_website_ahrefs_metrics(
         )
 
     target = f"https://{domain}"
-    snapshot_date = now.date()
-    common_params = {"date": snapshot_date.isoformat(), "target": target}
     try:
         async with async_http_client(timeout=30.0) as client:
-            rating_response = await _request_ahrefs(
-                client,
-                "public/domain-rating-free",
-                api_key,
-                {"target": target},
-                billable=False,
-            )
-            metrics_response = await _request_ahrefs(
-                client,
-                "site-explorer/metrics",
-                api_key,
-                {
-                    **common_params,
-                    "mode": "subdomains",
-                    "output": "json",
-                },
-                billable=True,
-            )
-            backlinks_response = await _request_ahrefs(
-                client,
-                "site-explorer/backlinks-stats",
-                api_key,
-                {
-                    **common_params,
-                    "mode": "subdomains",
-                    "output": "json",
-                },
-                billable=True,
-            )
+            try:
+                rating_response = await _request_ahrefs(
+                    client,
+                    "public/domain-rating-free",
+                    api_key,
+                    {"target": target},
+                    billable=False,
+                )
+            except _AhrefsAccessDenied as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=(
+                        "Ahrefs rejected the API key for free Domain Rating."
+                    ),
+                ) from exc
+
+            snapshot_date = now.date()
+            common_params = {
+                "date": snapshot_date.isoformat(),
+                "target": target,
+            }
+            try:
+                metrics_response = await _request_ahrefs(
+                    client,
+                    "site-explorer/metrics",
+                    api_key,
+                    {
+                        **common_params,
+                        "mode": "subdomains",
+                        "output": "json",
+                    },
+                    billable=True,
+                )
+            except _AhrefsAccessDenied:
+                metrics_response = None
+
+            backlinks_response = None
+            if metrics_response is not None:
+                try:
+                    backlinks_response = await _request_ahrefs(
+                        client,
+                        "site-explorer/backlinks-stats",
+                        api_key,
+                        {
+                            **common_params,
+                            "mode": "subdomains",
+                            "output": "json",
+                        },
+                        billable=True,
+                    )
+                except _AhrefsAccessDenied:
+                    backlinks_response = None
     except httpx.TimeoutException as exc:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
@@ -176,9 +206,15 @@ async def fetch_website_ahrefs_metrics(
 
     try:
         rating = _DomainRatingResponse.model_validate(rating_response[0])
-        metrics = _SiteMetricsResponse.model_validate(metrics_response[0])
-        backlinks = _BacklinksMetricsResponse.model_validate(
-            backlinks_response[0]
+        metrics = (
+            _SiteMetricsResponse.model_validate(metrics_response[0])
+            if metrics_response is not None
+            else None
+        )
+        backlinks = (
+            _BacklinksMetricsResponse.model_validate(backlinks_response[0])
+            if backlinks_response is not None
+            else None
         )
     except (ValidationError, TypeError, ValueError) as exc:
         raise HTTPException(
@@ -186,27 +222,51 @@ async def fetch_website_ahrefs_metrics(
             detail="Ahrefs returned an invalid website metrics response.",
         ) from exc
 
-    costs = [metrics_response[1], backlinks_response[1]]
-    units_used = sum(costs) if all(cost is not None for cost in costs) else None
+    paid_responses = [
+        response
+        for response in (metrics_response, backlinks_response)
+        if response is not None
+    ]
+    costs = [response[1] for response in paid_responses]
+    if not paid_responses:
+        return await run_in_threadpool(
+            _persist_website_domain_rating,
+            website_id,
+            rating.domain_rating.domain_rating,
+            rating.domain_rating.license,
+            now,
+            db,
+        )
+    if all(cost is not None for cost in costs):
+        units_used = sum(cost for cost in costs if cost is not None)
+    else:
+        units_used = None
     values = {
         "snapshot_date": snapshot_date,
         "domain_rating": rating.domain_rating.domain_rating,
         "domain_rating_license_url": rating.domain_rating.license,
-        "organic_traffic": metrics.metrics.org_traffic,
-        "organic_traffic_cost_cents": metrics.metrics.org_cost,
-        "organic_keywords": metrics.metrics.org_keywords,
-        "backlinks_live": backlinks.metrics.live,
-        "backlinks_all_time": backlinks.metrics.all_time,
-        "refdomains_live": backlinks.metrics.live_refdomains,
-        "refdomains_all_time": backlinks.metrics.all_time_refdomains,
+        "organic_traffic": metrics.metrics.org_traffic if metrics else None,
+        "organic_traffic_cost_cents": (
+            metrics.metrics.org_cost if metrics else None
+        ),
+        "organic_keywords": metrics.metrics.org_keywords if metrics else None,
+        "backlinks_live": backlinks.metrics.live if backlinks else None,
+        "backlinks_all_time": backlinks.metrics.all_time if backlinks else None,
+        "refdomains_live": (
+            backlinks.metrics.live_refdomains if backlinks else None
+        ),
+        "refdomains_all_time": (
+            backlinks.metrics.all_time_refdomains if backlinks else None
+        ),
         "units_used": units_used,
     }
-    return await run_in_threadpool(
+    metrics = await run_in_threadpool(
         _persist_website_metrics,
         website_id,
         values,
         db,
     )
+    return WebsiteAhrefsMetricsResponse.model_validate(metrics)
 
 
 def get_cached_website_ahrefs_metrics(
@@ -239,10 +299,7 @@ async def _request_ahrefs(
     )
 
     if response.status_code in (401, 403):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Ahrefs rejected the configured API key.",
-        )
+        raise _AhrefsAccessDenied(endpoint, response.status_code)
     if response.status_code == 429:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -333,10 +390,47 @@ def _persist_website_metrics(
     else:
         for field, value in values.items():
             setattr(metrics, field, value)
-        metrics.fetched_at = datetime.now(timezone.utc)
+    fetched_at = datetime.now(timezone.utc)
+    metrics.fetched_at = fetched_at
+    website = db.get(Website, website_id)
+    if website is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website not found.",
+        )
+    website.ahrefs_domain_rating = values["domain_rating"]
+    website.ahrefs_domain_rating_license_url = values[
+        "domain_rating_license_url"
+    ]
+    website.ahrefs_domain_rating_fetched_at = fetched_at
     db.commit()
     db.refresh(metrics)
     return metrics
+
+
+def _persist_website_domain_rating(
+    website_id: UUID,
+    domain_rating: float,
+    license_url: str,
+    fetched_at: datetime,
+    db: Session,
+) -> WebsiteAhrefsMetricsResponse:
+    website = db.get(Website, website_id)
+    if website is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website not found.",
+        )
+    website.ahrefs_domain_rating = domain_rating
+    website.ahrefs_domain_rating_license_url = license_url
+    website.ahrefs_domain_rating_fetched_at = fetched_at
+    db.commit()
+    return WebsiteAhrefsMetricsResponse(
+        snapshot_date=fetched_at.date(),
+        domain_rating=domain_rating,
+        domain_rating_license_url=license_url,
+        fetched_at=fetched_at,
+    )
 
 
 def _as_utc(value: datetime) -> datetime:

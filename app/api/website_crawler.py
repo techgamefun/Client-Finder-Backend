@@ -24,6 +24,7 @@ from app.services.crawl_jobs import (
     create_website_crawl_job,
     create_website_crawl_jobs,
     get_website_crawl_job,
+    list_website_crawl_failure_reasons,
     list_website_crawl_jobs,
     retry_failed_website_crawl_jobs,
     retry_website_crawl_job,
@@ -91,6 +92,7 @@ def list_crawl_jobs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     search: Annotated[str, Query(max_length=300)] = "",
+    failure_reason: Annotated[str | None, Query(max_length=2000)] = None,
     status_filter: Literal["queued", "running", "succeeded", "failed"] | None = (
         Query(default=None, alias="status")
     ),
@@ -100,8 +102,16 @@ def list_crawl_jobs(
         page=page,
         page_size=page_size,
         search=search,
+        failure_reason=failure_reason,
         status=status_filter,
     )
+
+
+@router.get("/jobs/failure-reasons", response_model=list[str])
+def list_crawl_job_failure_reasons(
+    db: Annotated[Session, Depends(get_db)],
+) -> list[str]:
+    return list_website_crawl_failure_reasons(db)
 
 
 @router.get("/jobs/summary", response_model=JobQueueStatusSummary)

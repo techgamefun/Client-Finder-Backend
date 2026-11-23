@@ -9,15 +9,15 @@ from fastapi import (
     Query,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_authenticated_context
 from app.models import PageSpeedScan, Website, WebsiteCrawlJob
-from app.schemas.pagespeed import PageSpeedScanSummary
-from app.schemas.job_queue import QueueJobsPageResponse
 from app.schemas.job_queue import BatchJobRetryRequest, BatchJobRetryResponse
+from app.schemas.job_queue import QueueJobsPageResponse
+from app.schemas.pagespeed import PageSpeedScanSummary
 from app.schemas.website import (
     WebsiteAddToLeadsRequest,
     WebsiteAddToLeadsResponse,
@@ -36,6 +36,7 @@ from app.schemas.website import (
     WebsiteResponse,
     WebsiteUpdate,
 )
+from app.schemas.website_analytics import WebsiteAnalyticsResponse
 from app.schemas.website_crawl import (
     CrawlPageClassification,
     WebsiteCrawlResponse,
@@ -56,22 +57,36 @@ from app.services.website_classification import (
 )
 from app.services.website_leads import add_websites_to_leads
 from app.services.website_registry import update_websites_status
-from app.services.website_hypestat import refetch_website_hypestat_profile
 from app.services.ahrefs import (
     fetch_website_ahrefs_metrics,
     get_cached_website_ahrefs_metrics,
 )
+from app.services.website_hypestat import refetch_website_hypestat_profile
 from app.services.website_registry_query import (
     WebsiteSortKey,
     get_website_registry_facets,
     get_website_registry_page,
 )
+from app.services.website_analytics import build_website_analytics
+from app.tenant_context import TenantContext
 
 
 router = APIRouter(prefix="/websites", tags=["Websites"])
 
 WebsiteSession = Annotated[Session, Depends(get_db)]
+CurrentContext = Annotated[
+    TenantContext,
+    Depends(require_authenticated_context),
+]
 PAGESPEED_HISTORY_LIMIT = 10
+
+
+@router.get("/analytics", response_model=WebsiteAnalyticsResponse)
+def read_website_analytics(
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> WebsiteAnalyticsResponse:
+    return build_website_analytics(db, context)
 
 
 @router.get("", response_model=list[WebsiteResponse])
@@ -127,12 +142,61 @@ def list_website_registry_page(
     minimum_monthly_visits: float | None = Query(default=None, ge=0),
     minimum_referring_domains: float | None = Query(default=None, ge=0),
     maximum_global_rank: float | None = Query(default=None, ge=1),
+    pagespeed_strategy: Literal["desktop", "mobile"] | None = Query(
+        default=None,
+    ),
+    pagespeed_category: Literal[
+        "performance",
+        "accessibility",
+        "best-practices",
+        "seo",
+    ]
+    | None = Query(default=None),
+    minimum_pagespeed_score: int | None = Query(
+        default=None,
+        ge=0,
+        le=100,
+    ),
+    maximum_pagespeed_score: int | None = Query(
+        default=None,
+        ge=0,
+        le=100,
+    ),
+    minimum_ahrefs_domain_rating: float | None = Query(
+        default=None,
+        ge=0,
+        le=100,
+    ),
+    maximum_ahrefs_domain_rating: float | None = Query(
+        default=None,
+        ge=0,
+        le=100,
+    ),
     hypestat_country: str | None = Query(default=None, max_length=100),
     backlink_country: str | None = Query(default=None, max_length=100),
     audience_country: str | None = Query(default=None, max_length=100),
     sort_by: WebsiteSortKey | None = Query(default=None),
     sort_direction: Literal["ascending", "descending"] = "ascending",
 ) -> WebsiteRegistryPageResponse:
+    if (
+        minimum_pagespeed_score is not None
+        or maximum_pagespeed_score is not None
+    ) and (pagespeed_strategy is None or pagespeed_category is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Choose a PageSpeed device and category when filtering scores."
+            ),
+        )
+    if (
+        minimum_pagespeed_score is not None
+        and maximum_pagespeed_score is not None
+        and minimum_pagespeed_score > maximum_pagespeed_score
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Minimum PageSpeed score cannot exceed the maximum.",
+        )
     websites, total_count, indexed_count, website_count = (
         get_website_registry_page(
             db,
@@ -146,6 +210,12 @@ def list_website_registry_page(
             minimum_monthly_visits=minimum_monthly_visits,
             minimum_referring_domains=minimum_referring_domains,
             maximum_global_rank=maximum_global_rank,
+            pagespeed_strategy=pagespeed_strategy,
+            pagespeed_category=pagespeed_category,
+            minimum_pagespeed_score=minimum_pagespeed_score,
+            maximum_pagespeed_score=maximum_pagespeed_score,
+            minimum_ahrefs_domain_rating=minimum_ahrefs_domain_rating,
+            maximum_ahrefs_domain_rating=maximum_ahrefs_domain_rating,
             hypestat_country=hypestat_country,
             backlink_country=backlink_country,
             audience_country=audience_country,
@@ -154,11 +224,18 @@ def list_website_registry_page(
         )
     )
     crawl_job_statuses = _crawl_job_statuses(db, websites)
+    pagespeed_scans = _latest_pagespeed_scans(db, websites)
     return WebsiteRegistryPageResponse(
         items=[
             _website_response(
                 website,
                 crawl_job_statuses.get(website.website_url),
+                pagespeed_desktop=pagespeed_scans.get(website.id, {}).get(
+                    "desktop",
+                ),
+                pagespeed_mobile=pagespeed_scans.get(website.id, {}).get(
+                    "mobile",
+                ),
                 include_crawl_signals=False,
                 include_created_by=False,
             )
@@ -421,13 +498,13 @@ async def refetch_hypestat_profile(
 @router.post(
     "/{website_id}/ahrefs-metrics",
     response_model=WebsiteAhrefsMetricsResponse,
+    response_model_exclude_none=True,
 )
 async def refresh_ahrefs_metrics(
     website_id: UUID,
     db: WebsiteSession,
 ) -> WebsiteAhrefsMetricsResponse:
-    metrics = await fetch_website_ahrefs_metrics(website_id, db)
-    return WebsiteAhrefsMetricsResponse.model_validate(metrics)
+    return await fetch_website_ahrefs_metrics(website_id, db)
 
 
 @router.patch("/{website_id}", response_model=WebsiteResponse)
@@ -485,10 +562,53 @@ def _crawl_job_statuses(
     return statuses
 
 
+def _latest_pagespeed_scans(
+    db: Session,
+    websites: list[Website],
+) -> dict[UUID, dict[str, PageSpeedScan]]:
+    website_ids = [website.id for website in websites]
+    if not website_ids:
+        return {}
+    ranked_scans = (
+        select(
+            PageSpeedScan.id.label("scan_id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    PageSpeedScan.website_id,
+                    PageSpeedScan.strategy,
+                ),
+                order_by=(
+                    PageSpeedScan.scanned_at.desc(),
+                    PageSpeedScan.id.desc(),
+                ),
+            )
+            .label("scan_rank"),
+        )
+        .where(
+            PageSpeedScan.website_id.in_(website_ids),
+            PageSpeedScan.organization_id == websites[0].organization_id,
+        )
+        .subquery()
+    )
+    scans = db.scalars(
+        select(PageSpeedScan)
+        .join(ranked_scans, ranked_scans.c.scan_id == PageSpeedScan.id)
+        .where(ranked_scans.c.scan_rank == 1)
+    ).all()
+    latest: dict[UUID, dict[str, PageSpeedScan]] = {}
+    for scan in scans:
+        if scan.website_id is not None:
+            latest.setdefault(scan.website_id, {})[scan.strategy] = scan
+    return latest
+
+
 def _website_response(
     website: Website,
     crawl_job_status: str | None,
     *,
+    pagespeed_desktop: PageSpeedScan | None = None,
+    pagespeed_mobile: PageSpeedScan | None = None,
     include_crawl_signals: bool = True,
     include_created_by: bool = True,
 ) -> WebsiteResponse:
@@ -529,6 +649,23 @@ def _website_response(
         ),
         crawled_at=website.crawl.crawled_at if website.crawl else None,
         crawl_signals=crawl_signals,
+        ahrefs_domain_rating=website.ahrefs_domain_rating,
+        ahrefs_domain_rating_license_url=(
+            website.ahrefs_domain_rating_license_url
+        ),
+        ahrefs_domain_rating_fetched_at=(
+            website.ahrefs_domain_rating_fetched_at
+        ),
+        pagespeed_desktop=(
+            PageSpeedScanSummary.model_validate(pagespeed_desktop)
+            if pagespeed_desktop is not None
+            else None
+        ),
+        pagespeed_mobile=(
+            PageSpeedScanSummary.model_validate(pagespeed_mobile)
+            if pagespeed_mobile is not None
+            else None
+        ),
         **hypestat_summary,
     )
 

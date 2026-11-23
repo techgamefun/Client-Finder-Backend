@@ -87,6 +87,25 @@ def test_ahrefs_usage_returns_subscription_limits(client, monkeypatch):
     assert received_headers["authorization"] == f"Bearer {api_key}"
 
 
+def test_ahrefs_usage_is_unavailable_for_public_only_key(client, monkeypatch):
+    _save_ahrefs_key()
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "app.services.ahrefs.httpx.AsyncClient",
+        lambda timeout: real_async_client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(403)
+            ),
+            timeout=timeout,
+        ),
+    )
+
+    response = client.get("/api/v1/settings/ahrefs/usage")
+
+    assert response.status_code == 200
+    assert response.json() is None
+
+
 def test_ahrefs_site_metrics_are_cached_and_returned_in_website_detail(
     client,
     monkeypatch,
@@ -179,6 +198,7 @@ def test_ahrefs_site_metrics_are_cached_and_returned_in_website_detail(
     assert cached_response.status_code == 200
     assert detail_response.status_code == 200
     assert detail_response.json()["ahrefs_metrics"]["domain_rating"] == 42.5
+    assert detail_response.json()["website"]["ahrefs_domain_rating"] == 42.5
     assert len(requests) == 3
     with TestingSessionLocal() as db:
         metrics = db.scalar(
@@ -188,3 +208,76 @@ def test_ahrefs_site_metrics_are_cached_and_returned_in_website_detail(
         )
         assert metrics is not None
         assert metrics.units_used == 103
+
+
+def test_ahrefs_free_key_returns_domain_rating_without_paid_metrics(
+    client,
+    monkeypatch,
+):
+    api_key = _save_ahrefs_key()
+    with TestingSessionLocal() as db:
+        website = Website(
+            website_url="https://ahrefs-free.example/",
+            domain="ahrefs-free.example",
+        )
+        db.add(website)
+        db.commit()
+        website_id = website.id
+
+    requested_paths = []
+
+    def handle_request(request):
+        requested_paths.append(request.url.path)
+        assert request.headers["authorization"] == f"Bearer {api_key}"
+        if request.url.path.endswith("/public/domain-rating-free"):
+            return httpx.Response(
+                200,
+                json={
+                    "domain_rating": {
+                        "domain_rating": 35.0,
+                        "license": "https://ahrefs.com/license",
+                    }
+                },
+            )
+        if request.url.path.endswith("/site-explorer/metrics"):
+            return httpx.Response(403)
+        raise AssertionError(f"Unexpected Ahrefs request: {request.url}")
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "app.services.ahrefs.httpx.AsyncClient",
+        lambda timeout: real_async_client(
+            transport=httpx.MockTransport(handle_request),
+            timeout=timeout,
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/websites/{website_id}/ahrefs-metrics"
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["domain_rating"] == 35.0
+    assert "organic_traffic" not in result
+    assert "backlinks_live" not in result
+    assert "units_used" not in result
+    assert requested_paths == [
+        "/v3/public/domain-rating-free",
+        "/v3/site-explorer/metrics",
+    ]
+    detail_response = client.get(f"/api/v1/websites/{website_id}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["ahrefs_metrics"] is None
+    assert detail_response.json()["website"]["ahrefs_domain_rating"] == 35.0
+    with TestingSessionLocal() as db:
+        assert db.scalar(
+            select(WebsiteAhrefsMetrics).where(
+                WebsiteAhrefsMetrics.website_id == website_id
+            )
+        ) is None
+        website = db.get(Website, website_id)
+        assert website is not None
+        assert website.ahrefs_domain_rating_license_url == (
+            "https://ahrefs.com/license"
+        )

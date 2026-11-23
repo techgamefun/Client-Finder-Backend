@@ -116,6 +116,96 @@ def test_crawler_jobs_search_status_and_pagination(client):
     assert result["status_counts"] == {"queued": 2, "failed": 1}
 
 
+def test_crawler_jobs_search_matches_failure_reason(client):
+    with TestingSessionLocal() as db:
+        matching_job = WebsiteCrawlJob(
+            website_url="https://rendering.example/",
+            status="failed",
+            error="JavaScript rendering timed out",
+        )
+        other_failed_job = WebsiteCrawlJob(
+            website_url="https://different-error.example/",
+            status="failed",
+            error="Connection refused",
+        )
+        db.add_all(
+            [
+                matching_job,
+                other_failed_job,
+                WebsiteCrawlJob(
+                    website_url="https://queued.example/",
+                    status="queued",
+                ),
+            ]
+        )
+        db.commit()
+        expected_job_id = str(matching_job.id)
+
+    response = client.get(
+        "/api/v1/crawler/jobs",
+        params={"search": "javascript rendering", "status": "failed"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert [job["id"] for job in result["items"]] == [expected_job_id]
+    assert result["total_count"] == 1
+    assert result["status_counts"] == {"failed": 1}
+
+
+def test_crawler_job_failure_reason_options_and_filter(client):
+    with TestingSessionLocal() as db:
+        matching_jobs = [
+            WebsiteCrawlJob(
+                website_url=f"https://rendering-{index}.example/",
+                status="failed",
+                error=(
+                    f"Crawler could not fetch https://rendering-{index}.example/: "
+                    "JavaScript rendering timed out"
+                ),
+            )
+            for index in range(2)
+        ]
+        db.add_all(
+            [
+                *matching_jobs,
+                WebsiteCrawlJob(
+                    website_url="https://blocked.example/",
+                    status="failed",
+                    error="Crawler could not fetch https://blocked.example/: Access denied",
+                ),
+                WebsiteCrawlJob(
+                    website_url="https://queued.example/",
+                    status="queued",
+                    error="Should not be an option",
+                ),
+            ]
+        )
+        db.commit()
+        expected_job_ids = {str(job.id) for job in matching_jobs}
+
+    reasons_response = client.get("/api/v1/crawler/jobs/failure-reasons")
+    assert reasons_response.status_code == 200
+    assert reasons_response.json() == [
+        "Access denied",
+        "JavaScript rendering timed out",
+    ]
+
+    jobs_response = client.get(
+        "/api/v1/crawler/jobs",
+        params={
+            "failure_reason": "JavaScript rendering timed out",
+            "status": "failed",
+        },
+    )
+
+    assert jobs_response.status_code == 200
+    result = jobs_response.json()
+    assert {job["id"] for job in result["items"]} == expected_job_ids
+    assert result["total_count"] == 2
+    assert result["status_counts"] == {"failed": 2}
+
+
 def test_websites_endpoint_returns_hypestat_table_summaries(client):
     with TestingSessionLocal() as db:
         website = Website(
@@ -183,6 +273,41 @@ def test_websites_endpoint_returns_hypestat_table_summaries(client):
     ]
 
 
+def test_website_registry_page_includes_current_user_domain_rating(client):
+    with TestingSessionLocal() as db:
+        websites = []
+        for domain in ("ahrefs-dr.example", "no-ahrefs-dr.example"):
+            crawl = WebsiteCrawl(
+                website_url=f"https://{domain}/",
+                site_type="saas_corporate_marketing",
+            )
+            db.add(crawl)
+            db.flush()
+            website = Website(
+                website_url=crawl.website_url,
+                domain=domain,
+                crawl_id=crawl.id,
+            )
+            if domain == "ahrefs-dr.example":
+                website.ahrefs_domain_rating = 42.7
+                website.ahrefs_domain_rating_license_url = (
+                    "https://ahrefs.com/license"
+                )
+            db.add(website)
+            db.flush()
+            websites.append(website)
+        db.commit()
+        website_id = websites[0].id
+        unrated_website_id = websites[1].id
+
+    response = client.get("/api/v1/websites/registry-page")
+
+    assert response.status_code == 200
+    websites = {item["id"]: item for item in response.json()["items"]}
+    assert websites[str(website_id)]["ahrefs_domain_rating"] == 42.7
+    assert websites[str(unrated_website_id)]["ahrefs_domain_rating"] is None
+
+
 def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     with TestingSessionLocal() as db:
         for domain, status, topics in [
@@ -217,9 +342,108 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
                 status=status,
                 page_type="business_site",
                 discovery_source="tavily",
+                ahrefs_domain_rating={
+                    "alpha.example": 72.5,
+                    "bravo.example": 25.0,
+                }.get(domain),
             )
             db.add(website)
             db.flush()
+            if domain == "alpha.example":
+                db.add_all(
+                    [
+                        PageSpeedScan(
+                            website_id=website.id,
+                            website_url=website.website_url,
+                            strategy="desktop",
+                            category_scores={
+                                "performance": 25,
+                                "accessibility": 60,
+                                "best-practices": 65,
+                                "seo": 70,
+                            },
+                            scanned_at=datetime(
+                                2026,
+                                10,
+                                1,
+                                tzinfo=timezone.utc,
+                            ),
+                        ),
+                        PageSpeedScan(
+                            website_id=website.id,
+                            website_url=website.website_url,
+                            strategy="desktop",
+                            category_scores={
+                                "performance": 75,
+                                "accessibility": 89,
+                                "best-practices": 77,
+                                "seo": 100,
+                            },
+                            scanned_at=datetime(
+                                2026,
+                                11,
+                                20,
+                                tzinfo=timezone.utc,
+                            ),
+                        ),
+                        PageSpeedScan(
+                            website_id=website.id,
+                            website_url=website.website_url,
+                            strategy="mobile",
+                            category_scores={
+                                "performance": 59,
+                                "accessibility": 95,
+                                "best-practices": 73,
+                                "seo": 100,
+                            },
+                            scanned_at=datetime(
+                                2026,
+                                11,
+                                20,
+                                tzinfo=timezone.utc,
+                            ),
+                        ),
+                    ]
+                )
+            elif domain == "bravo.example":
+                db.add_all(
+                    [
+                        PageSpeedScan(
+                            website_id=website.id,
+                            website_url=website.website_url,
+                            strategy="desktop",
+                            category_scores={
+                                "performance": 60,
+                                "accessibility": 80,
+                                "best-practices": 80,
+                                "seo": 85,
+                            },
+                            scanned_at=datetime(
+                                2026,
+                                11,
+                                19,
+                                tzinfo=timezone.utc,
+                            ),
+                        ),
+                        PageSpeedScan(
+                            website_id=website.id,
+                            website_url=website.website_url,
+                            strategy="mobile",
+                            category_scores={
+                                "performance": 40,
+                                "accessibility": 90,
+                                "best-practices": 70,
+                                "seo": 90,
+                            },
+                            scanned_at=datetime(
+                                2026,
+                                11,
+                                19,
+                                tzinfo=timezone.utc,
+                            ),
+                        ),
+                    ]
+                )
             if domain == "alpha.example":
                 db.add(
                     WebsiteHypeStatProfile(
@@ -298,6 +522,86 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
         "charlie.example"
     ]
     assert first_page.json()["items"][0]["crawl_signals"] == []
+    assert (
+        first_page.json()["items"][0]["pagespeed_desktop"]["category_scores"][
+            "performance"
+        ]
+        == 75
+    )
+    assert first_page.json()["items"][0]["pagespeed_desktop"][
+        "scanned_at"
+    ].startswith("2026-11-20")
+    assert (
+        first_page.json()["items"][0]["pagespeed_mobile"]["category_scores"][
+            "seo"
+        ]
+        == 100
+    )
+
+    pagespeed_ascending = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 3,
+            "sort_by": "pagespeed_desktop_performance",
+            "sort_direction": "ascending",
+        },
+    )
+    pagespeed_descending = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 3,
+            "sort_by": "pagespeed_desktop_performance",
+            "sort_direction": "descending",
+        },
+    )
+    assert [row["domain"] for row in pagespeed_ascending.json()["items"]] == [
+        "bravo.example",
+        "alpha.example",
+        "charlie.example",
+    ]
+    assert [row["domain"] for row in pagespeed_descending.json()["items"]] == [
+        "alpha.example",
+        "bravo.example",
+        "charlie.example",
+    ]
+    best_practices_sorted = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 3,
+            "sort_by": "pagespeed_desktop_best_practices",
+            "sort_direction": "descending",
+        },
+    )
+    assert [
+        row["domain"] for row in best_practices_sorted.json()["items"]
+    ] == ["bravo.example", "alpha.example", "charlie.example"]
+
+    dr_ascending = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 3,
+            "sort_by": "ahrefs_domain_rating",
+            "sort_direction": "ascending",
+        },
+    )
+    dr_descending = client.get(
+        "/api/v1/websites/registry-page",
+        params={
+            "limit": 3,
+            "sort_by": "ahrefs_domain_rating",
+            "sort_direction": "descending",
+        },
+    )
+    assert [row["domain"] for row in dr_ascending.json()["items"]] == [
+        "bravo.example",
+        "alpha.example",
+        "charlie.example",
+    ]
+    assert [row["domain"] for row in dr_descending.json()["items"]] == [
+        "alpha.example",
+        "bravo.example",
+        "charlie.example",
+    ]
 
     filter_cases = [
         ({"status": "lead"}, 1),
@@ -306,6 +610,32 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
         ({"minimum_monthly_visits": 1000}, 1),
         ({"minimum_referring_domains": 20}, 1),
         ({"maximum_global_rank": 500}, 1),
+        ({"minimum_ahrefs_domain_rating": 50}, 1),
+        ({"maximum_ahrefs_domain_rating": 30}, 1),
+        (
+            {
+                "pagespeed_strategy": "desktop",
+                "pagespeed_category": "performance",
+                "minimum_pagespeed_score": 70,
+            },
+            1,
+        ),
+        (
+            {
+                "pagespeed_strategy": "mobile",
+                "pagespeed_category": "seo",
+                "minimum_pagespeed_score": 95,
+            },
+            1,
+        ),
+        (
+            {
+                "pagespeed_strategy": "mobile",
+                "pagespeed_category": "best-practices",
+                "minimum_pagespeed_score": 72,
+            },
+            1,
+        ),
         ({"hypestat_country": "India"}, 1),
         ({"backlink_country": "US"}, 1),
         ({"audience_country": "India"}, 1),
@@ -328,6 +658,12 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
             "minimum_monthly_visits": 1000,
             "minimum_referring_domains": 20,
             "maximum_global_rank": 500,
+            "minimum_ahrefs_domain_rating": 70,
+            "maximum_ahrefs_domain_rating": 80,
+            "pagespeed_strategy": "desktop",
+            "pagespeed_category": "performance",
+            "minimum_pagespeed_score": 70,
+            "maximum_pagespeed_score": 80,
             "hypestat_country": "India",
             "backlink_country": "US",
             "audience_country": "India",

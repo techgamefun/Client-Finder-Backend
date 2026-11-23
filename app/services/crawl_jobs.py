@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from starlette.concurrency import run_in_threadpool
 
@@ -27,6 +27,7 @@ from app.services.redis_queue import (
 )
 from app.services.website_registry import upsert_website
 
+_CRAWLER_FETCH_ERROR_PREFIX = "Crawler could not fetch "
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +321,7 @@ def list_website_crawl_jobs(
     db: Session,
     *,
     search: str = "",
+    failure_reason: str | None = None,
     status: str | None = None,
     page: int = 1,
     page_size: int = 25,
@@ -327,9 +329,32 @@ def list_website_crawl_jobs(
     filters = []
     if search:
         filters.append(
-            func.lower(WebsiteCrawlJob.website_url).contains(
-                search.lower(),
-                autoescape=True,
+            or_(
+                func.lower(WebsiteCrawlJob.website_url).contains(
+                    search.lower(),
+                    autoescape=True,
+                ),
+                func.lower(WebsiteCrawlJob.error).contains(
+                    search.lower(),
+                    autoescape=True,
+                ),
+            )
+        )
+    if failure_reason is not None:
+        normalized_error = func.trim(WebsiteCrawlJob.error)
+        filters.append(
+            or_(
+                normalized_error == failure_reason,
+                and_(
+                    normalized_error.startswith(
+                        _CRAWLER_FETCH_ERROR_PREFIX,
+                        autoescape=True,
+                    ),
+                    normalized_error.endswith(
+                        f": {failure_reason}",
+                        autoescape=True,
+                    ),
+                ),
             )
         )
     status_counts = dict(
@@ -377,6 +402,37 @@ def list_website_crawl_jobs(
         page_size=page_size,
         status_counts=status_counts,
     )
+
+
+def list_website_crawl_failure_reasons(db: Session) -> list[str]:
+    failure_reasons = db.scalars(
+        select(WebsiteCrawlJob.error)
+        .where(
+            WebsiteCrawlJob.status == "failed",
+            WebsiteCrawlJob.error.is_not(None),
+            func.trim(WebsiteCrawlJob.error) != "",
+        )
+        .distinct()
+        .order_by(WebsiteCrawlJob.error)
+    ).all()
+    normalized_reasons = {
+        _normalize_website_crawl_failure_reason(reason)
+        for reason in failure_reasons
+        if reason
+    }
+    return sorted(
+        (reason for reason in normalized_reasons if reason),
+        key=str.casefold,
+    )
+
+
+def _normalize_website_crawl_failure_reason(error: str) -> str:
+    message = error.strip()
+    if message.startswith(_CRAWLER_FETCH_ERROR_PREFIX):
+        delimiter = message.find(": ", len(_CRAWLER_FETCH_ERROR_PREFIX))
+        if delimiter >= 0:
+            message = message[delimiter + 2 :].strip()
+    return message
 
 
 def summarize_website_crawl_jobs(db: Session) -> JobQueueStatusSummary:

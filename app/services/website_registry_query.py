@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, contains_eager, joinedload, load_only
 
 from app.models import (
     ExcludedDomain,
+    PageSpeedScan,
     Website,
     WebsiteCrawl,
     WebsiteHypeStatProfile,
@@ -32,6 +33,15 @@ WebsiteSortKey = Literal[
     "hypestat_country",
     "hypestat_backlink_countries",
     "hypestat_audience_countries",
+    "ahrefs_domain_rating",
+    "pagespeed_desktop_performance",
+    "pagespeed_desktop_accessibility",
+    "pagespeed_desktop_best_practices",
+    "pagespeed_desktop_seo",
+    "pagespeed_mobile_performance",
+    "pagespeed_mobile_accessibility",
+    "pagespeed_mobile_best_practices",
+    "pagespeed_mobile_seo",
 ]
 
 
@@ -55,6 +65,21 @@ def _profile_array(*path: str):
     return func.coalesce(
         _json_path(payload, "entry", "data", *path),
         _json_path(payload, "data", *path),
+    )
+
+
+def _latest_pagespeed_score(strategy: str, category: str):
+    return (
+        select(PageSpeedScan.category_scores[category].as_integer())
+        .where(
+            PageSpeedScan.website_id == Website.id,
+            PageSpeedScan.organization_id == Website.organization_id,
+            PageSpeedScan.strategy == strategy,
+        )
+        .order_by(PageSpeedScan.scanned_at.desc(), PageSpeedScan.id.desc())
+        .limit(1)
+        .correlate(Website)
+        .scalar_subquery()
     )
 
 
@@ -157,6 +182,12 @@ def _conditions(
     minimum_monthly_visits: float | None,
     minimum_referring_domains: float | None,
     maximum_global_rank: float | None,
+    pagespeed_strategy: str | None,
+    pagespeed_category: str | None,
+    minimum_pagespeed_score: int | None,
+    maximum_pagespeed_score: int | None,
+    minimum_ahrefs_domain_rating: float | None,
+    maximum_ahrefs_domain_rating: float | None,
     hypestat_country: str | None,
     backlink_country: str | None,
     audience_country: str | None,
@@ -198,6 +229,30 @@ def _conditions(
         conditions.append(referring_domains >= minimum_referring_domains)
     if maximum_global_rank is not None:
         conditions.append(global_rank <= maximum_global_rank)
+    if minimum_ahrefs_domain_rating is not None:
+        conditions.append(
+            Website.ahrefs_domain_rating >= minimum_ahrefs_domain_rating
+        )
+    if maximum_ahrefs_domain_rating is not None:
+        conditions.append(
+            Website.ahrefs_domain_rating <= maximum_ahrefs_domain_rating
+        )
+    if minimum_pagespeed_score is not None:
+        conditions.append(
+            _latest_pagespeed_score(
+                pagespeed_strategy or "desktop",
+                pagespeed_category or "performance",
+            )
+            >= minimum_pagespeed_score
+        )
+    if maximum_pagespeed_score is not None:
+        conditions.append(
+            _latest_pagespeed_score(
+                pagespeed_strategy or "desktop",
+                pagespeed_category or "performance",
+            )
+            <= maximum_pagespeed_score
+        )
     if hypestat_country:
         conditions.append(
             _profile_value("rank", "country", "country")
@@ -260,6 +315,12 @@ def get_website_registry_page(
     minimum_monthly_visits: float | None,
     minimum_referring_domains: float | None,
     maximum_global_rank: float | None,
+    pagespeed_strategy: str | None,
+    pagespeed_category: str | None,
+    minimum_pagespeed_score: int | None,
+    maximum_pagespeed_score: int | None,
+    minimum_ahrefs_domain_rating: float | None,
+    maximum_ahrefs_domain_rating: float | None,
     hypestat_country: str | None,
     backlink_country: str | None,
     audience_country: str | None,
@@ -276,6 +337,12 @@ def get_website_registry_page(
         minimum_monthly_visits=minimum_monthly_visits,
         minimum_referring_domains=minimum_referring_domains,
         maximum_global_rank=maximum_global_rank,
+        pagespeed_strategy=pagespeed_strategy,
+        pagespeed_category=pagespeed_category,
+        minimum_pagespeed_score=minimum_pagespeed_score,
+        maximum_pagespeed_score=maximum_pagespeed_score,
+        minimum_ahrefs_domain_rating=minimum_ahrefs_domain_rating,
+        maximum_ahrefs_domain_rating=maximum_ahrefs_domain_rating,
         hypestat_country=hypestat_country,
         backlink_country=backlink_country,
         audience_country=audience_country,
@@ -290,6 +357,10 @@ def get_website_registry_page(
             minimum_monthly_visits is not None,
             minimum_referring_domains is not None,
             maximum_global_rank is not None,
+            minimum_pagespeed_score is not None,
+            maximum_pagespeed_score is not None,
+            minimum_ahrefs_domain_rating is not None,
+            maximum_ahrefs_domain_rating is not None,
             hypestat_country,
             backlink_country,
             audience_country,
@@ -363,6 +434,33 @@ def get_website_registry_page(
             _profile_array("traffic", "countries"),
             String,
         ),
+        "ahrefs_domain_rating": Website.ahrefs_domain_rating,
+        "pagespeed_desktop_performance": _latest_pagespeed_score(
+            "desktop",
+            "performance",
+        ),
+        "pagespeed_desktop_accessibility": _latest_pagespeed_score(
+            "desktop",
+            "accessibility",
+        ),
+        "pagespeed_desktop_best_practices": _latest_pagespeed_score(
+            "desktop",
+            "best-practices",
+        ),
+        "pagespeed_desktop_seo": _latest_pagespeed_score("desktop", "seo"),
+        "pagespeed_mobile_performance": _latest_pagespeed_score(
+            "mobile",
+            "performance",
+        ),
+        "pagespeed_mobile_accessibility": _latest_pagespeed_score(
+            "mobile",
+            "accessibility",
+        ),
+        "pagespeed_mobile_best_practices": _latest_pagespeed_score(
+            "mobile",
+            "best-practices",
+        ),
+        "pagespeed_mobile_seo": _latest_pagespeed_score("mobile", "seo"),
     }
     if sort_by is None:
         ordering = [Website.created_at.desc(), Website.id.desc()]

@@ -45,6 +45,11 @@ class WebsiteResponse(BaseModel):
     hypestat_referring_domains: int | None = None
     hypestat_global_rank: int | None = None
     hypestat_country: str | None = None
+    ahrefs_domain_rating: float | None = None
+    ahrefs_domain_rating_license_url: str | None = None
+    ahrefs_domain_rating_fetched_at: datetime | None = None
+    pagespeed_desktop: PageSpeedScanSummary | None = None
+    pagespeed_mobile: PageSpeedScanSummary | None = None
     hypestat_referring_domains_by_country: list[
         WebsiteHypeStatCountryDomains
     ] = Field(default_factory=list)
@@ -110,14 +115,14 @@ class WebsiteAhrefsMetricsResponse(BaseModel):
     snapshot_date: date
     domain_rating: float
     domain_rating_license_url: str
-    organic_traffic: int | None
-    organic_traffic_cost_cents: int | None
-    organic_keywords: int | None
-    backlinks_live: int | None
-    backlinks_all_time: int | None
-    refdomains_live: int | None
-    refdomains_all_time: int | None
-    units_used: int | None
+    organic_traffic: int | None = None
+    organic_traffic_cost_cents: int | None = None
+    organic_keywords: int | None = None
+    backlinks_live: int | None = None
+    backlinks_all_time: int | None = None
+    refdomains_live: int | None = None
+    refdomains_all_time: int | None = None
+    units_used: int | None = None
     fetched_at: datetime
 
 

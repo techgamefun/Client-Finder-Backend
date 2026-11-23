@@ -93,11 +93,11 @@ async def read_hypestat_usage(
 
 @router.get(
     "/ahrefs/usage",
-    response_model=AhrefsUsageResponse,
+    response_model=AhrefsUsageResponse | None,
 )
 async def read_ahrefs_usage(
     db: Annotated[Session, Depends(get_db)],
-) -> AhrefsUsageResponse:
+) -> AhrefsUsageResponse | None:
     return await get_ahrefs_usage(db)
 
 
