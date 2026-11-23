@@ -191,6 +191,20 @@ class WebsiteReclassificationBatchResponse(BaseModel):
     skipped_count: int
 
 
+class WebsiteBulkEnrichmentResponse(BaseModel):
+    website_count: int
+    queued_website_count: int
+    queued_job_count: int
+    skipped_website_count: int
+
+
+class WebsiteEnrichmentCountsResponse(BaseModel):
+    classification_missing_count: int
+    ahrefs_missing_count: int
+    hypestat_missing_count: int
+    pagespeed_missing_scan_count: int
+
+
 class WebsiteAddToLeadsRequest(BaseModel):
     website_ids: list[UUID] = Field(min_length=1, max_length=500)
     batch_id: UUID | None = None

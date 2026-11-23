@@ -26,11 +26,13 @@ from app.models import (
     WebsiteCrawlJob,
     WebsiteCorpusAnalysis,
     WebsiteCorpusAnalysisJob,
+    WebsiteHypeStatFetchJob,
 )
 from app.services.ahrefs import fetch_website_domain_rating
 from app.services.application_settings import (
     CrawlSettings,
     get_crawl_settings,
+    get_hypestat_settings,
     get_user_provider_api_key,
 )
 from app.tenant_context import (
@@ -44,6 +46,7 @@ from app.services.redis_queue import (
     RedisQueueError,
     dequeue_ahrefs_domain_rating_job,
     dequeue_corpus_analysis_job,
+    dequeue_hypestat_fetch_job,
     dequeue_job,
     dequeue_pagespeed_job,
     enqueue_job,
@@ -72,6 +75,7 @@ from app.services.website_ahrefs_jobs import (
     create_website_ahrefs_domain_rating_job,
     enqueue_website_ahrefs_domain_rating_jobs,
 )
+from app.services.website_hypestat import refetch_website_hypestat_profile
 from app.services.website_corpus_jobs import (
     create_website_corpus_analysis_job,
     enqueue_website_corpus_analysis_jobs,
@@ -383,6 +387,103 @@ def _claim_ahrefs_domain_rating_job(
         return job_data
 
 
+def _claim_hypestat_fetch_job(
+    job_id: UUID,
+) -> tuple[UUID, TenantContext] | None:
+    started_at = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        job = db.get(WebsiteHypeStatFetchJob, job_id)
+        if job is None or job.created_by_user_id is None:
+            db.rollback()
+            return None
+        if not get_hypestat_settings(db).api_key:
+            db.rollback()
+            return None
+
+        result = db.execute(
+            update(WebsiteHypeStatFetchJob)
+            .where(
+                WebsiteHypeStatFetchJob.id == job_id,
+                WebsiteHypeStatFetchJob.status == "queued",
+            )
+            .values(
+                status="running",
+                attempts=WebsiteHypeStatFetchJob.attempts + 1,
+                started_at=started_at,
+                updated_at=started_at,
+                error=None,
+            )
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return None
+
+        job_data = (
+            job.website_id,
+            TenantContext(
+                organization_id=job.organization_id,
+                user_id=job.created_by_user_id,
+                email="",
+                role="system",
+            ),
+        )
+        db.commit()
+        return job_data
+
+
+def _find_recoverable_hypestat_fetch_job() -> UUID | None:
+    now = datetime.now(timezone.utc)
+    lease_cutoff = now - timedelta(seconds=JOB_LEASE_SECONDS)
+    with SessionLocal() as db:
+        db.execute(
+            update(WebsiteHypeStatFetchJob)
+            .where(
+                WebsiteHypeStatFetchJob.status == "running",
+                WebsiteHypeStatFetchJob.updated_at < lease_cutoff,
+                WebsiteHypeStatFetchJob.attempts >= MAX_JOB_ATTEMPTS,
+            )
+            .values(
+                status="failed",
+                error="The worker stopped before HypeStat data could be fetched.",
+                completed_at=now,
+                updated_at=now,
+            )
+        )
+        db.execute(
+            update(WebsiteHypeStatFetchJob)
+            .where(
+                WebsiteHypeStatFetchJob.status == "running",
+                WebsiteHypeStatFetchJob.updated_at < lease_cutoff,
+                WebsiteHypeStatFetchJob.attempts < MAX_JOB_ATTEMPTS,
+            )
+            .values(
+                status="queued",
+                started_at=None,
+                error="Retrying after the worker stopped unexpectedly.",
+                updated_at=now,
+            )
+        )
+        db.commit()
+
+        recovery_cutoff = now - timedelta(seconds=RECOVERY_GRACE_SECONDS)
+        return db.scalar(
+            select(WebsiteHypeStatFetchJob.id)
+            .where(
+                WebsiteHypeStatFetchJob.status == "queued",
+                WebsiteHypeStatFetchJob.created_at < recovery_cutoff,
+                exists(
+                    select(UserProviderCredential.id).where(
+                        UserProviderCredential.user_id
+                        == WebsiteHypeStatFetchJob.created_by_user_id,
+                        UserProviderCredential.provider == "hypestat",
+                    )
+                ),
+            )
+            .order_by(WebsiteHypeStatFetchJob.created_at)
+            .limit(1)
+        )
+
+
 def _find_recoverable_ahrefs_domain_rating_job() -> UUID | None:
     now = datetime.now(timezone.utc)
     lease_cutoff = now - timedelta(seconds=JOB_LEASE_SECONDS)
@@ -461,6 +562,40 @@ def _save_ahrefs_domain_rating_failure(job_id: UUID, detail: str) -> None:
             raise RuntimeError(
                 f"Ahrefs Domain Rating job {job_id} no longer exists."
             )
+        now = datetime.now(timezone.utc)
+        job.status = "failed"
+        job.error = detail
+        job.updated_at = now
+        job.completed_at = now
+        db.commit()
+
+
+def _save_hypestat_fetch_result(
+    job_id: UUID,
+    profile_status: str,
+    detail: str | None,
+) -> None:
+    with SessionLocal() as db:
+        job = db.get(WebsiteHypeStatFetchJob, job_id)
+        if job is None:
+            raise RuntimeError(f"HypeStat fetch job {job_id} no longer exists.")
+        now = datetime.now(timezone.utc)
+        if profile_status in ("succeeded", "queued", "invalid_domain", "removed"):
+            job.status = "succeeded"
+            job.error = None
+        else:
+            job.status = "failed"
+            job.error = detail or "HypeStat lookup failed."
+        job.updated_at = now
+        job.completed_at = now
+        db.commit()
+
+
+def _save_hypestat_fetch_failure(job_id: UUID, detail: str) -> None:
+    with SessionLocal() as db:
+        job = db.get(WebsiteHypeStatFetchJob, job_id)
+        if job is None:
+            raise RuntimeError(f"HypeStat fetch job {job_id} no longer exists.")
         now = datetime.now(timezone.utc)
         job.status = "failed"
         job.error = detail
@@ -555,6 +690,39 @@ async def process_ahrefs_domain_rating_job(job_id: UUID) -> None:
             _save_ahrefs_domain_rating_failure,
             job_id,
             "Ahrefs Domain Rating fetch failed unexpectedly. Please retry.",
+        )
+    finally:
+        reset_tenant_context(tenant_token)
+
+
+async def process_hypestat_fetch_job(job_id: UUID) -> None:
+    job_data = await run_in_threadpool(_claim_hypestat_fetch_job, job_id)
+    if job_data is None:
+        return
+    website_id, context = job_data
+    tenant_token = set_tenant_context(context)
+    try:
+        with SessionLocal() as db:
+            profile = await refetch_website_hypestat_profile(website_id, db)
+        await run_in_threadpool(
+            _save_hypestat_fetch_result,
+            job_id,
+            profile.status,
+            profile.error,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        await run_in_threadpool(
+            _save_hypestat_fetch_failure,
+            job_id,
+            detail,
+        )
+    except Exception:
+        logger.exception("HypeStat fetch job %s failed unexpectedly.", job_id)
+        await run_in_threadpool(
+            _save_hypestat_fetch_failure,
+            job_id,
+            "HypeStat fetch failed unexpectedly. Please retry.",
         )
     finally:
         reset_tenant_context(tenant_token)
@@ -976,6 +1144,7 @@ async def _run_worker_loop() -> None:
                     (dequeue_corpus_analysis_job, "keywords"),
                     (dequeue_pagespeed_job, "pagespeed"),
                     (dequeue_ahrefs_domain_rating_job, "ahrefs"),
+                    (dequeue_hypestat_fetch_job, "hypestat"),
                     (dequeue_job, "crawl"),
                 )
                 if prefer_pagespeed
@@ -984,6 +1153,7 @@ async def _run_worker_loop() -> None:
                     (dequeue_pagespeed_job, "pagespeed"),
                     (dequeue_corpus_analysis_job, "keywords"),
                     (dequeue_ahrefs_domain_rating_job, "ahrefs"),
+                    (dequeue_hypestat_fetch_job, "hypestat"),
                 )
             )
             prefer_pagespeed = not prefer_pagespeed
@@ -1020,6 +1190,7 @@ async def _run_worker_loop() -> None:
                         (_find_recoverable_corpus_analysis_job, "keywords"),
                         (_find_recoverable_pagespeed_job, "pagespeed"),
                         (_find_recoverable_ahrefs_domain_rating_job, "ahrefs"),
+                        (_find_recoverable_hypestat_fetch_job, "hypestat"),
                         (_find_recoverable_job, "crawl"),
                     )
                     if prefer_pagespeed
@@ -1028,6 +1199,7 @@ async def _run_worker_loop() -> None:
                         (_find_recoverable_pagespeed_job, "pagespeed"),
                         (_find_recoverable_corpus_analysis_job, "keywords"),
                         (_find_recoverable_ahrefs_domain_rating_job, "ahrefs"),
+                        (_find_recoverable_hypestat_fetch_job, "hypestat"),
                     )
                 )
                 for recover, recovery_type in recovery_readers:
@@ -1069,6 +1241,8 @@ async def _run_worker_loop() -> None:
                     await process_corpus_analysis_job(job_id)
                 elif job_type == "ahrefs":
                     await process_ahrefs_domain_rating_job(job_id)
+                elif job_type == "hypestat":
+                    await process_hypestat_fetch_job(job_id)
             except Exception:
                 logger.exception("Could not process %s job %s.", job_type, job_id)
     finally:

@@ -28,8 +28,10 @@ from app.schemas.website import (
     WebsiteDiscoveryKeywordResponse,
     WebsiteHypeStatProfileResponse,
     WebsiteAhrefsMetricsResponse,
+    WebsiteBulkEnrichmentResponse,
     WebsiteBatchStatusUpdateRequest,
     WebsiteBatchStatusUpdateResponse,
+    WebsiteEnrichmentCountsResponse,
     WebsiteReclassificationBatchResponse,
     WebsiteRegistryFacetsResponse,
     WebsiteRegistryPageResponse,
@@ -51,9 +53,19 @@ from app.services.website_corpus_jobs import (
     retry_failed_website_corpus_analysis_jobs,
     retry_website_corpus_analysis_job,
 )
+from app.services.website_hypestat_jobs import (
+    queue_missing_website_hypestat_profiles,
+)
+from app.services.website_ahrefs_jobs import (
+    queue_missing_website_ahrefs_domain_ratings,
+)
+from app.services.pagespeed_jobs import queue_missing_website_pagespeed_scans
 from app.services.website_classification import (
     reclassify_saved_website,
     reclassify_unclassified_websites,
+)
+from app.services.website_enrichment_counts import (
+    get_website_enrichment_counts,
 )
 from app.services.website_leads import add_websites_to_leads
 from app.services.website_registry import update_websites_status
@@ -87,6 +99,16 @@ def read_website_analytics(
     db: WebsiteSession,
 ) -> WebsiteAnalyticsResponse:
     return build_website_analytics(db, context)
+
+
+@router.get(
+    "/enrichment-counts",
+    response_model=WebsiteEnrichmentCountsResponse,
+)
+def website_enrichment_counts(
+    db: WebsiteSession,
+) -> WebsiteEnrichmentCountsResponse:
+    return get_website_enrichment_counts(db)
 
 
 @router.get("", response_model=list[WebsiteResponse])
@@ -380,6 +402,39 @@ async def reclassify_unclassified(
     db: WebsiteSession,
 ) -> WebsiteReclassificationBatchResponse:
     return await reclassify_unclassified_websites(db)
+
+
+@router.post(
+    "/ahrefs-domain-rating/fetch-missing",
+    response_model=WebsiteBulkEnrichmentResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def fetch_missing_ahrefs_domain_ratings(
+    db: WebsiteSession,
+) -> WebsiteBulkEnrichmentResponse:
+    return await queue_missing_website_ahrefs_domain_ratings(db)
+
+
+@router.post(
+    "/hypestat/fetch-missing",
+    response_model=WebsiteBulkEnrichmentResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def fetch_missing_hypestat_profiles(
+    db: WebsiteSession,
+) -> WebsiteBulkEnrichmentResponse:
+    return await queue_missing_website_hypestat_profiles(db)
+
+
+@router.post(
+    "/pagespeed/fetch-missing",
+    response_model=WebsiteBulkEnrichmentResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def fetch_missing_pagespeed_scans(
+    db: WebsiteSession,
+) -> WebsiteBulkEnrichmentResponse:
+    return await queue_missing_website_pagespeed_scans(db)
 
 
 @router.post("/{website_id}/reclassify", response_model=WebsiteResponse)

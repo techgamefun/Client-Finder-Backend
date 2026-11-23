@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.models import (
     Company,
+    PageSpeedScan,
     PageSpeedScanJob,
     UserProviderCredential,
     Website,
@@ -20,6 +21,7 @@ from app.schemas.job_queue import (
     QueueJobsPageResponse,
 )
 from app.schemas.pagespeed import PageSpeedScanJobResponse
+from app.schemas.website import WebsiteBulkEnrichmentResponse
 from app.services.normalization import normalize_domain
 from app.services.application_settings import get_user_provider_api_key
 from app.services.pagespeed import PAGESPEED_STRATEGIES
@@ -68,6 +70,99 @@ def create_website_pagespeed_jobs(
     db.add_all(jobs)
     db.flush()
     return [job.id for job in jobs]
+
+
+async def queue_missing_website_pagespeed_scans(
+    db: Session,
+) -> WebsiteBulkEnrichmentResponse:
+    response, job_ids = await run_in_threadpool(
+        _queue_missing_website_pagespeed_scans,
+        db,
+    )
+    await enqueue_pagespeed_jobs(job_ids)
+    return response
+
+
+def _queue_missing_website_pagespeed_scans(
+    db: Session,
+) -> tuple[WebsiteBulkEnrichmentResponse, list[UUID]]:
+    websites = db.scalars(select(Website).order_by(Website.id)).all()
+    if not websites:
+        return (
+            WebsiteBulkEnrichmentResponse(
+                website_count=0,
+                queued_website_count=0,
+                queued_job_count=0,
+                skipped_website_count=0,
+            ),
+            [],
+        )
+
+    website_ids = [website.id for website in websites]
+    saved_scans = db.execute(
+        select(PageSpeedScan.website_id, PageSpeedScan.strategy).where(
+            PageSpeedScan.website_id.in_(website_ids)
+        )
+    ).all()
+    completed_strategies: dict[UUID, set[str]] = {}
+    for website_id, strategy in saved_scans:
+        if website_id is not None:
+            completed_strategies.setdefault(website_id, set()).add(strategy)
+
+    active_jobs = db.execute(
+        select(PageSpeedScanJob.website_id, PageSpeedScanJob.strategy).where(
+            PageSpeedScanJob.website_id.in_(website_ids),
+            PageSpeedScanJob.status.in_(("queued", "running")),
+        )
+    ).all()
+    active_strategies: dict[UUID, set[str]] = {}
+    for website_id, strategy in active_jobs:
+        if website_id is not None:
+            active_strategies.setdefault(website_id, set()).add(strategy)
+
+    jobs = [
+        PageSpeedScanJob(
+            website_id=website.id,
+            website_url=website.website_url,
+            strategy=strategy,
+        )
+        for website in websites
+        for strategy in PAGESPEED_STRATEGIES
+        if strategy not in completed_strategies.get(website.id, set())
+        and strategy not in active_strategies.get(website.id, set())
+    ]
+    queued_website_ids = {job.website_id for job in jobs}
+    if not jobs:
+        return (
+            WebsiteBulkEnrichmentResponse(
+                website_count=len(websites),
+                queued_website_count=0,
+                queued_job_count=0,
+                skipped_website_count=len(websites),
+            ),
+            [],
+        )
+    if not get_user_provider_api_key(db, "pagespeed"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Google PageSpeed is not configured. Add your API key in Settings."
+            ),
+        )
+
+    db.add_all(jobs)
+    db.flush()
+    job_ids = [job.id for job in jobs]
+    db.commit()
+    return (
+        WebsiteBulkEnrichmentResponse(
+            website_count=len(websites),
+            queued_website_count=len(queued_website_ids),
+            queued_job_count=len(job_ids),
+            skipped_website_count=len(websites) - len(queued_website_ids),
+        ),
+        job_ids,
+    )
 
 
 async def enqueue_pagespeed_jobs(job_ids: list[UUID]) -> None:
