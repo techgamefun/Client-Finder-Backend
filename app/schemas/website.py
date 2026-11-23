@@ -185,6 +185,20 @@ class WebsiteCorpusAnalysisJobResponse(BaseModel):
     completed_at: datetime | None
 
 
+class WebsiteHypeStatFetchJobResponse(BaseModel):
+    id: UUID
+    website_id: UUID
+    website_url: str
+    domain: str
+    status: Literal["queued", "running", "succeeded", "failed", "skipped"]
+    attempts: int
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
 class WebsiteReclassificationBatchResponse(BaseModel):
     eligible_count: int
     recomputed_count: int

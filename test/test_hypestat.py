@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.models import (
     UserProviderCredential,
     Website,
+    WebsiteHypeStatFetchJob,
     WebsiteHypeStatProfile,
 )
 from app.services import hypestat
@@ -217,6 +218,167 @@ def test_refetch_hypestat_endpoint_updates_saved_profile(client, monkeypatch):
         )
         assert profile is not None
         assert profile.status == "succeeded"
+
+
+def test_hypestat_profile_jobs_support_search_status_and_pagination(client):
+    with TestingSessionLocal() as db:
+        jobs = []
+        for domain, job_status in (
+            ("queue-alpha-one.example", "queued"),
+            ("queue-alpha-two.example", "queued"),
+            ("queue-alpha-three.example", "failed"),
+            ("queue-beta.example", "queued"),
+        ):
+            website = Website(
+                website_url=f"https://{domain}/",
+                domain=domain,
+            )
+            db.add(website)
+            db.flush()
+            job = WebsiteHypeStatFetchJob(
+                website_id=website.id,
+                status=job_status,
+            )
+            db.add(job)
+            jobs.append((job, website))
+        db.commit()
+        expected_job_ids = {str(job.id) for job, _website in jobs[:2]}
+
+    response = client.get(
+        "/api/v1/websites/hypestat/jobs",
+        params={
+            "search": "queue-alpha",
+            "status": "queued",
+            "page": 2,
+            "page_size": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert len(result["items"]) == 1
+    assert result["items"][0]["id"] in expected_job_ids
+    assert result["items"][0]["domain"].startswith("queue-alpha")
+    assert result["total_count"] == 2
+    assert result["page"] == 2
+    assert result["page_size"] == 1
+    assert result["status_counts"] == {"queued": 2, "failed": 1}
+
+
+def test_failed_hypestat_profile_jobs_can_be_retried(client, monkeypatch):
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        db.add(
+            UserProviderCredential(
+                user_id=context.user_id,
+                provider="hypestat",
+                api_key="test-hypestat-api-key",
+            ),
+        )
+        website = Website(
+            website_url="https://retry.example/",
+            domain="retry.example",
+        )
+        db.add(website)
+        db.flush()
+        profile = WebsiteHypeStatProfile(
+            website_id=website.id,
+            status="failed",
+            error="Temporary upstream failure.",
+        )
+        job = WebsiteHypeStatFetchJob(
+            website_id=website.id,
+            status="failed",
+            attempts=2,
+            error="Temporary upstream failure.",
+        )
+        db.add_all([profile, job])
+        db.commit()
+        job_id = job.id
+        website_id = website.id
+
+    dispatched_ids = []
+
+    async def dispatch(job_ids):
+        dispatched_ids.extend(job_ids)
+
+    monkeypatch.setattr(
+        "app.services.website_hypestat_jobs.push_hypestat_fetch_jobs",
+        dispatch,
+    )
+
+    response = client.post(
+        f"/api/v1/websites/hypestat/jobs/{job_id}/retry",
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert dispatched_ids == [str(job_id)]
+    with TestingSessionLocal() as db:
+        retried_job = db.get(WebsiteHypeStatFetchJob, job_id)
+        retried_profile = db.get(WebsiteHypeStatProfile, website_id)
+        assert retried_job is not None
+        assert retried_job.attempts == 0
+        assert retried_job.error is None
+        assert retried_profile is not None
+        assert retried_profile.status == "pending"
+        assert retried_profile.error is None
+
+
+def test_batch_retry_skips_non_failed_hypestat_jobs(client, monkeypatch):
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        db.add(
+            UserProviderCredential(
+                user_id=context.user_id,
+                provider="hypestat",
+                api_key="test-hypestat-api-key",
+            ),
+        )
+        jobs = []
+        for domain, job_status in (
+            ("retry-one.example", "failed"),
+            ("retry-two.example", "queued"),
+        ):
+            website = Website(
+                website_url=f"https://{domain}/",
+                domain=domain,
+            )
+            db.add(website)
+            db.flush()
+            job = WebsiteHypeStatFetchJob(
+                website_id=website.id,
+                status=job_status,
+            )
+            db.add(job)
+            jobs.append(job)
+        db.commit()
+        failed_job_id, queued_job_id = [job.id for job in jobs]
+
+    dispatched_ids = []
+
+    async def dispatch(job_ids):
+        dispatched_ids.extend(job_ids)
+
+    monkeypatch.setattr(
+        "app.services.website_hypestat_jobs.push_hypestat_fetch_jobs",
+        dispatch,
+    )
+
+    response = client.post(
+        "/api/v1/websites/hypestat/jobs/retry-batch",
+        json={"job_ids": [str(failed_job_id), str(queued_job_id)]},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["retried_job_ids"] == [str(failed_job_id)]
+    assert response.json()["failures"] == [
+        {
+            "job_id": str(queued_job_id),
+            "message": "Only failed HypeStat profile jobs can be retried.",
+        },
+    ]
+    assert dispatched_ids == [str(failed_job_id)]
 
 
 def test_refetch_hypestat_returns_not_found_for_unknown_website(client):

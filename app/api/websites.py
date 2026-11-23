@@ -27,6 +27,7 @@ from app.schemas.website import (
     WebsiteDetailResponse,
     WebsiteDiscoveryKeywordResponse,
     WebsiteHypeStatProfileResponse,
+    WebsiteHypeStatFetchJobResponse,
     WebsiteAhrefsMetricsResponse,
     WebsiteBulkEnrichmentResponse,
     WebsiteBatchStatusUpdateRequest,
@@ -54,7 +55,10 @@ from app.services.website_corpus_jobs import (
     retry_website_corpus_analysis_job,
 )
 from app.services.website_hypestat_jobs import (
+    list_hypestat_fetch_jobs,
     queue_missing_website_hypestat_profiles,
+    retry_failed_hypestat_fetch_jobs,
+    retry_hypestat_fetch_job,
 )
 from app.services.website_ahrefs_jobs import (
     queue_missing_website_ahrefs_domain_ratings,
@@ -424,6 +428,57 @@ async def fetch_missing_hypestat_profiles(
     db: WebsiteSession,
 ) -> WebsiteBulkEnrichmentResponse:
     return await queue_missing_website_hypestat_profiles(db)
+
+
+@router.get(
+    "/hypestat/jobs",
+    response_model=QueueJobsPageResponse[WebsiteHypeStatFetchJobResponse],
+)
+def hypestat_profile_jobs(
+    db: WebsiteSession,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    search: Annotated[str, Query(max_length=300)] = "",
+    status_filter: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+    ]
+    | None = Query(default=None, alias="status"),
+) -> QueueJobsPageResponse[WebsiteHypeStatFetchJobResponse]:
+    return list_hypestat_fetch_jobs(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status_filter,
+    )
+
+
+@router.post(
+    "/hypestat/jobs/retry-batch",
+    response_model=BatchJobRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_hypestat_profile_jobs(
+    payload: BatchJobRetryRequest,
+    db: WebsiteSession,
+) -> BatchJobRetryResponse:
+    return await retry_failed_hypestat_fetch_jobs(payload.job_ids, db)
+
+
+@router.post(
+    "/hypestat/jobs/{job_id}/retry",
+    response_model=WebsiteHypeStatFetchJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_hypestat_profile_job(
+    job_id: UUID,
+    db: WebsiteSession,
+) -> WebsiteHypeStatFetchJobResponse:
+    return await retry_hypestat_fetch_job(job_id, db)
 
 
 @router.post(
