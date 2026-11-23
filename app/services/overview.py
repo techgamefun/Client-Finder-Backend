@@ -619,8 +619,9 @@ def build_overview(
             if largest_drop is None or drop_percent > largest_drop[0]:
                 largest_drop = (
                     drop_percent,
-                    f"Biggest drop: {round(drop_percent)}% of {funnel_labels[len(funnel_stages) - 2][1].lower()} "
-                    f"have not reached {label.lower()}.",
+                    f"Largest drop-off: {round(drop_percent)}% between "
+                    f"{funnel_labels[len(funnel_stages) - 2][1]} "
+                    f"and {label}.",
                 )
         previous_count = count
     funnel = OverviewFunnel(

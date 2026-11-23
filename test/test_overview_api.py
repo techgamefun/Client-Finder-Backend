@@ -147,6 +147,9 @@ def test_overview_populated_organization_periods_and_funnel(
     assert data["funnel"]["stages"][2]["count"] == 1
     assert data["funnel"]["stages"][3]["count"] == 1
     assert data["funnel"]["stages"][4]["count"] == 0
+    assert data["funnel"]["biggest_drop"] == (
+        "Largest drop-off: 100% between Has contact and Emailed."
+    )
     assert data["jobs"]["failed_badge_count"] == 1
     assert data["coverage"]["with_email"] == {
         "count": 1,
