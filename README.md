@@ -127,6 +127,13 @@ queued or failed lookups can be retried by saving the website again or using
 the **Refetch HypeStat** action on the website detail page. HypeStat limits
 requests to 60 per minute and 1,000 per day, with up to 50 new or updated
 website analyses per day; domains not yet analyzed are queued.
+Users can configure a personal Ahrefs API key under **Settings → Ahrefs**.
+The settings page retrieves Ahrefs' API-key and workspace unit usage and reset
+date. Website profiles fetch Ahrefs Domain Rating, organic-search metrics, and
+backlink/referring-domain counts only when requested. Domain Rating uses Ahrefs'
+free endpoint and displays its returned license link; the two Site Explorer
+reports are paid (at least 50 units each) and their results are cached per user
+and website for 24 hours.
 
 On a company profile, select **Crawl and enrich** on an existing Research
 source card to crawl its saved URL and find company website/domain details and
@@ -451,7 +458,8 @@ the full provider response, lookup status, errors, and timestamps. The latest
 migration adds organizations, users, roles, per-user provider credential
 records, creator attribution, and organization ownership for existing
 business data and queued jobs; it assigns pre-existing records to the default
-organization.
+organization. The Ahrefs metrics migration adds per-user, 24-hour-cached
+website snapshots.
 If the unique source-URL migration detects duplicates in existing data, it
 stops with an error; resolve those duplicates before rerunning the migration.
 

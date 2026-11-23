@@ -67,6 +67,7 @@ def test_settings_save_stores_key_and_returns_usage(client, monkeypatch):
         ),
         "pagespeed_configured": False,
         "pagespeed_key_source": "unset",
+        "ahrefs_configured": False,
         "gemini_configured": True,
         "selected_discovery_tools": ["tavily"],
         "tavily_default_search_depth": "basic",

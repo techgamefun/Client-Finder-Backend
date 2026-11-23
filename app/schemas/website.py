@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -104,11 +104,29 @@ class WebsiteHypeStatProfileResponse(BaseModel):
     fetched_at: datetime | None
 
 
+class WebsiteAhrefsMetricsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    snapshot_date: date
+    domain_rating: float
+    domain_rating_license_url: str
+    organic_traffic: int | None
+    organic_traffic_cost_cents: int | None
+    organic_keywords: int | None
+    backlinks_live: int | None
+    backlinks_all_time: int | None
+    refdomains_live: int | None
+    refdomains_all_time: int | None
+    units_used: int | None
+    fetched_at: datetime
+
+
 class WebsiteDetailResponse(BaseModel):
     website: WebsiteResponse
     crawl: WebsiteCrawlResponse | None
     pagespeed_scans: list[PageSpeedScanSummary] = Field(default_factory=list)
     hypestat_profile: WebsiteHypeStatProfileResponse | None = None
+    ahrefs_metrics: WebsiteAhrefsMetricsResponse | None = None
     crawl_jobs: list[WebsiteCrawlJobHistoryResponse] = Field(
         default_factory=list,
     )

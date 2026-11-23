@@ -1,5 +1,5 @@
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -8,6 +8,8 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Date,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1369,6 +1371,53 @@ class WebsiteHypeStatProfile(TenantOwnedMixin, Base):
     )
 
 
+class WebsiteAhrefsMetrics(TenantOwnedMixin, Base):
+    __tablename__ = "website_ahrefs_metrics"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    website_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("websites.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    domain_rating: Mapped[float] = mapped_column(Float, nullable=False)
+    domain_rating_license_url: Mapped[str] = mapped_column(
+        String(2048),
+        nullable=False,
+    )
+    organic_traffic: Mapped[int | None] = mapped_column(Integer)
+    organic_traffic_cost_cents: Mapped[int | None] = mapped_column(Integer)
+    organic_keywords: Mapped[int | None] = mapped_column(Integer)
+    backlinks_live: Mapped[int | None] = mapped_column(Integer)
+    backlinks_all_time: Mapped[int | None] = mapped_column(Integer)
+    refdomains_live: Mapped[int | None] = mapped_column(Integer)
+    refdomains_all_time: Mapped[int | None] = mapped_column(Integer)
+    units_used: Mapped[int | None] = mapped_column(Integer)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "website_id",
+            "created_by_user_id",
+            name="uq_website_ahrefs_metrics_website_user",
+        ),
+        Index(
+            "ix_website_ahrefs_metrics_user_fetched_at",
+            "created_by_user_id",
+            "fetched_at",
+        ),
+    )
+
+
 class WebsiteCrawlJob(TenantOwnedMixin, Base):
     __tablename__ = "website_crawl_jobs"
 
@@ -1715,6 +1764,7 @@ _TENANT_MODELS = (
     WebsiteCorpusAnalysisJob,
     Website,
     WebsiteHypeStatProfile,
+    WebsiteAhrefsMetrics,
     WebsiteCrawlJob,
     ExcludedDomain,
     CrawlerDomainFailure,

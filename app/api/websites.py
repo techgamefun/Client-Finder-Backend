@@ -27,6 +27,7 @@ from app.schemas.website import (
     WebsiteDetailResponse,
     WebsiteDiscoveryKeywordResponse,
     WebsiteHypeStatProfileResponse,
+    WebsiteAhrefsMetricsResponse,
     WebsiteBatchStatusUpdateRequest,
     WebsiteBatchStatusUpdateResponse,
     WebsiteReclassificationBatchResponse,
@@ -56,6 +57,10 @@ from app.services.website_classification import (
 from app.services.website_leads import add_websites_to_leads
 from app.services.website_registry import update_websites_status
 from app.services.website_hypestat import refetch_website_hypestat_profile
+from app.services.ahrefs import (
+    fetch_website_ahrefs_metrics,
+    get_cached_website_ahrefs_metrics,
+)
 from app.services.website_registry_query import (
     WebsiteSortKey,
     get_website_registry_facets,
@@ -337,6 +342,7 @@ def get_website_detail(
         .limit(PAGESPEED_HISTORY_LIMIT)
     ).all()
     crawl_job_status = crawl_jobs[0].status if crawl_jobs else None
+    ahrefs_metrics = get_cached_website_ahrefs_metrics(website.id, db)
     return WebsiteDetailResponse(
         website=_website_response(website, crawl_job_status),
         crawl=(
@@ -353,6 +359,11 @@ def get_website_detail(
                 website.hypestat_profile
             )
             if website.hypestat_profile is not None
+            else None
+        ),
+        ahrefs_metrics=(
+            WebsiteAhrefsMetricsResponse.model_validate(ahrefs_metrics)
+            if ahrefs_metrics is not None
             else None
         ),
         crawl_jobs=[
@@ -405,6 +416,18 @@ async def refetch_hypestat_profile(
 ) -> WebsiteHypeStatProfileResponse:
     profile = await refetch_website_hypestat_profile(website_id, db)
     return WebsiteHypeStatProfileResponse.model_validate(profile)
+
+
+@router.post(
+    "/{website_id}/ahrefs-metrics",
+    response_model=WebsiteAhrefsMetricsResponse,
+)
+async def refresh_ahrefs_metrics(
+    website_id: UUID,
+    db: WebsiteSession,
+) -> WebsiteAhrefsMetricsResponse:
+    metrics = await fetch_website_ahrefs_metrics(website_id, db)
+    return WebsiteAhrefsMetricsResponse.model_validate(metrics)
 
 
 @router.patch("/{website_id}", response_model=WebsiteResponse)

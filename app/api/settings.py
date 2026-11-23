@@ -7,6 +7,7 @@ from app.api.deps import get_db
 from app.schemas.settings import (
     ApplicationSettingsResponse,
     ApplicationSettingsUpdate,
+    AhrefsUsageResponse,
     HypeStatUsageResponse,
     OctoparseTemplateSearchResponse,
     OctoparseUsageResponse,
@@ -16,6 +17,7 @@ from app.services.application_settings import (
     get_application_settings,
     save_application_settings,
 )
+from app.services.ahrefs import get_ahrefs_usage
 from app.services.discovery import get_tavily_usage
 from app.services.hypestat_usage import get_hypestat_usage
 from app.services.octoparse import (
@@ -87,6 +89,16 @@ async def read_hypestat_usage(
     db: Annotated[Session, Depends(get_db)],
 ) -> HypeStatUsageResponse:
     return await get_hypestat_usage(db)
+
+
+@router.get(
+    "/ahrefs/usage",
+    response_model=AhrefsUsageResponse,
+)
+async def read_ahrefs_usage(
+    db: Annotated[Session, Depends(get_db)],
+) -> AhrefsUsageResponse:
+    return await get_ahrefs_usage(db)
 
 
 @router.get(

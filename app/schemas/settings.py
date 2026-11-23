@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 import re
 from typing import Any
 
@@ -49,6 +49,7 @@ class ApplicationSettingsUpdate(BaseModel):
     octoparse_api_key: str | None = Field(default=None, max_length=512)
     hypestat_api_key: str | None = Field(default=None, max_length=512)
     pagespeed_api_key: str | None = Field(default=None, max_length=512)
+    ahrefs_api_key: str | None = Field(default=None, max_length=512)
     gemini_api_key: str | None = Field(default=None, max_length=512)
     hypestat_auto_fetch_enabled: bool | None = None
     tavily_default_search_depth: TavilySearchDepth | None = None
@@ -120,6 +121,7 @@ class ApplicationSettingsResponse(BaseModel):
     hypestat_service_auth_configured: bool
     pagespeed_configured: bool
     pagespeed_key_source: str
+    ahrefs_configured: bool
     gemini_configured: bool
     selected_discovery_tools: list[DiscoveryProvider]
     tavily_default_search_depth: TavilySearchDepth = "basic"
@@ -181,6 +183,20 @@ class HypeStatUsageMeta(BaseModel):
 class HypeStatUsageResponse(BaseModel):
     data: HypeStatUsageData
     meta: HypeStatUsageMeta
+
+
+class AhrefsLimitsAndUsage(BaseModel):
+    api_key_expiration_date: datetime | None = None
+    subscription: str
+    units_limit_api_key: int | None = None
+    units_limit_workspace: int | None = None
+    units_usage_api_key: int
+    units_usage_workspace: int | None = None
+    usage_reset_date: date
+
+
+class AhrefsUsageResponse(BaseModel):
+    limits_and_usage: AhrefsLimitsAndUsage
 
 
 class OctoparseUsageResponse(BaseModel):
