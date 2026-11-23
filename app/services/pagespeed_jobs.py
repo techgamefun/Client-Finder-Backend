@@ -93,6 +93,8 @@ def _queue_missing_website_pagespeed_scans(
                 website_count=0,
                 queued_website_count=0,
                 queued_job_count=0,
+                missing_website_count=0,
+                in_progress_job_count=0,
                 skipped_website_count=0,
             ),
             [],
@@ -120,17 +122,25 @@ def _queue_missing_website_pagespeed_scans(
         if website_id is not None:
             active_strategies.setdefault(website_id, set()).add(strategy)
 
-    jobs = [
-        PageSpeedScanJob(
-            website_id=website.id,
-            website_url=website.website_url,
-            strategy=strategy,
-        )
-        for website in websites
-        for strategy in PAGESPEED_STRATEGIES
-        if strategy not in completed_strategies.get(website.id, set())
-        and strategy not in active_strategies.get(website.id, set())
-    ]
+    jobs: list[PageSpeedScanJob] = []
+    missing_website_ids: set[UUID] = set()
+    in_progress_job_count = 0
+    for website in websites:
+        for strategy in PAGESPEED_STRATEGIES:
+            if strategy in completed_strategies.get(website.id, set()):
+                continue
+            missing_website_ids.add(website.id)
+            if strategy in active_strategies.get(website.id, set()):
+                in_progress_job_count += 1
+                continue
+            jobs.append(
+                PageSpeedScanJob(
+                    website_id=website.id,
+                    website_url=website.website_url,
+                    strategy=strategy,
+                )
+            )
+
     queued_website_ids = {job.website_id for job in jobs}
     if not jobs:
         return (
@@ -138,6 +148,8 @@ def _queue_missing_website_pagespeed_scans(
                 website_count=len(websites),
                 queued_website_count=0,
                 queued_job_count=0,
+                missing_website_count=len(missing_website_ids),
+                in_progress_job_count=in_progress_job_count,
                 skipped_website_count=len(websites),
             ),
             [],
@@ -159,6 +171,8 @@ def _queue_missing_website_pagespeed_scans(
             website_count=len(websites),
             queued_website_count=len(queued_website_ids),
             queued_job_count=len(job_ids),
+            missing_website_count=len(missing_website_ids),
+            in_progress_job_count=in_progress_job_count,
             skipped_website_count=len(websites) - len(queued_website_ids),
         ),
         job_ids,

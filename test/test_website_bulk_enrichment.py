@@ -72,6 +72,8 @@ def test_bulk_ahrefs_queues_only_missing_ratings_without_active_jobs(
         "website_count": 2,
         "queued_website_count": 1,
         "queued_job_count": 1,
+        "missing_website_count": 2,
+        "in_progress_job_count": 1,
         "skipped_website_count": 1,
     }
     with TestingSessionLocal() as db:
@@ -123,6 +125,8 @@ def test_bulk_hypestat_queues_missing_profiles_and_skips_active_or_complete(
         "website_count": 3,
         "queued_website_count": 1,
         "queued_job_count": 1,
+        "missing_website_count": 2,
+        "in_progress_job_count": 1,
         "skipped_website_count": 2,
     }
     with TestingSessionLocal() as db:
@@ -185,6 +189,8 @@ def test_bulk_pagespeed_queues_only_missing_strategies(
         "website_count": 3,
         "queued_website_count": 2,
         "queued_job_count": 2,
+        "missing_website_count": 2,
+        "in_progress_job_count": 1,
         "skipped_website_count": 1,
     }
     with TestingSessionLocal() as db:
@@ -199,6 +205,33 @@ def test_bulk_pagespeed_queues_only_missing_strategies(
             (active_id, "desktop"),
         }
         assert all(job.website_id != complete_id for job in jobs)
+
+
+def test_bulk_ahrefs_reports_missing_ratings_already_in_progress(
+    client,
+):
+    _save_provider_key("ahrefs")
+    with TestingSessionLocal() as db:
+        website = _create_website(db, "active-only-rating.example")
+        db.add(
+            WebsiteAhrefsDomainRatingJob(
+                website_id=website.id,
+                source_crawled_at=datetime(2026, 11, 22, tzinfo=timezone.utc),
+            )
+        )
+        db.commit()
+
+    response = client.post("/api/v1/websites/ahrefs-domain-rating/fetch-missing")
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "website_count": 1,
+        "queued_website_count": 0,
+        "queued_job_count": 0,
+        "missing_website_count": 1,
+        "in_progress_job_count": 1,
+        "skipped_website_count": 1,
+    }
 
 
 def test_website_enrichment_counts_cover_missing_data_across_all_websites(

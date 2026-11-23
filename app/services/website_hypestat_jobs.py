@@ -51,6 +51,8 @@ def _queue_missing_website_hypestat_profiles(
                 website_count=0,
                 queued_website_count=0,
                 queued_job_count=0,
+                missing_website_count=0,
+                in_progress_job_count=0,
                 skipped_website_count=0,
             ),
             [],
@@ -88,6 +90,7 @@ def _queue_missing_website_hypestat_profiles(
 
     jobs: list[WebsiteHypeStatFetchJob] = []
     queued_website_ids: set[UUID] = set()
+    missing_website_ids: set[UUID] = set()
     for website in websites:
         profile = profiles.get(website.id)
         if (
@@ -96,6 +99,7 @@ def _queue_missing_website_hypestat_profiles(
             and profile.payload is not None
         ):
             continue
+        missing_website_ids.add(website.id)
         if website.id in active_website_ids:
             continue
 
@@ -121,6 +125,10 @@ def _queue_missing_website_hypestat_profiles(
             website_count=len(websites),
             queued_website_count=len(queued_website_ids),
             queued_job_count=len(job_ids),
+            missing_website_count=len(missing_website_ids),
+            in_progress_job_count=len(
+                missing_website_ids & active_website_ids
+            ),
             skipped_website_count=len(websites) - len(queued_website_ids),
         ),
         job_ids,

@@ -195,6 +195,8 @@ class WebsiteBulkEnrichmentResponse(BaseModel):
     website_count: int
     queued_website_count: int
     queued_job_count: int
+    missing_website_count: int
+    in_progress_job_count: int
     skipped_website_count: int
 
 
