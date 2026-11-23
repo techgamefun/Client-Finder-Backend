@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from itertools import count
 
@@ -26,6 +27,8 @@ CRAWLER_FAILURE_CODES = {
     "timeout",
     "blocked",
 }
+CRAWLER_SERVICE_RETRY_DELAYS_SECONDS = (15, 30, 60)
+RETRYABLE_CRAWLER_SERVICE_STATUS_CODES = {502, 503, 504}
 _crawler_service_index = count()
 
 
@@ -52,6 +55,39 @@ def _crawler_service_base_urls() -> tuple[str, ...]:
 def _next_crawler_service_url() -> str:
     urls = _crawler_service_base_urls()
     return urls[next(_crawler_service_index) % len(urls)]
+
+
+async def _post_to_crawler_service(
+    service_url: str,
+    payload: dict[str, object],
+) -> httpx.Response:
+    attempt = 0
+    while True:
+        try:
+            async with async_http_client(timeout=90.0) as client:
+                response = await client.post(service_url, json=payload)
+        except httpx.TimeoutException as exc:
+            if attempt >= len(CRAWLER_SERVICE_RETRY_DELAYS_SECONDS):
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="The website crawler service timed out.",
+                ) from exc
+        except httpx.RequestError as exc:
+            if attempt >= len(CRAWLER_SERVICE_RETRY_DELAYS_SECONDS):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="The website crawler service is unavailable.",
+                ) from exc
+        else:
+            if (
+                response.status_code
+                not in RETRYABLE_CRAWLER_SERVICE_STATUS_CODES
+                or attempt >= len(CRAWLER_SERVICE_RETRY_DELAYS_SECONDS)
+            ):
+                return response
+
+        await asyncio.sleep(CRAWLER_SERVICE_RETRY_DELAYS_SECONDS[attempt])
+        attempt += 1
 
 
 class CrawlData(BaseModel):
@@ -91,22 +127,7 @@ async def crawl_website(
         payload["max_pages"] = max_pages
     if max_depth is not None:
         payload["max_depth"] = max_depth
-    try:
-        async with async_http_client(timeout=90.0) as client:
-            response = await client.post(
-                service_url,
-                json=payload,
-            )
-    except httpx.TimeoutException as exc:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="The website crawler service timed out.",
-        ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The website crawler service is unavailable.",
-        ) from exc
+    response = await _post_to_crawler_service(service_url, payload)
 
     if response.is_error:
         try:
