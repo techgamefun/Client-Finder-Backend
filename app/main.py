@@ -30,7 +30,6 @@ from app.api.settings import router as settings_router
 from app.api.google_oauth import router as google_oauth_router
 from app.api.websites import router as websites_router
 from app.api.website_crawler import router as website_crawler_router
-from app.api.internal_worker import router as internal_worker_router
 
 try:
     from alembic import command
@@ -194,9 +193,6 @@ app.include_router(
     settings_router,
     prefix="/api/v1",
 )
-
-app.include_router(internal_worker_router)
-
 
 @app.get("/health")
 def health_check() -> dict[str, str]:

@@ -482,53 +482,46 @@ By default, Uvicorn listens on `http://127.0.0.1:8000`.
 - Interactive API documentation: `http://127.0.0.1:8000/docs`
 - Alternative API documentation: `http://127.0.0.1:8000/redoc`
 
-### Run the separate Go worker
+### Background workers
 
-The Go worker lives in the sibling `background-worker` directory. It consumes
-the existing Upstash queues, runs bounded concurrent job dispatch, and polls
-scheduled campaign delivery and Gmail monitoring. Set `WORKER_SHARED_TOKEN`
-to the same random secret (at least 32 characters) on the API and worker, and
-give the worker `WORKER_API_URL`, `UPSTASH_REDIS_REST_URL`,
-`UPSTASH_REDIS_REST_TOKEN`, and `WORKER_CONCURRENCY` (1–50, default 10).
-Deploy `background-worker/Dockerfile` as a Render Background Worker.
+The separate Go worker in `../background-worker` directly claims and executes
+website crawl, PageSpeed, keyword, Ahrefs, and HypeStat jobs and persists
+results in PostgreSQL. Campaign email sending and Gmail reply/bounce monitoring
+are also available in Go, but require the opt-in
+`WORKER_CAMPAIGN_SENDING_ENABLED` and `WORKER_GMAIL_MONITORING_ENABLED` flags.
+Both default to false. Configure the Google OAuth client credentials and the
+same `GMAIL_TOKEN_ENCRYPTION_KEY` used by the API before enabling either job.
+Campaign sending also needs `FRONTEND_URL` and a matching
+`EMAIL_UNSUBSCRIBE_SECRET` (or the same `ACCESS_TOKEN_SECRET` as the API).
 
-This first migration stage keeps job execution and database/provider behavior
-in the Python API for compatibility; the separate Go process owns queue
-polling, concurrency, and recovery scheduling. The Python API must remain
-available to receive the authenticated internal dispatch requests. A full
-port of the job handlers themselves to Go is not included in this stage.
-Keep `RUN_WORKER_IN_API=false` and do not run the legacy Python worker at the
-same time as the Go worker, or both can consume the same queues.
+Run the Python worker as a separate process/service. Set
+`PYTHON_WORKER_WEBSITE_JOBS_ENABLED=false` when Go owns website queues.
+Disable the Python email consumers independently with
+`PYTHON_WORKER_CAMPAIGN_SENDING_ENABLED=false` and
+`PYTHON_WORKER_GMAIL_MONITORING_ENABLED=false` as each matching Go feature is
+cut over. Do not let both workers own the same workload. Set
+`RUN_WORKER_IN_API=false` on the API service.
 
-For local development, the legacy Python worker is still available:
+Enable Gmail monitoring first in staging, then test campaign sending with a
+controlled campaign. Enabling Go campaign sending can immediately send any
+due recipients in running campaigns. If Gmail accepts a send but its response
+is ambiguous, Go marks the recipient failed rather than retrying it, to avoid
+duplicate messages.
+
+For local development, run the Go service from `../background-worker`. To run
+the remaining Python email-monitor worker:
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.worker
 ```
 
-Do not run it alongside the Go worker. For one
-crawler, set `WEB_CRAWLER_SERVICE_URL`. To distribute crawls across multiple
+For one crawler, set `WEB_CRAWLER_SERVICE_URL`. To distribute crawls across multiple
 crawler services, set `WEB_CRAWLER_SERVICE_URLS` to a comma-separated list of
 their base URLs; `/health` suffixes are accepted and removed. The list takes
 precedence over the single-URL setting. `CRAWL_JOB_CONCURRENCY` controls the
 maximum number of queued crawls per worker (default 5, maximum 10). Set this
 to match the number of available crawler services, and account for each worker
 process applying its own limit.
-
-### Run the worker in the API service
-
-For a deployment where a separate background-worker service is not available,
-set `RUN_WORKER_IN_API=true` on the API service. The API starts the queue worker
-after database migrations complete, so keep the web service's normal Uvicorn
-start command. Do not also run a separate worker unless you intentionally want
-multiple workers.
-
-On Render's free web-service plan, the worker runs only while the web service is
-awake. Render may spin the service down after 15 minutes without inbound
-traffic; queued jobs remain in PostgreSQL and can be processed after a request
-wakes the service again. The worker's startup log says
-`Background job worker started.` Ensure the crawler URL setting points to the
-deployed crawler service or services.
 
 ## API usage
 

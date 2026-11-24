@@ -121,3 +121,92 @@ def test_worker_runs_configured_number_of_crawls_concurrently(monkeypatch):
                 await task
 
     asyncio.run(exercise_worker())
+
+
+def test_python_worker_can_leave_website_queues_to_go_worker(monkeypatch):
+    queue_calls = []
+    email_calls = []
+
+    async def website_queue():
+        queue_calls.append("redis")
+        return None
+
+    def website_recovery():
+        queue_calls.append("database")
+        return None
+
+    async def no_work():
+        email_calls.append("called")
+        return False
+
+    async def stop_after_first_poll(_delay):
+        raise RuntimeError("stop worker test")
+
+    monkeypatch.setattr(worker, "validate_redis_configuration", lambda: None)
+    monkeypatch.setattr(worker, "dequeue_job", website_queue)
+    monkeypatch.setattr(worker, "dequeue_pagespeed_job", website_queue)
+    monkeypatch.setattr(worker, "dequeue_corpus_analysis_job", website_queue)
+    monkeypatch.setattr(worker, "dequeue_ahrefs_domain_rating_job", website_queue)
+    monkeypatch.setattr(worker, "dequeue_hypestat_fetch_job", website_queue)
+    monkeypatch.setattr(worker, "_find_recoverable_job", website_recovery)
+    monkeypatch.setattr(worker, "_find_recoverable_pagespeed_job", website_recovery)
+    monkeypatch.setattr(worker, "_find_recoverable_corpus_analysis_job", website_recovery)
+    monkeypatch.setattr(worker, "_find_recoverable_ahrefs_domain_rating_job", website_recovery)
+    monkeypatch.setattr(worker, "_find_recoverable_hypestat_fetch_job", website_recovery)
+    monkeypatch.setattr(worker, "process_due_gmail_monitoring", no_work)
+    monkeypatch.setattr(worker, "process_due_campaign_recipient", no_work)
+    monkeypatch.setattr(worker.asyncio, "sleep", stop_after_first_poll)
+    monkeypatch.setattr(worker.settings, "python_worker_website_jobs_enabled", False)
+    monkeypatch.setattr(worker.settings, "python_worker_campaign_sending_enabled", False)
+    monkeypatch.setattr(worker.settings, "python_worker_gmail_monitoring_enabled", False)
+
+    async def exercise_worker():
+        with pytest.raises(RuntimeError, match="stop worker test"):
+            await worker._run_worker_loop()
+
+    asyncio.run(exercise_worker())
+    assert queue_calls == []
+    assert email_calls == []
+
+
+def test_python_email_jobs_can_be_cut_over_independently(monkeypatch):
+    calls = []
+
+    async def no_job():
+        return None
+
+    async def process_campaign():
+        calls.append("campaign")
+        return False
+
+    async def process_gmail():
+        calls.append("gmail")
+        return False
+
+    async def stop_after_first_poll(_delay):
+        raise RuntimeError("stop worker test")
+
+    monkeypatch.setattr(worker, "validate_redis_configuration", lambda: None)
+    monkeypatch.setattr(worker, "dequeue_job", no_job)
+    monkeypatch.setattr(worker, "dequeue_pagespeed_job", no_job)
+    monkeypatch.setattr(worker, "dequeue_corpus_analysis_job", no_job)
+    monkeypatch.setattr(worker, "dequeue_ahrefs_domain_rating_job", no_job)
+    monkeypatch.setattr(worker, "dequeue_hypestat_fetch_job", no_job)
+    monkeypatch.setattr(worker, "_find_recoverable_job", lambda: None)
+    monkeypatch.setattr(worker, "_find_recoverable_pagespeed_job", lambda: None)
+    monkeypatch.setattr(worker, "_find_recoverable_corpus_analysis_job", lambda: None)
+    monkeypatch.setattr(worker, "_find_recoverable_ahrefs_domain_rating_job", lambda: None)
+    monkeypatch.setattr(worker, "_find_recoverable_hypestat_fetch_job", lambda: None)
+    monkeypatch.setattr(worker, "process_due_gmail_monitoring", process_gmail)
+    monkeypatch.setattr(worker, "process_due_campaign_recipient", process_campaign)
+    monkeypatch.setattr(worker.asyncio, "sleep", stop_after_first_poll)
+    monkeypatch.setattr(worker.settings, "python_worker_website_jobs_enabled", False)
+    monkeypatch.setattr(worker.settings, "python_worker_campaign_sending_enabled", True)
+    monkeypatch.setattr(worker.settings, "python_worker_gmail_monitoring_enabled", False)
+
+    async def exercise_worker():
+        with pytest.raises(RuntimeError, match="stop worker test"):
+            await worker._run_worker_loop()
+
+    asyncio.run(exercise_worker())
+    assert calls == ["campaign"]

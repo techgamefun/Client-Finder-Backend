@@ -1120,6 +1120,19 @@ async def _run_worker_loop() -> None:
         redis_enabled = False
 
     logger.info("Background job worker started.")
+    if not settings.python_worker_website_jobs_enabled:
+        logger.info(
+            "Python worker website queues are disabled; the Go background "
+            "worker must be running.",
+        )
+    if (
+        not settings.python_worker_campaign_sending_enabled
+        or not settings.python_worker_gmail_monitoring_enabled
+    ):
+        logger.info(
+            "Some Python campaign or Gmail jobs are disabled; ensure the "
+            "corresponding Go worker jobs are enabled.",
+        )
     prefer_pagespeed = False
     prefer_campaign = False
     last_monitor_poll = 0.0
@@ -1130,12 +1143,15 @@ async def _run_worker_loop() -> None:
             active_crawl_tasks = {
                 task for task in active_crawl_tasks if not task.done()
             }
-            if time.monotonic() - last_monitor_poll >= 10:
+            if (
+                settings.python_worker_gmail_monitoring_enabled
+                and time.monotonic() - last_monitor_poll >= 10
+            ):
                 last_monitor_poll = time.monotonic()
                 await process_due_gmail_monitoring()
 
             campaign_checked = False
-            if prefer_campaign:
+            if settings.python_worker_campaign_sending_enabled and prefer_campaign:
                 prefer_campaign = False
                 campaign_checked = True
                 if await process_due_campaign_recipient():
@@ -1160,6 +1176,18 @@ async def _run_worker_loop() -> None:
                     (dequeue_hypestat_fetch_job, "hypestat"),
                 )
             )
+            if not settings.python_worker_website_jobs_enabled:
+                queue_readers = tuple(
+                    (dequeue, queue_type)
+                    for dequeue, queue_type in queue_readers
+                    if queue_type not in {
+                        "crawl",
+                        "pagespeed",
+                        "keywords",
+                        "ahrefs",
+                        "hypestat",
+                    }
+                )
             prefer_pagespeed = not prefer_pagespeed
             for dequeue, queue_type in (
                 queue_readers if redis_enabled else ()
@@ -1206,6 +1234,18 @@ async def _run_worker_loop() -> None:
                         (_find_recoverable_hypestat_fetch_job, "hypestat"),
                     )
                 )
+                if not settings.python_worker_website_jobs_enabled:
+                    recovery_readers = tuple(
+                        (recover, recovery_type)
+                        for recover, recovery_type in recovery_readers
+                        if recovery_type not in {
+                            "crawl",
+                            "pagespeed",
+                            "keywords",
+                            "ahrefs",
+                            "hypestat",
+                        }
+                    )
                 for recover, recovery_type in recovery_readers:
                     if (
                         recovery_type == "crawl"
@@ -1226,7 +1266,11 @@ async def _run_worker_loop() -> None:
                         break
 
             if job_id is None:
-                if not campaign_checked and await process_due_campaign_recipient():
+                if (
+                    settings.python_worker_campaign_sending_enabled
+                    and not campaign_checked
+                    and await process_due_campaign_recipient()
+                ):
                     continue
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 continue

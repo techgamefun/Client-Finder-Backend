@@ -71,9 +71,17 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="CRAWLER_SERVICE_SHARED_TOKEN",
     )
-    worker_shared_token: str | None = Field(
-        default=None,
-        validation_alias="WORKER_SHARED_TOKEN",
+    python_worker_website_jobs_enabled: bool = Field(
+        default=True,
+        validation_alias="PYTHON_WORKER_WEBSITE_JOBS_ENABLED",
+    )
+    python_worker_campaign_sending_enabled: bool = Field(
+        default=True,
+        validation_alias="PYTHON_WORKER_CAMPAIGN_SENDING_ENABLED",
+    )
+    python_worker_gmail_monitoring_enabled: bool = Field(
+        default=True,
+        validation_alias="PYTHON_WORKER_GMAIL_MONITORING_ENABLED",
     )
     upstash_redis_rest_url: str | None = None
     upstash_redis_rest_token: str | None = None
@@ -131,16 +139,6 @@ class Settings(BaseSettings):
             normalized.startswith("mailto:") or normalized.startswith("https://")
         ):
             raise ValueError("VAPID_SUBJECT must be a mailto: or https:// URI.")
-        return normalized or None
-
-    @field_validator("worker_shared_token")
-    @classmethod
-    def validate_worker_shared_token(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        if normalized and len(normalized) < 32:
-            raise ValueError("WORKER_SHARED_TOKEN must contain at least 32 characters.")
         return normalized or None
 
     @model_validator(mode="after")
