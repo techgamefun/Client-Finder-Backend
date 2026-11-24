@@ -228,6 +228,7 @@ UPSTASH_REDIS_REST_TOKEN=your-upstash-rest-token
 ENVIRONMENT=development
 FRONTEND_URL=http://localhost:3000
 CRAWLER_SERVICE_SHARED_TOKEN=your-shared-service-token
+WORKER_SHARED_TOKEN=generate-a-random-secret-at-least-32-characters-long
 GOOGLE_OAUTH_CLIENT_ID=your-google-oauth-client-id
 GOOGLE_OAUTH_CLIENT_SECRET=your-google-oauth-client-secret
 GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
@@ -481,13 +482,31 @@ By default, Uvicorn listens on `http://127.0.0.1:8000`.
 - Interactive API documentation: `http://127.0.0.1:8000/docs`
 - Alternative API documentation: `http://127.0.0.1:8000/redoc`
 
-In another terminal, start a worker with the same environment configuration:
+### Run the separate Go worker
+
+The Go worker lives in the sibling `background-worker` directory. It consumes
+the existing Upstash queues, runs bounded concurrent job dispatch, and polls
+scheduled campaign delivery and Gmail monitoring. Set `WORKER_SHARED_TOKEN`
+to the same random secret (at least 32 characters) on the API and worker, and
+give the worker `WORKER_API_URL`, `UPSTASH_REDIS_REST_URL`,
+`UPSTASH_REDIS_REST_TOKEN`, and `WORKER_CONCURRENCY` (1–50, default 10).
+Deploy `background-worker/Dockerfile` as a Render Background Worker.
+
+This first migration stage keeps job execution and database/provider behavior
+in the Python API for compatibility; the separate Go process owns queue
+polling, concurrency, and recovery scheduling. The Python API must remain
+available to receive the authenticated internal dispatch requests. A full
+port of the job handlers themselves to Go is not included in this stage.
+Keep `RUN_WORKER_IN_API=false` and do not run the legacy Python worker at the
+same time as the Go worker, or both can consume the same queues.
+
+For local development, the legacy Python worker is still available:
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.worker
 ```
 
-Run one or more workers to process queued crawls and PageSpeed scans. For one
+Do not run it alongside the Go worker. For one
 crawler, set `WEB_CRAWLER_SERVICE_URL`. To distribute crawls across multiple
 crawler services, set `WEB_CRAWLER_SERVICE_URLS` to a comma-separated list of
 their base URLs; `/health` suffixes are accepted and removed. The list takes

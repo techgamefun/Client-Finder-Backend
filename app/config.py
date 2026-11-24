@@ -71,6 +71,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="CRAWLER_SERVICE_SHARED_TOKEN",
     )
+    worker_shared_token: str | None = Field(
+        default=None,
+        validation_alias="WORKER_SHARED_TOKEN",
+    )
     upstash_redis_rest_url: str | None = None
     upstash_redis_rest_token: str | None = None
     cloudinary_cloud_name: str | None = None
@@ -127,6 +131,16 @@ class Settings(BaseSettings):
             normalized.startswith("mailto:") or normalized.startswith("https://")
         ):
             raise ValueError("VAPID_SUBJECT must be a mailto: or https:// URI.")
+        return normalized or None
+
+    @field_validator("worker_shared_token")
+    @classmethod
+    def validate_worker_shared_token(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if normalized and len(normalized) < 32:
+            raise ValueError("WORKER_SHARED_TOKEN must contain at least 32 characters.")
         return normalized or None
 
     @model_validator(mode="after")
