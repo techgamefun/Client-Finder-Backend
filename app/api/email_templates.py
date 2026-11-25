@@ -16,6 +16,7 @@ from app.schemas.email_templates import (
     EmailTemplateCreate,
     EmailTemplateDraftRequest,
     EmailTemplateDraftResponse,
+    GroqEmailTemplateDraftResponse,
     EmailTemplatePreviewRequest,
     EmailTemplatePreviewResponse,
     EmailTemplateResponse,
@@ -33,6 +34,9 @@ from app.services.email_templates import (
 )
 from app.services.application_settings import get_user_provider_api_key
 from app.services.gemini_template_generator import generate_email_template_draft
+from app.services.groq_template_generator import (
+    generate_email_template_draft as generate_groq_template_draft,
+)
 from app.services.gmail import (
     get_gmail_account_email,
     send_gmail_message,
@@ -100,20 +104,35 @@ def create_email_template(
 
 @router.post(
     "/generate-draft",
-    response_model=EmailTemplateDraftResponse,
+    response_model=GroqEmailTemplateDraftResponse,
+    response_model_exclude_none=True,
 )
 async def generate_template_draft(
     org_id: UUID,
     payload: EmailTemplateDraftRequest,
     context: AdminContext,
     db: DatabaseSession,
-) -> EmailTemplateDraftResponse:
+) -> EmailTemplateDraftResponse | GroqEmailTemplateDraftResponse:
     _require_matching_organization(org_id, context)
-    api_key = get_user_provider_api_key(db, "gemini", user_id=context.user_id)
+    provider = payload.provider
+    api_key = get_user_provider_api_key(
+        db,
+        provider,
+        user_id=context.user_id,
+    )
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Add your Gemini API key in Settings before generating a draft.",
+            detail=(
+                f"Add your {provider.capitalize()} API key in Settings "
+                "before generating a draft."
+            ),
+        )
+    if provider == "groq":
+        return await generate_groq_template_draft(
+            payload.prompt,
+            api_key,
+            model=payload.model,
         )
     return await generate_email_template_draft(payload.prompt, api_key)
 

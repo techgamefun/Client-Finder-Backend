@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -34,6 +34,8 @@ class EmailTemplateCreate(BaseModel):
 
 class EmailTemplateDraftRequest(BaseModel):
     prompt: str = Field(min_length=8, max_length=4_000)
+    provider: Literal["gemini", "groq"] = "gemini"
+    model: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("prompt")
     @classmethod
@@ -43,9 +45,34 @@ class EmailTemplateDraftRequest(BaseModel):
             raise ValueError("Describe the email you want in at least 8 characters.")
         return normalized
 
+    @field_validator("model")
+    @classmethod
+    def trim_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("model cannot be blank.")
+        return normalized
+
+
+class GroqCompletionUsage(BaseModel):
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    requests_remaining: int | None = Field(default=None, ge=0)
+    requests_limit: int | None = Field(default=None, ge=0)
+    tokens_remaining: int | None = Field(default=None, ge=0)
+    tokens_limit: int | None = Field(default=None, ge=0)
+
 
 class EmailTemplateDraftResponse(EmailTemplateCreate):
     pass
+
+
+class GroqEmailTemplateDraftResponse(EmailTemplateDraftResponse):
+    model: str | None = None
+    usage: GroqCompletionUsage | None = None
 
 
 class EmailTemplateUpdate(BaseModel):

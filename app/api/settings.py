@@ -8,6 +8,7 @@ from app.schemas.settings import (
     ApplicationSettingsResponse,
     ApplicationSettingsUpdate,
     AhrefsUsageResponse,
+    GroqModelsResponse,
     HypeStatUsageResponse,
     OctoparseTemplateSearchResponse,
     OctoparseUsageResponse,
@@ -15,6 +16,7 @@ from app.schemas.settings import (
 )
 from app.services.application_settings import (
     get_application_settings,
+    get_user_provider_api_key,
     save_application_settings,
 )
 from app.services.ahrefs import get_ahrefs_usage
@@ -24,10 +26,39 @@ from app.services.octoparse import (
     get_octoparse_usage,
     search_octoparse_templates,
 )
+from app.services.groq_template_generator import list_available_draft_models
 from app.tenant_context import get_tenant_context
 
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
+
+
+@router.get(
+    "/groq/models",
+    response_model=GroqModelsResponse,
+)
+async def read_groq_models(
+    db: Annotated[Session, Depends(get_db)],
+) -> GroqModelsResponse:
+    context = get_tenant_context()
+    if context is None or context.user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="An authenticated user is required.",
+        )
+    api_key = get_user_provider_api_key(
+        db,
+        "groq",
+        user_id=context.user_id,
+    )
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Add your Groq API key in Settings before loading models.",
+        )
+    return GroqModelsResponse(
+            models=await list_available_draft_models(api_key),
+    )
 
 
 @router.get(

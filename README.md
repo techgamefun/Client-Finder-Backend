@@ -304,8 +304,15 @@ domain, and `company.phone` maps to the selected contact's business phone
 because the Company model has no phone column.
 Administrators can generate an editable draft with
 `POST /api/v1/orgs/{org_id}/templates/generate-draft`. The request uses the
-signed-in administrator's Gemini key from **Settings → Gemini**; generated
-drafts are validated and returned without being saved or sent.
+signed-in administrator's Gemini or Groq key from the corresponding Settings
+section; pass `provider` as `gemini` or `groq` (default `gemini`). Generated
+drafts are validated and returned without being saved or sent. Groq requests
+may include a `model`; `GET /api/v1/settings/groq/models` returns models
+available to the signed-in user's saved Groq key that support strict structured
+outputs. Groq draft responses
+include the selected model and per-request prompt, completion, and total token
+counts, plus rate-limit counters when Groq provides them. These token counts
+describe the completion request and are not account billing totals.
 
 ### Email drip campaigns
 
@@ -398,7 +405,7 @@ organization, while an organization administrator can add members from
 **Settings → Organization users**. Roles are `admin` and `user`. Members share
 their organization's companies, websites, and jobs; provider API keys are
 personal to each user and stored as plaintext in the database, including the
-Gemini key used for template drafts. Restrict
+Gemini and Groq keys used for template drafts. Restrict
 database access and use dedicated provider keys: anyone with database access
 can read them. Existing records are assigned to one default organization by
 the migration. Previously saved encrypted provider keys are removed by the

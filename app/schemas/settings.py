@@ -51,6 +51,7 @@ class ApplicationSettingsUpdate(BaseModel):
     pagespeed_api_key: str | None = Field(default=None, max_length=512)
     ahrefs_api_key: str | None = Field(default=None, max_length=512)
     gemini_api_key: str | None = Field(default=None, max_length=512)
+    groq_api_key: str | None = Field(default=None, max_length=512)
     hypestat_auto_fetch_enabled: bool | None = None
     tavily_default_search_depth: TavilySearchDepth | None = None
     tavily_default_country: str | None = Field(
@@ -123,11 +124,16 @@ class ApplicationSettingsResponse(BaseModel):
     pagespeed_key_source: str
     ahrefs_configured: bool
     gemini_configured: bool
+    groq_configured: bool
     selected_discovery_tools: list[DiscoveryProvider]
     tavily_default_search_depth: TavilySearchDepth = "basic"
     tavily_default_country: str | None = None
     tavily_default_exclude_domains: list[str] = Field(default_factory=list)
     octoparse_template: OctoparseTemplateConfiguration | None = None
+
+
+class GroqModelsResponse(BaseModel):
+    models: list[str]
 
 
 class TavilyKeyUsage(BaseModel):

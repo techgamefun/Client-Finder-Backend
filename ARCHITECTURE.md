@@ -5,8 +5,8 @@
 The application is a synchronous-persistence, asynchronous-provider FastAPI
 service. It exposes versioned HTTP routes, validates their inputs and outputs
 with Pydantic, uses SQLAlchemy for relational storage, and calls Tavily for web
-search, Octoparse for template-based search, and Gemini for email-template
-draft generation. Website crawl requests use
+search, Octoparse for template-based search, and Gemini or Groq for
+email-template draft generation. Website crawl requests use
 Upstash Redis to dispatch jobs to a
 separately run worker; PostgreSQL stores durable job state and crawl results.
 PostgreSQL is the configured application database; tests use an in-memory
@@ -73,8 +73,9 @@ app/main.py                 FastAPI app, router registration, health check
   authenticated session, and provides admin-scoped organization member
   management. Member names are optional for existing accounts, and role
   changes prevent self-editing or demoting the last active administrator.
-- `app/api/settings.py` exposes public settings operations, Tavily usage, and
-  Octoparse template search. Provider keys saved through this API, including
+- `app/api/settings.py` exposes public settings operations, Tavily usage,
+  Octoparse template search, and the authenticated user's Groq model list.
+  Provider keys saved through this API, including
   Gemini, are stored as plaintext in the per-user `UserProviderCredential` table.
   Provider selections, Octoparse template configuration, and per-crawl
   page/depth preferences are persisted in the organization's
@@ -86,9 +87,10 @@ app/main.py                 FastAPI app, router registration, health check
 - `UserPreferences` stores user-owned UI and search preferences as validated
   JSON, keyed by user and scoped to their organization. Organization settings
   remain the defaults where a user has not customized a search filter.
-- `app/services/gemini_template_generator.py` requests an email-template draft
-  from Gemini, validates the response schema, Jinja syntax, and available
-  placeholder paths, and returns it without persistence.
+- `app/services/gemini_template_generator.py` and
+  `app/services/groq_template_generator.py` request email-template drafts from
+  their providers. Shared validation checks the response schema, Jinja syntax,
+  and available placeholder paths before returning a draft without persistence.
 - `app/models.py` defines the `Company`, `Contact`, `SearchKeyword`,
   `PageSpeedScan`, `WebsiteCrawl`, `Website`, `WebsiteCrawlJob`,
   `WebsiteCorpusAnalysis`, `ApplicationSettings`, `DiscoveryProviderJob`,
@@ -163,8 +165,11 @@ app/main.py                 FastAPI app, router registration, health check
 - `app/services/gmail.py` uses assigned-account checks for Gmail message reads,
   replies, composed sends, label listing, and label-filtered message lists.
 - `POST /api/v1/orgs/{org_id}/templates/generate-draft` is admin-only and uses
-  the authenticated user's Gemini credential. The generated draft is returned
-  for review in the editor; it is not saved or sent automatically.
+  the authenticated user's selected Gemini or Groq credential. Groq requests
+  can choose a model from `GET /api/v1/settings/groq/models`, which lists only
+  models available to that user and supporting strict structured outputs;
+  responses include per-request token usage. Generated drafts are returned for
+  review in the editor; they are not saved or sent automatically.
 - PostgreSQL triggers publish crawl, PageSpeed, and email campaign status
   changes on the
   `queue_job_events` notification channel. `app/api/queue_events.py` forwards

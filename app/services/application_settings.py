@@ -152,6 +152,7 @@ def get_application_settings(db: Session) -> ApplicationSettingsResponse:
         ),
         ahrefs_configured=bool(get_user_provider_api_key(db, "ahrefs")),
         gemini_configured=bool(get_user_provider_api_key(db, "gemini")),
+        groq_configured=bool(get_user_provider_api_key(db, "groq")),
         hypestat_auto_fetch_enabled=(
             row.hypestat_auto_fetch_enabled if row is not None else True
         ),
@@ -201,6 +202,8 @@ def save_application_settings(
         save_user_provider_api_key(db, "ahrefs", payload.ahrefs_api_key)
     if payload.gemini_api_key is not None:
         save_user_provider_api_key(db, "gemini", payload.gemini_api_key)
+    if payload.groq_api_key is not None:
+        save_user_provider_api_key(db, "groq", payload.groq_api_key)
     if payload.hypestat_auto_fetch_enabled is not None:
         row.hypestat_auto_fetch_enabled = payload.hypestat_auto_fetch_enabled
     if payload.tavily_default_search_depth is not None:

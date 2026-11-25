@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.services import gmail
 from app.api import email_templates as email_templates_api
+from app.api import settings as settings_api
 from conftest import TestingSessionLocal, create_invited_member
 
 
@@ -211,6 +212,113 @@ def test_generate_email_template_draft_requires_personal_key(client):
 
     assert response.status_code == 422
     assert "Gemini API key" in response.json()["detail"]
+
+
+def test_generate_email_template_draft_uses_personal_groq_key(
+    client,
+    monkeypatch,
+):
+    organization_id, user_id = _session_ids(client)
+    endpoint = f"/api/v1/orgs/{organization_id}/templates"
+    api_key = "test-groq-api-key"
+    saved_settings = client.put(
+        "/api/v1/settings",
+        json={"groq_api_key": api_key},
+    )
+    assert saved_settings.status_code == 200
+
+    async def fake_generate(prompt, received_key, *, model=None):
+        assert prompt == "Write a friendly introductory message"
+        assert received_key == api_key
+        assert model == "openai/gpt-oss-20b"
+        return email_templates_api.GroqEmailTemplateDraftResponse(
+            name="Friendly introduction",
+            subject="A quick introduction",
+            body_content="<p>Hello {{ contact.first_name }}</p>",
+            model=model,
+            usage={
+                "prompt_tokens": 40,
+                "completion_tokens": 20,
+                "total_tokens": 60,
+            },
+        )
+
+    monkeypatch.setattr(
+        email_templates_api,
+        "generate_groq_template_draft",
+        fake_generate,
+    )
+    response = client.post(
+        f"{endpoint}/generate-draft",
+        json={
+            "prompt": "Write a friendly introductory message",
+            "provider": "groq",
+            "model": "openai/gpt-oss-20b",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "name": "Friendly introduction",
+        "subject": "A quick introduction",
+        "body_content": "<p>Hello {{ contact.first_name }}</p>",
+        "model": "openai/gpt-oss-20b",
+        "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 20,
+            "total_tokens": 60,
+        },
+    }
+    assert client.get(endpoint).json() == []
+    with TestingSessionLocal() as db:
+        context = db.info["tenant_context"]
+        assert context.user_id == user_id
+
+
+def test_generate_email_template_groq_requires_personal_key(client):
+    organization_id, _ = _session_ids(client)
+    response = client.post(
+        f"/api/v1/orgs/{organization_id}/templates/generate-draft",
+        json={
+            "prompt": "Write a concise introduction for a prospect",
+            "provider": "groq",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Groq API key" in response.json()["detail"]
+
+
+def test_groq_model_list_uses_personal_key(client, monkeypatch):
+    api_key = "test-groq-models-key"
+    saved_settings = client.put(
+        "/api/v1/settings",
+        json={"groq_api_key": api_key},
+    )
+    assert saved_settings.status_code == 200
+
+    async def fake_list_models(received_key):
+        assert received_key == api_key
+        return ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+
+    monkeypatch.setattr(
+        settings_api,
+        "list_available_draft_models",
+        fake_list_models,
+    )
+    response = client.get("/api/v1/settings/groq/models")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "models": ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+    }
+
+
+def test_groq_model_list_requires_personal_key(client):
+    response = client.get("/api/v1/settings/groq/models")
+
+    assert response.status_code == 422
+    assert "Groq API key" in response.json()["detail"]
 
 
 def test_email_template_preview_builds_context_and_escapes_values(client):
