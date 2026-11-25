@@ -1,15 +1,9 @@
 from datetime import datetime, timezone
-from typing import Any
 from uuid import UUID
 
-import httpx
-from fastapi import HTTPException, status
-from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import settings
-from app.http_clients import sync_http_client
 from app.models import (
     Website,
     WebsiteCorpusAnalysis,
@@ -17,18 +11,12 @@ from app.models import (
     WebsiteCrawl,
 )
 from app.schemas.website import (
-    CrawlerCorpusWordsResponse,
     WebsiteCorpusAnalysisResponse,
-    WebsiteCorpusWordStat,
     WebsiteCorpusWordsResponse,
 )
-from app.services.normalization import normalize_domain
 from app.services.website_corpus_jobs import create_website_corpus_analysis_job
 
-_TOP_N = 50
 _ANALYSIS_VERSION = 2
-_CRAWLER_TIMEOUT_SECONDS = 30.0
-_MAX_ANALYSIS_BATCH_SIZE = 500
 
 
 def get_website_corpus_words(
@@ -191,104 +179,5 @@ def _as_utc(value: datetime) -> datetime:
         if value.tzinfo is None
         else value.astimezone(timezone.utc)
     )
-
-
-def _site_text_record(
-    domain: str,
-    classification_signals: list[dict[str, object]],
-) -> dict[str, object]:
-    titles: list[str] = []
-    descriptions: list[str] = []
-    for page in classification_signals:
-        signals = page.get("classification_signals")
-        if not isinstance(signals, dict):
-            continue
-        title = signals.get("page_title")
-        description = signals.get("meta_description")
-        if isinstance(title, str) and title.strip():
-            titles.append(title)
-        if isinstance(description, str) and description.strip():
-            descriptions.append(description)
-    return {
-        "domain": domain,
-        "titles": titles,
-        "descriptions": descriptions,
-    }
-
-
-def _analyze_sites(
-    sites: list[dict[str, object]],
-) -> dict[str, list[WebsiteCorpusWordStat]]:
-    words_by_domain: dict[str, list[WebsiteCorpusWordStat]] = {}
-    for start in range(0, len(sites), _MAX_ANALYSIS_BATCH_SIZE):
-        batch = sites[start : start + _MAX_ANALYSIS_BATCH_SIZE]
-        expected_domains = {
-            normalize_domain(str(site["domain"]))
-            for site in batch
-        }
-        try:
-            with sync_http_client(timeout=_CRAWLER_TIMEOUT_SECONDS) as client:
-                response = client.post(
-                    f"{settings.crawler_service_url.rstrip('/')}/corpus-words",
-                    json={"sites": batch, "top_n": _TOP_N},
-                )
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=(
-                    "The crawler service timed out while analyzing website text."
-                ),
-            ) from exc
-        except httpx.RequestError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="The crawler service is unavailable for corpus analysis.",
-            ) from exc
-
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="The crawler service rejected the corpus analysis request.",
-            ) from exc
-
-        try:
-            result = CrawlerCorpusWordsResponse.model_validate_json(
-                response.content,
-            )
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=(
-                    "The crawler service returned an incompatible corpus "
-                    "response. Redeploy or restart crawler-service so "
-                    "/corpus-words returns per-domain site results, then retry."
-                ),
-            ) from exc
-
-        for site_result in result.sites:
-            domain = normalize_domain(site_result.domain)
-            if (
-                domain is None
-                or domain not in expected_domains
-                or domain in words_by_domain
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="The crawler service returned duplicate or invalid domains.",
-                )
-            words_by_domain[domain] = site_result.words
-        returned_domains = {
-            normalize_domain(site_result.domain)
-            for site_result in result.sites
-        }
-        if returned_domains != expected_domains:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="The crawler service omitted a website corpus result.",
-            )
-
-    return words_by_domain
 
 

@@ -1,7 +1,6 @@
 
-import asyncio
 import logging
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,22 +57,9 @@ async def lifespan(app: FastAPI):
     http_client_pool = HTTPClientPool()
     app.state.http_client_pool = http_client_pool
     pool_token = install_http_client_pool(http_client_pool)
-    worker_task: asyncio.Task[None] | None = None
     try:
-        if settings.run_worker_in_api:
-            from app.worker import run_worker
-
-            logger.info("Starting the background worker inside the API process.")
-            worker_task = asyncio.create_task(
-                run_worker(),
-                name="website-crawl-and-pagespeed-worker",
-            )
         yield
     finally:
-        if worker_task is not None:
-            worker_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_task
         reset_http_client_pool(pool_token)
         await http_client_pool.aclose()
 

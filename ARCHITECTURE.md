@@ -42,12 +42,6 @@ app/main.py                 FastAPI app, router registration, health check
     +-- app/services/campaign_service.py
     |       Tenant validation and timezone-aware campaign scheduling
     |
-    +-- app/services/campaign_worker.py
-    |       Locked recipient claims, sandboxed rendering, and Gmail delivery
-    |
-    +-- app/worker.py
-    |       Worker for crawl, PageSpeed, and email campaign jobs
-    |
     +-- migrations/          Alembic-managed database schema history
 ```
 
@@ -143,14 +137,14 @@ app/main.py                 FastAPI app, router registration, health check
   dispatches their IDs through Upstash Redis when available. CSV imports use a
   batch endpoint that commits jobs together and dispatches IDs in one Redis
   request. Batch retry endpoints update eligible crawl or PageSpeed jobs
-  together and dispatch their IDs once. `app/worker.py` consumes jobs, persists
-  crawl results, records failures, and recovers queued jobs from PostgreSQL
-  when Redis dispatch is unavailable. Every successful
+  together and dispatch their IDs once. The Go background worker consumes
+  website jobs, persists results, records failures, and recovers queued jobs
+  from PostgreSQL when Redis dispatch is unavailable. The Python worker has
+  been removed; Go is the sole background-job consumer. Every successful
   queued crawl creates mobile and desktop PageSpeed jobs linked to its Website
   registry record and, when present, a matching company. Discovery ingestion
-  remains synchronous because its results are required by that workflow. Set
-  `RUN_WORKER_IN_API=true` to run the worker in the API
-  lifespan when a separate background-worker service is unavailable.
+  remains synchronous because its results are required by that workflow. The
+  Go worker runs separately from the API.
   PageSpeed jobs remain queued when their creating user has no saved PageSpeed
   key; worker claims and recovery skip those jobs, and retry endpoints reject
   retries until that user's key is configured. Google validates a saved key
@@ -161,7 +155,7 @@ app/main.py                 FastAPI app, router registration, health check
 - `app/services/campaign_service.py` validates assigned Gmail accounts and
   tenant-owned companies/contacts, previews campaign capacity, and schedules
   recipients round-robin within weekday send windows in each campaign's
-  timezone. `app/services/campaign_worker.py` claims due rows with PostgreSQL
+  timezone. The Go background worker claims due rows with PostgreSQL
   `FOR UPDATE SKIP LOCKED`, reuses the sandboxed template renderer and Gmail
   sender, and records delivery outcomes. Successful delivery updates
   `Company.last_email_sent_at`; this email-contact marker is distinct from the
@@ -310,9 +304,8 @@ job in PostgreSQL, then dispatches its ID through Upstash Redis. It returns
 `running`, `succeeded`, or `failed` status and receive the crawl result when
 successful. `GET /api/v1/crawler/jobs` lists recent jobs for queue monitoring.
 Job responses include queued, started, and completed timestamps. Company profile
-crawls use the same job queue. A separately
-started `python -m app.worker` process consumes jobs and calls the existing
-crawler service. The worker can recover abandoned jobs after a restart. This
+crawls use the same job queue. The Go background worker consumes jobs and calls
+the existing crawler service. It can recover abandoned jobs after a restart. This
 workflow runs independently from discovery search and lead ingestion. The
 crawler starts at the supplied URL, then fetches up to five discovered
 same-site About, Blog, Services, Contact, and mission/goal pages. It limits

@@ -72,7 +72,6 @@ def client(monkeypatch):
     monkeypatch.setattr(settings, "access_token_secret", "11" * 32)
     monkeypatch.setattr(settings, "refresh_token_secret", "22" * 32)
     monkeypatch.setattr(settings, "environment", "test")
-    monkeypatch.setattr(settings, "run_worker_in_api", False)
     monkeypatch.setattr(settings, "tavily_api_key", None)
     monkeypatch.setattr(settings, "octoparse_api_key", None)
     monkeypatch.setattr(settings, "google_pagespeed_api_key", None)

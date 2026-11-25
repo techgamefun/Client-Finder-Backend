@@ -7,10 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from conftest import TestingSessionLocal
-from app import worker as website_crawl_worker
 from app.models import Company, Contact
 from app.services.pagespeed import PageSpeedScanData
-from app.services import website_crawler
 
 
 def test_create_company(client):
@@ -528,98 +526,32 @@ def test_lead_status_rejects_blank_values(client):
     assert response.status_code == 422
 
 
-def test_company_website_crawl_status_and_recrawl(client, monkeypatch):
+def test_company_website_crawl_queues_job_using_domain_fallback(
+    client,
+    monkeypatch,
+):
     created = client.post(
         "/api/v1/companies",
-        json={"name": "Example Company", "website": "https://example.com"},
+        json={"name": "Domain Company", "domain": "example.com"},
     )
-    company_id = created.json()["id"]
+    enqueued_ids = []
 
-    first_status = client.get(
-        f"/api/v1/companies/{company_id}/website-crawl"
-    )
-    assert first_status.status_code == 200
-    assert first_status.json() is None
-
-    crawl_count = 0
-
-    async def fake_enqueue(_job_id: str) -> None:
-        return None
-
-    async def fake_crawl_website(website_url: str, **_options):
-        nonlocal crawl_count
-        crawl_count += 1
-        return website_crawler.CrawlData(
-            website_url=website_url.rstrip("/") + "/",
-            about_page_url="https://example.com/about",
-            about_content=f"Crawl {crawl_count}",
-            contact_page_url=None,
-            contact_content=None,
-            goals_page_url=None,
-            goals_content=None,
-            emails=["hello@example.com"],
-            social_links=["https://www.linkedin.com/company/example"],
-            pages=[
-                {
-                    "url": "https://example.com/",
-                    "classification_signals": {
-                        "og_type": "website",
-                        "generator": "Shopify",
-                        "article_count": 1,
-                        "password_input_count": 0,
-                        "shopping_elements": {"product_schema": 1},
-                        "cta_texts": ["Add to Cart"],
-                    },
-                }
-            ],
-        )
+    async def capture_enqueue(job_id: str) -> None:
+        enqueued_ids.append(job_id)
 
     monkeypatch.setattr(
         "app.services.crawl_jobs.enqueue_job",
-        fake_enqueue,
-    )
-    monkeypatch.setattr(
-        website_crawl_worker,
-        "SessionLocal",
-        TestingSessionLocal,
-    )
-    monkeypatch.setattr(
-        website_crawl_worker,
-        "crawl_website",
-        fake_crawl_website,
+        capture_enqueue,
     )
 
-    first_crawl = client.post(
-        f"/api/v1/companies/{company_id}/website-crawl"
-    )
-    assert first_crawl.status_code == 202
-    asyncio.run(
-        website_crawl_worker.process_job(UUID(first_crawl.json()["id"]))
+    response = client.post(
+        f"/api/v1/companies/{created.json()['id']}/website-crawl"
     )
 
-    status_after_crawl = client.get(
-        f"/api/v1/companies/{company_id}/website-crawl"
-    )
-    assert status_after_crawl.status_code == 200
-    assert status_after_crawl.json()["about_content"] == "Crawl 1"
-    assert status_after_crawl.json()["emails"] == ["hello@example.com"]
-    assert (
-        status_after_crawl.json()["classification_signals"][0][
-            "classification_signals"
-        ]["og_type"]
-        == "website"
-    )
-
-    recrawl = client.post(
-        f"/api/v1/companies/{company_id}/website-crawl"
-    )
-    assert recrawl.status_code == 202
-    asyncio.run(website_crawl_worker.process_job(UUID(recrawl.json()["id"])))
-    status_after_recrawl = client.get(
-        f"/api/v1/companies/{company_id}/website-crawl"
-    )
-    assert status_after_recrawl.json()["id"] == status_after_crawl.json()["id"]
-    assert status_after_recrawl.json()["about_content"] == "Crawl 2"
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert response.json()["website_url"] == "https://example.com/"
+    assert enqueued_ids == [response.json()["id"]]
 
 
 def test_company_pagespeed_scan_and_rescan(client, monkeypatch):
@@ -714,54 +646,6 @@ def test_company_website_crawl_requires_website_or_domain(client):
     assert response.json()["detail"] == (
         "Add a company website or domain before crawling."
     )
-
-
-def test_company_website_crawl_falls_back_to_domain(client, monkeypatch):
-    created = client.post(
-        "/api/v1/companies",
-        json={"name": "Domain Company", "domain": "example.com"},
-    )
-    crawled_urls = []
-
-    async def fake_crawl_website(website_url: str, **_options):
-        crawled_urls.append(website_url)
-        return website_crawler.CrawlData(
-            website_url="https://example.com/",
-            about_page_url=None,
-            about_content=None,
-            contact_page_url=None,
-            contact_content=None,
-            goals_page_url=None,
-            goals_content=None,
-            emails=[],
-            social_links=[],
-        )
-
-    async def fake_enqueue(_job_id: str) -> None:
-        return None
-
-    monkeypatch.setattr(
-        "app.services.crawl_jobs.enqueue_job",
-        fake_enqueue,
-    )
-    monkeypatch.setattr(
-        website_crawl_worker,
-        "SessionLocal",
-        TestingSessionLocal,
-    )
-    monkeypatch.setattr(
-        website_crawl_worker,
-        "crawl_website",
-        fake_crawl_website,
-    )
-
-    response = client.post(
-        f"/api/v1/companies/{created.json()['id']}/website-crawl"
-    )
-
-    assert response.status_code == 202
-    asyncio.run(website_crawl_worker.process_job(UUID(response.json()["id"])))
-    assert crawled_urls == ["https://example.com/"]
 
 
 def test_company_research_source_endpoint_is_removed(client):

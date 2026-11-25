@@ -114,11 +114,8 @@ keyword analysis automatically; results are persisted per website and reused
 until that website is re-crawled. `GET /api/v1/websites/corpus-words` returns
 saved results and queues any stale or missing analyses without waiting for the
 crawler service. The Jobs page's **Keywords** tab shows status and errors and
-allows failed analyses to be retried. The worker calls the Go crawler
-service's `POST /corpus-words` endpoint and stores the result in
-`website_corpus_analyses`.
-Deploy or restart the Go crawler service whenever its corpus response contract
-changes; `GET /health` alone does not verify that `/corpus-words` is current.
+allows failed analyses to be retried. The Go background worker calculates and stores the keywords locally in
+`website_corpus_analyses`; keyword analysis no longer calls the crawler.
 When **Save websites** is used, the Agent also requests full HypeStat profiles
 through the Go crawler service's authenticated `POST /hypestat/domains` proxy.
 The response is stored unchanged in `website_hypestat_profiles` and displayed
@@ -338,17 +335,18 @@ is checked immediately before sending (MX, with the standard A/AAAA fallback).
 This does not validate that a specific mailbox exists; SMTP recipient probing
 is not performed.
 
-The existing PostgreSQL worker claims due recipients with
+The Go background worker claims due recipients with
 `FOR UPDATE SKIP LOCKED`, renders each message with the same sandboxed template
 service as single-email sends, and sends through the assigned Gmail account.
-The background worker also periodically checks Gmail threads for contact
+It also periodically checks Gmail threads for contact
 replies and recent bounce notices from mail delivery agents. Reply detection
 looks for the recipient in the Gmail thread of a campaign message; replies
 sent as unrelated new threads may not be associated. It recognizes hard-bounce
 reports containing common permanent-failure signals; this is not a general
 Gmail webhook or complaint feed. Detected hard bounces are added to the
 platform-wide suppression list. Monitoring defaults to every five minutes;
-configure `EMAIL_MONITOR_INTERVAL_SECONDS` (30–86400 seconds) to change it.
+set `EMAIL_MONITOR_INTERVAL_SECONDS` in the Go worker environment (30–86400
+seconds) to change it.
 `GET /api/v1/gmail/accounts/health` reports per-account send, reply, bounce,
 failure, unverified-address, and monitor status metrics for the last 30 days.
 Campaign response counts include completed recipients, sent messages, replies,
@@ -484,36 +482,21 @@ By default, Uvicorn listens on `http://127.0.0.1:8000`.
 
 ### Background workers
 
-The separate Go worker in `../background-worker` directly claims and executes
-website crawl, PageSpeed, keyword, Ahrefs, and HypeStat jobs and persists
-results in PostgreSQL. Campaign email sending and Gmail reply/bounce monitoring
-are also available in Go, but require the opt-in
+The separate Go worker in `../background-worker` owns website crawl, PageSpeed,
+keyword, Ahrefs, and HypeStat jobs and persists results in PostgreSQL. The
+Python worker code has been removed. Campaign email sending and Gmail
+reply/bounce monitoring are also handled in Go, but require the opt-in
 `WORKER_CAMPAIGN_SENDING_ENABLED` and `WORKER_GMAIL_MONITORING_ENABLED` flags.
 Both default to false. Configure the Google OAuth client credentials and the
 same `GMAIL_TOKEN_ENCRYPTION_KEY` used by the API before enabling either job.
 Campaign sending also needs `FRONTEND_URL` and a matching
 `EMAIL_UNSUBSCRIBE_SECRET` (or the same `ACCESS_TOKEN_SECRET` as the API).
 
-Run the Python worker as a separate process/service. Set
-`PYTHON_WORKER_WEBSITE_JOBS_ENABLED=false` when Go owns website queues.
-Disable the Python email consumers independently with
-`PYTHON_WORKER_CAMPAIGN_SENDING_ENABLED=false` and
-`PYTHON_WORKER_GMAIL_MONITORING_ENABLED=false` as each matching Go feature is
-cut over. Do not let both workers own the same workload. Set
-`RUN_WORKER_IN_API=false` on the API service.
-
-Enable Gmail monitoring first in staging, then test campaign sending with a
-controlled campaign. Enabling Go campaign sending can immediately send any
-due recipients in running campaigns. If Gmail accepts a send but its response
-is ambiguous, Go marks the recipient failed rather than retrying it, to avoid
-duplicate messages.
-
-For local development, run the Go service from `../background-worker`. To run
-the remaining Python email-monitor worker:
-
-```powershell
-.\.venv\Scripts\python.exe -m app.worker
-```
+For local development, run the Go service from `../background-worker`. The
+local Go worker configuration has campaign sending and Gmail monitoring enabled
+for this cutover. Starting it can immediately send due recipients in running
+campaigns. If Gmail accepts a send but its response is ambiguous, Go marks the
+recipient failed rather than retrying it, to avoid duplicate messages.
 
 For one crawler, set `WEB_CRAWLER_SERVICE_URL`. To distribute crawls across multiple
 crawler services, set `WEB_CRAWLER_SERVICE_URLS` to a comma-separated list of

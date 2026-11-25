@@ -146,15 +146,6 @@ class WebsiteCorpusWordStat(BaseModel):
     is_phrase: bool
 
 
-class CrawlerWebsiteCorpusKeywords(BaseModel):
-    domain: str
-    words: list[WebsiteCorpusWordStat]
-
-
-class CrawlerCorpusWordsResponse(BaseModel):
-    sites: list[CrawlerWebsiteCorpusKeywords]
-
-
 class WebsiteCorpusAnalysisResponse(BaseModel):
     website_id: UUID
     domain: str

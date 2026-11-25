@@ -1,11 +1,9 @@
-import asyncio
 from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from app import worker
 from app.models import (
     PageSpeedScan,
     PageSpeedScanJob,
@@ -298,75 +296,3 @@ def test_website_enrichment_counts_cover_missing_data_across_all_websites(
         "hypestat_missing_count": 2,
         "pagespeed_missing_scan_count": 3,
     }
-
-
-def test_hypestat_worker_fetches_and_persists_queued_profile(
-    client,
-    monkeypatch,
-):
-    _save_provider_key("hypestat")
-    monkeypatch.setattr(
-        "app.config.settings.crawler_service_shared_token",
-        "test-crawler-token",
-    )
-    with TestingSessionLocal() as db:
-        website = _create_website(db, "worker-hypestat.example")
-        job = WebsiteHypeStatFetchJob(website_id=website.id)
-        db.add(job)
-        db.commit()
-        website_id = website.id
-        job_id = job.id
-
-    worker_session_factory = sessionmaker(
-        bind=TestingSessionLocal.kw["bind"],
-        autoflush=False,
-        expire_on_commit=False,
-    )
-    monkeypatch.setattr(worker, "SessionLocal", worker_session_factory)
-
-    def handle_request(request):
-        assert request.url.path == "/hypestat/domains"
-        assert request.headers["x-hypestat-api-key"] == "test-hypestat-key"
-        assert request.headers["x-crawler-service-token"] == (
-            "test-crawler-token"
-        )
-        assert request.read().decode() == (
-            '{"domains":["worker-hypestat.example"]}'
-        )
-        return httpx.Response(
-            200,
-            json={
-                "data": {
-                    "domains": [
-                        {
-                            "domain": "worker-hypestat.example",
-                            "status": "ok",
-                            "data": {"monthly_visits": 1200},
-                        }
-                    ]
-                },
-                "meta": {},
-            },
-        )
-
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        "app.services.hypestat.httpx.AsyncClient",
-        lambda timeout: real_async_client(
-            transport=httpx.MockTransport(handle_request),
-            timeout=timeout,
-        ),
-    )
-
-    asyncio.run(worker.process_hypestat_fetch_job(job_id))
-
-    with TestingSessionLocal() as db:
-        saved_job = db.get(WebsiteHypeStatFetchJob, job_id)
-        profile = db.get(WebsiteHypeStatProfile, website_id)
-        assert saved_job is not None
-        assert saved_job.status == "succeeded"
-        assert saved_job.attempts == 1
-        assert profile is not None
-        assert profile.status == "succeeded"
-        assert profile.payload is not None
-        assert profile.payload["entry"]["data"]["monthly_visits"] == 1200

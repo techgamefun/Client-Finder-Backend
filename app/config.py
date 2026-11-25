@@ -46,12 +46,6 @@ class Settings(BaseSettings):
     google_oauth_redirect_uri: str | None = None
     google_oauth_state_secret: str | None = None
     email_unsubscribe_secret: str | None = None
-    email_monitor_interval_seconds: int = Field(
-        default=300,
-        ge=30,
-        le=86_400,
-        validation_alias="EMAIL_MONITOR_INTERVAL_SECONDS",
-    )
     gmail_token_encryption_key: str | None = None
     crawler_service_url: str = Field(
         default="http://localhost:8001",
@@ -61,27 +55,9 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="WEB_CRAWLER_SERVICE_URLS",
     )
-    crawl_job_concurrency: int = Field(
-        default=5,
-        ge=1,
-        le=10,
-        validation_alias="CRAWL_JOB_CONCURRENCY",
-    )
     crawler_service_shared_token: str | None = Field(
         default=None,
         validation_alias="CRAWLER_SERVICE_SHARED_TOKEN",
-    )
-    python_worker_website_jobs_enabled: bool = Field(
-        default=True,
-        validation_alias="PYTHON_WORKER_WEBSITE_JOBS_ENABLED",
-    )
-    python_worker_campaign_sending_enabled: bool = Field(
-        default=True,
-        validation_alias="PYTHON_WORKER_CAMPAIGN_SENDING_ENABLED",
-    )
-    python_worker_gmail_monitoring_enabled: bool = Field(
-        default=True,
-        validation_alias="PYTHON_WORKER_GMAIL_MONITORING_ENABLED",
     )
     upstash_redis_rest_url: str | None = None
     upstash_redis_rest_token: str | None = None
@@ -92,11 +68,6 @@ class Settings(BaseSettings):
     vapid_private_key: str | None = None
     vapid_subject: str | None = None
     frontend_origins: str = Field(validation_alias="FRONTEND_URL")
-    run_worker_in_api: bool = Field(
-        default=False,
-        validation_alias="RUN_WORKER_IN_API",
-    )
-
     @field_validator("access_token_expiry")
     @classmethod
     def validate_access_token_expiry(cls, value: str) -> str:

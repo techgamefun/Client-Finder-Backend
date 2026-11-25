@@ -81,30 +81,3 @@ async def enqueue_hypestat_fetch_jobs(job_ids: list[str]) -> None:
         await _execute("LPUSH", HYPESTAT_FETCH_QUEUE_KEY, *job_ids)
 
 
-async def dequeue_job() -> str | None:
-    return await _dequeue_from(QUEUE_KEY)
-
-
-async def dequeue_pagespeed_job() -> str | None:
-    return await _dequeue_from(PAGESPEED_QUEUE_KEY)
-
-
-async def dequeue_corpus_analysis_job() -> str | None:
-    return await _dequeue_from(CORPUS_ANALYSIS_QUEUE_KEY)
-
-
-async def dequeue_ahrefs_domain_rating_job() -> str | None:
-    return await _dequeue_from(AHREFS_DOMAIN_RATING_QUEUE_KEY)
-
-
-async def dequeue_hypestat_fetch_job() -> str | None:
-    return await _dequeue_from(HYPESTAT_FETCH_QUEUE_KEY)
-
-
-async def _dequeue_from(queue_key: str) -> str | None:
-    result = await _execute("RPOP", queue_key)
-    if result is None:
-        return None
-    if not isinstance(result, str):
-        raise RedisQueueError("The Redis queue returned an invalid job ID.")
-    return result

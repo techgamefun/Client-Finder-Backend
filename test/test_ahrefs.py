@@ -1,14 +1,11 @@
-import asyncio
 from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy import select
 
-from app import worker
 from app.models import (
     UserProviderCredential,
     Website,
-    WebsiteAhrefsDomainRatingJob,
     WebsiteAhrefsMetrics,
 )
 from conftest import TestingSessionLocal
@@ -403,76 +400,3 @@ def test_ahrefs_free_key_returns_domain_rating_without_paid_metrics(
         assert website.ahrefs_domain_rating_license_url == (
             "https://ahrefs.com/license"
         )
-
-
-def test_successful_crawl_ahrefs_job_fetches_and_saves_only_domain_rating(
-    client,
-    monkeypatch,
-):
-    api_key = _save_ahrefs_key()
-    with TestingSessionLocal() as db:
-        website = Website(
-            website_url="https://background-ahrefs.example/",
-            domain="background-ahrefs.example",
-        )
-        db.add(website)
-        db.flush()
-        job = WebsiteAhrefsDomainRatingJob(
-            website_id=website.id,
-            source_crawled_at=datetime(2026, 11, 23, tzinfo=timezone.utc),
-        )
-        db.add(job)
-        db.commit()
-        website_id = website.id
-        job_id = job.id
-
-    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
-    requested_paths = []
-
-    def handle_request(request):
-        requested_paths.append(request.url.path)
-        assert request.headers["authorization"] == f"Bearer {api_key}"
-        assert request.url.params["target"] == (
-            "https://background-ahrefs.example"
-        )
-        if request.url.path == "/v3/public/domain-rating-free":
-            return httpx.Response(
-                200,
-                json={
-                    "domain_rating": {
-                        "domain_rating": 47.0,
-                        "license": "https://ahrefs.com/license",
-                    }
-                },
-            )
-        raise AssertionError(f"Unexpected Ahrefs request: {request.url}")
-
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        "app.services.ahrefs.httpx.AsyncClient",
-        lambda timeout: real_async_client(
-            transport=httpx.MockTransport(handle_request),
-            timeout=timeout,
-        ),
-    )
-
-    asyncio.run(worker.process_ahrefs_domain_rating_job(job_id))
-
-    with TestingSessionLocal() as db:
-        saved_job = db.get(WebsiteAhrefsDomainRatingJob, job_id)
-        website = db.get(Website, website_id)
-        assert saved_job is not None
-        assert saved_job.status == "succeeded"
-        assert saved_job.attempts == 1
-        assert website is not None
-        assert website.ahrefs_domain_rating == 47.0
-        assert website.ahrefs_domain_rating_license_url == (
-            "https://ahrefs.com/license"
-        )
-        assert website.ahrefs_domain_rating_fetched_at is not None
-        assert db.scalar(
-            select(WebsiteAhrefsMetrics).where(
-                WebsiteAhrefsMetrics.website_id == website_id
-            )
-        ) is None
-    assert requested_paths == ["/v3/public/domain-rating-free"]

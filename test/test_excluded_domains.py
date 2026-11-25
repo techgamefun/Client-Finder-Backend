@@ -1,4 +1,3 @@
-import asyncio
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -13,7 +12,6 @@ from app.services.excluded_domains import (
     record_unreachable_domain_failure,
 )
 from app.tenant_context import TenantContext
-from app import worker
 
 
 def test_seeded_domains_are_listed_and_can_be_filtered(client):
@@ -347,99 +345,6 @@ def test_auto_excludes_domain_after_three_terminal_failures(client):
         assert exclusion.source == "auto_crawler"
         assert exclusion.failure_count == 3
         assert db.get(WebsiteCrawlJob, job.id) is None
-
-
-def test_worker_rechecks_exclusion_before_crawler_call(client, monkeypatch):
-    context = TestingSessionLocal.kw["info"]["tenant_context"]
-    job_id = uuid4()
-    with TestingSessionLocal() as db:
-        db.add(
-            ExcludedDomain(
-                domain="worker-excluded.example",
-                reason="Manual Exclusion",
-                source="user",
-            )
-        )
-        db.add(
-            WebsiteCrawlJob(
-                id=job_id,
-                website_url="https://worker-excluded.example/",
-                status="running",
-                attempts=1,
-            )
-        )
-        db.commit()
-
-    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
-    monkeypatch.setattr(
-        worker,
-        "_claim_job",
-        lambda _job_id: (
-            "https://worker-excluded.example/",
-            context,
-        ),
-    )
-    crawler_calls = []
-
-    async def forbidden_crawl(*_args, **_kwargs):
-        crawler_calls.append(True)
-        raise AssertionError("excluded domains must not reach the crawler")
-
-    monkeypatch.setattr(worker, "crawl_website", forbidden_crawl)
-    asyncio.run(worker.process_job(job_id))
-
-    assert crawler_calls == []
-    with TestingSessionLocal() as db:
-        assert db.get(WebsiteCrawlJob, job_id) is None
-
-
-def test_worker_retries_classified_target_timeout(client, monkeypatch):
-    context = TestingSessionLocal.kw["info"]["tenant_context"]
-    job_id = uuid4()
-    with TestingSessionLocal() as db:
-        db.add(
-            WebsiteCrawlJob(
-                id=job_id,
-                website_url="https://retry.example/",
-                status="running",
-                attempts=1,
-            )
-        )
-        db.commit()
-
-    monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
-    monkeypatch.setattr(
-        worker,
-        "_claim_job",
-        lambda _job_id: ("https://retry.example/", context),
-    )
-    monkeypatch.setattr(
-        worker,
-        "_get_crawl_settings",
-        lambda: type("Settings", (), {"max_pages": 4, "max_depth": 1})(),
-    )
-    enqueue_calls = []
-
-    async def fail_with_timeout(*_args, **_kwargs):
-        raise HTTPException(
-            status_code=504,
-            detail="The target site timed out.",
-            headers={"X-Crawler-Failure-Code": "timeout"},
-        )
-
-    async def record_enqueue(job_identifier: str) -> None:
-        enqueue_calls.append(job_identifier)
-
-    monkeypatch.setattr(worker, "crawl_website", fail_with_timeout)
-    monkeypatch.setattr(worker, "enqueue_job", record_enqueue)
-    asyncio.run(worker.process_job(job_id))
-
-    assert enqueue_calls == [str(job_id)]
-    with TestingSessionLocal() as db:
-        job = db.get(WebsiteCrawlJob, job_id)
-        assert job.status == "queued"
-        assert job.attempts == 1
-        assert job.error == "The target site timed out."
 
 
 async def _noop_enqueue_job(_job_id: str) -> None:

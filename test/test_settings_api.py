@@ -5,11 +5,9 @@ import httpx
 from sqlalchemy import select
 
 from app.config import settings
-from app import worker as website_crawl_worker
 from app.models import (
     ApplicationSettings,
     UserProviderCredential,
-    WebsiteCrawlJob,
 )
 from app.services import discovery
 from app.services import website_crawler
@@ -286,45 +284,6 @@ def test_hypestat_key_is_saved_and_auto_fetch_setting_is_saved(client):
             )
         )
         assert credential is None
-
-
-def test_worker_applies_saved_crawl_limits(client, monkeypatch):
-    received_options = {}
-
-    async def fake_crawl(_website_url: str, **options):
-        received_options.update(options)
-        return CrawlData(
-            website_url="https://example.com/",
-            about_page_url=None,
-            about_content=None,
-            contact_page_url=None,
-            contact_content=None,
-            goals_page_url=None,
-            goals_content=None,
-        )
-
-    monkeypatch.setattr(
-        website_crawl_worker,
-        "SessionLocal",
-        TestingSessionLocal,
-    )
-    monkeypatch.setattr(website_crawl_worker, "crawl_website", fake_crawl)
-    with TestingSessionLocal() as db:
-        db.add(
-            ApplicationSettings(
-                id=1,
-                crawl_max_pages=3,
-                crawl_max_depth=0,
-            )
-        )
-        job = WebsiteCrawlJob(website_url="https://example.com/")
-        db.add(job)
-        db.commit()
-        job_id = job.id
-
-    asyncio.run(website_crawl_worker.process_job(job_id))
-
-    assert received_options == {"max_pages": 3, "max_depth": 0}
 
 
 def test_crawl_request_sends_saved_limits_to_crawler_service(monkeypatch):
