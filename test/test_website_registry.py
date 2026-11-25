@@ -507,9 +507,13 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
             "sort_direction": "ascending",
         },
     )
+    uncrawled_search = client.get(
+        "/api/v1/websites/registry-page",
+        params={"search": "unindexed.example"},
+    )
 
     assert first_page.status_code == 200
-    assert first_page.json()["total_count"] == 3
+    assert first_page.json()["total_count"] == 4
     assert first_page.json()["indexed_count"] == 3
     assert first_page.json()["website_count"] == 4
     assert [row["domain"] for row in first_page.json()["items"]] == [
@@ -519,8 +523,12 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
         "bravo.example"
     ]
     assert [row["domain"] for row in beyond_last_page.json()["items"]] == [
-        "charlie.example"
+        "unindexed.example"
     ]
+    assert beyond_last_page.json()["items"][0]["is_crawled"] is False
+    assert beyond_last_page.json()["items"][0]["crawl_id"] is None
+    assert uncrawled_search.json()["total_count"] == 1
+    assert uncrawled_search.json()["items"][0]["domain"] == "unindexed.example"
     assert first_page.json()["items"][0]["crawl_signals"] == []
     assert (
         first_page.json()["items"][0]["pagespeed_desktop"]["category_scores"][
@@ -541,7 +549,7 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     pagespeed_ascending = client.get(
         "/api/v1/websites/registry-page",
         params={
-            "limit": 3,
+            "limit": 4,
             "sort_by": "pagespeed_desktop_performance",
             "sort_direction": "ascending",
         },
@@ -549,37 +557,54 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     pagespeed_descending = client.get(
         "/api/v1/websites/registry-page",
         params={
-            "limit": 3,
+            "limit": 4,
             "sort_by": "pagespeed_desktop_performance",
             "sort_direction": "descending",
         },
     )
-    assert [row["domain"] for row in pagespeed_ascending.json()["items"]] == [
+    pagespeed_ascending_domains = [
+        row["domain"] for row in pagespeed_ascending.json()["items"]
+    ]
+    pagespeed_descending_domains = [
+        row["domain"] for row in pagespeed_descending.json()["items"]
+    ]
+    assert pagespeed_ascending_domains[:2] == [
         "bravo.example",
         "alpha.example",
-        "charlie.example",
     ]
-    assert [row["domain"] for row in pagespeed_descending.json()["items"]] == [
+    assert set(pagespeed_ascending_domains[2:]) == {
+        "charlie.example",
+        "unindexed.example",
+    }
+    assert pagespeed_descending_domains[:2] == [
         "alpha.example",
         "bravo.example",
-        "charlie.example",
     ]
+    assert set(pagespeed_descending_domains[2:]) == {
+        "charlie.example",
+        "unindexed.example",
+    }
     best_practices_sorted = client.get(
         "/api/v1/websites/registry-page",
         params={
-            "limit": 3,
+            "limit": 4,
             "sort_by": "pagespeed_desktop_best_practices",
             "sort_direction": "descending",
         },
     )
-    assert [
+    best_practices_domains = [
         row["domain"] for row in best_practices_sorted.json()["items"]
-    ] == ["bravo.example", "alpha.example", "charlie.example"]
+    ]
+    assert best_practices_domains[:2] == ["bravo.example", "alpha.example"]
+    assert set(best_practices_domains[2:]) == {
+        "charlie.example",
+        "unindexed.example",
+    }
 
     dr_ascending = client.get(
         "/api/v1/websites/registry-page",
         params={
-            "limit": 3,
+            "limit": 4,
             "sort_by": "ahrefs_domain_rating",
             "sort_direction": "ascending",
         },
@@ -587,21 +612,27 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     dr_descending = client.get(
         "/api/v1/websites/registry-page",
         params={
-            "limit": 3,
+            "limit": 4,
             "sort_by": "ahrefs_domain_rating",
             "sort_direction": "descending",
         },
     )
-    assert [row["domain"] for row in dr_ascending.json()["items"]] == [
-        "bravo.example",
-        "alpha.example",
-        "charlie.example",
+    dr_ascending_domains = [
+        row["domain"] for row in dr_ascending.json()["items"]
     ]
-    assert [row["domain"] for row in dr_descending.json()["items"]] == [
-        "alpha.example",
-        "bravo.example",
-        "charlie.example",
+    dr_descending_domains = [
+        row["domain"] for row in dr_descending.json()["items"]
     ]
+    assert dr_ascending_domains[:2] == ["bravo.example", "alpha.example"]
+    assert set(dr_ascending_domains[2:]) == {
+        "charlie.example",
+        "unindexed.example",
+    }
+    assert dr_descending_domains[:2] == ["alpha.example", "bravo.example"]
+    assert set(dr_descending_domains[2:]) == {
+        "charlie.example",
+        "unindexed.example",
+    }
 
     filter_cases = [
         ({"status": "lead"}, 1),

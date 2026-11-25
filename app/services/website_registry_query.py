@@ -192,10 +192,7 @@ def _conditions(
     backlink_country: str | None,
     audience_country: str | None,
 ):
-    conditions = [
-        Website.crawl_id.is_not(None),
-        _website_is_not_excluded(),
-    ]
+    conditions = [_website_is_not_excluded()]
     if status:
         conditions.append(Website.status == status)
     if page_type:
@@ -400,7 +397,7 @@ def get_website_registry_page(
             )
         total_count = db.scalar(count_query) or 0
     else:
-        total_count = indexed_count
+        total_count = website_count
     last_offset = max(0, ((total_count - 1) // limit) * limit)
     offset = min(offset, last_offset)
 
