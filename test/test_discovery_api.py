@@ -11,6 +11,9 @@ from app.schemas.discovery import (
 )
 from app.api import discovery
 from app.services import discovery as discovery_service
+from app.services.discovery_query_generator import (
+    DiscoverySearchKeywordGeneration,
+)
 from app.models import SearchKeyword
 from conftest import TestingSessionLocal
 
@@ -115,11 +118,16 @@ def test_search_endpoint_returns_validated_results(client, monkeypatch):
     assert suggestions.json()[0]["keyword"] == "manufacturing companies"
 
 
-def test_ai_search_expands_keywords_and_aggregates_tavily_results(
+def test_ai_search_generates_keywords_and_aggregates_tavily_results(
     client,
     monkeypatch,
 ):
     received: list[tuple[str, int, str]] = []
+    prompt = (
+        "Find IT companies in Denver, including managed service providers, "
+        "cybersecurity firms, cloud consultants, local vendors, and small "
+        "businesses"
+    )
 
     monkeypatch.setattr(
         discovery,
@@ -134,16 +142,21 @@ def test_ai_search_expands_keywords_and_aggregates_tavily_results(
         lambda _db: "tavily-test-key",
     )
 
-    async def fake_expand(keywords, provider, api_key, *, model):
-        assert keywords == "IT companies in Denver"
+    async def fake_generate_keywords(request_prompt, provider, api_key, *, model):
+        assert request_prompt == prompt
         assert provider == "groq"
         assert api_key == "ai-test-key"
         assert model == "openai/gpt-oss-120b"
-        return [
-            keywords,
-            "managed IT service providers Denver",
-            "Denver technology consulting companies",
-        ]
+        return DiscoverySearchKeywordGeneration(
+            keywords=[
+                "managed IT service providers Denver",
+                "Denver cybersecurity companies",
+                "cloud consulting companies Denver",
+                "Denver IT consultants",
+                "small business IT firms Denver",
+            ],
+            provider_used="groq",
+        )
 
     async def fake_search(
         query,
@@ -174,15 +187,15 @@ def test_ai_search_expands_keywords_and_aggregates_tavily_results(
 
     monkeypatch.setattr(
         discovery,
-        "generate_discovery_search_queries",
-        fake_expand,
+        "generate_discovery_search_keywords",
+        fake_generate_keywords,
     )
     monkeypatch.setattr(discovery, "search_companies", fake_search)
 
     response = client.post(
         "/api/v1/discovery/ai-search",
         json={
-            "query": "IT companies in Denver",
+            "query": prompt,
             "max_results": 5,
             "ai_provider": "groq",
             "model": "openai/gpt-oss-120b",
@@ -191,33 +204,149 @@ def test_ai_search_expands_keywords_and_aggregates_tavily_results(
 
     assert response.status_code == 200
     data = response.json()
-    assert data["query"] == "IT companies in Denver"
+    assert data["query"] == prompt
     assert data["search_queries"] == [
-        "IT companies in Denver",
         "managed IT service providers Denver",
-        "Denver technology consulting companies",
+        "Denver cybersecurity companies",
+        "cloud consulting companies Denver",
+        "Denver IT consultants",
+        "small business IT firms Denver",
     ]
-    assert len(data["results"]) == 3
-    assert data["credits_used"] == 3
+    assert data["ai_provider_used"] == "groq"
+    assert data["ai_fallback_reason"] is None
+    assert len(data["results"]) == 5
+    assert data["credits_used"] == 5
     assert len(data["search_id"]) == 36
     assert received == [
-        ("IT companies in Denver", 2, "IT companies in Denver"),
         (
             "managed IT service providers Denver",
-            2,
+            1,
             "managed IT service providers Denver",
         ),
         (
-            "Denver technology consulting companies",
+            "Denver cybersecurity companies",
             1,
-            "Denver technology consulting companies",
+            "Denver cybersecurity companies",
+        ),
+        (
+            "cloud consulting companies Denver",
+            1,
+            "cloud consulting companies Denver",
+        ),
+        (
+            "Denver IT consultants",
+            1,
+            "Denver IT consultants",
+        ),
+        (
+            "small business IT firms Denver",
+            1,
+            "small business IT firms Denver",
         ),
     ]
 
     with TestingSessionLocal() as db:
         search = db.get(SearchKeyword, UUID(data["search_id"]))
         assert search is not None
-        assert search.keyword == "IT companies in Denver"
+        assert search.keyword == prompt
+
+
+def test_ai_search_returns_groq_fallback_metadata(client, monkeypatch):
+    prompt = "Find independent dental clinics in Chicago"
+    fallback_reason = (
+        "Gemini query generation failed (HTTP 503): "
+        "This model is currently experiencing high demand."
+    )
+    received: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        discovery,
+        "get_user_provider_api_key",
+        lambda _db, provider, *, user_id: {
+            "gemini": "gemini-test-key",
+            "groq": "groq-test-key",
+        }.get(provider),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "get_tavily_api_key",
+        lambda _db: "tavily-test-key",
+    )
+
+    async def fake_generate_keywords(
+        request_prompt,
+        provider,
+        api_key,
+        *,
+        model,
+        fallback_api_key,
+    ):
+        received.update(
+            prompt=request_prompt,
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            fallback_api_key=fallback_api_key,
+        )
+        return DiscoverySearchKeywordGeneration(
+            keywords=[
+                "independent dental clinics Chicago",
+                "Chicago dental practices",
+                "family dentistry clinics Chicago",
+                "Chicago dental care providers",
+                "family dentists in Chicago",
+            ],
+            provider_used="groq",
+            fallback_reason=fallback_reason,
+        )
+
+    async def fake_search(
+        query,
+        _db,
+        _max_results,
+        *,
+        options,
+        api_key,
+        api_key_is_loaded,
+    ):
+        assert api_key == "tavily-test-key"
+        assert api_key_is_loaded is True
+        return DiscoverySearchResponse(query=query, results=[])
+
+    monkeypatch.setattr(
+        discovery,
+        "generate_discovery_search_keywords",
+        fake_generate_keywords,
+    )
+    monkeypatch.setattr(discovery, "search_companies", fake_search)
+
+    response = client.post(
+        "/api/v1/discovery/ai-search",
+        json={
+            "query": prompt,
+            "max_results": 5,
+            "ai_provider": "gemini",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert received == {
+        "prompt": prompt,
+        "provider": "gemini",
+        "api_key": "gemini-test-key",
+        "model": None,
+        "fallback_api_key": "groq-test-key",
+    }
+    assert data["ai_provider_used"] == "groq"
+    assert data["ai_fallback_reason"] == fallback_reason
+    assert data["search_queries"] == [
+        "independent dental clinics Chicago",
+        "Chicago dental practices",
+        "family dentistry clinics Chicago",
+        "Chicago dental care providers",
+        "family dentists in Chicago",
+    ]
 
 
 def test_search_runs_multiple_keywords_together_and_reports_them(
@@ -344,7 +473,7 @@ def test_search_multiple_runs_tools_concurrently_and_deduplicates_domains(
     assert credits == 2
 
 
-def test_ai_search_expands_multiple_keywords_within_shared_limit(
+def test_ai_search_uses_generated_keywords_within_shared_limit(
     client,
     monkeypatch,
 ):
@@ -363,18 +492,26 @@ def test_ai_search_expands_multiple_keywords_within_shared_limit(
         lambda _db: "tavily-test-key",
     )
 
-    async def fake_expand(keywords, provider, api_key, *, model):
-        assert keywords == (
-            "IT companies in Denver; SaaS startups in Austin"
-        )
+    prompt = (
+        "Find IT companies in Denver and SaaS startups in Austin that sell "
+        "to small businesses"
+    )
+
+    async def fake_generate_keywords(request_prompt, provider, api_key, *, model):
+        assert request_prompt == prompt
         assert provider == "groq"
         assert api_key == "ai-test-key"
         assert model == "openai/gpt-oss-120b"
-        return [
-            keywords,
-            "managed IT providers Denver",
-            "Austin SaaS software companies",
-        ]
+        return DiscoverySearchKeywordGeneration(
+            keywords=[
+                "managed IT providers Denver",
+                "SaaS software startups Austin",
+                "small business software vendors Austin",
+                "Denver IT consultants",
+                "small business technology providers",
+            ],
+            provider_used="groq",
+        )
 
     async def fake_search(
         query,
@@ -419,15 +556,15 @@ def test_ai_search_expands_multiple_keywords_within_shared_limit(
 
     monkeypatch.setattr(
         discovery,
-        "generate_discovery_search_queries",
-        fake_expand,
+        "generate_discovery_search_keywords",
+        fake_generate_keywords,
     )
     monkeypatch.setattr(discovery, "search_companies", fake_search)
 
     response = client.post(
         "/api/v1/discovery/ai-search",
         json={
-            "query": "IT companies in Denver\nSaaS startups in Austin",
+            "query": prompt,
             "max_results": 5,
             "ai_provider": "groq",
             "model": "openai/gpt-oss-120b",
@@ -437,19 +574,21 @@ def test_ai_search_expands_multiple_keywords_within_shared_limit(
     assert response.status_code == 200
     data = response.json()
     assert data["search_queries"] == [
-        "IT companies in Denver",
-        "SaaS startups in Austin",
         "managed IT providers Denver",
-        "Austin SaaS software companies",
+        "SaaS software startups Austin",
+        "small business software vendors Austin",
+        "Denver IT consultants",
+        "small business technology providers",
     ]
-    assert len(data["results"]) == 3
-    assert data["credits_used"] == 4
-    assert maximum_concurrent_searches == 4
+    assert len(data["results"]) == 4
+    assert data["credits_used"] == 5
+    assert maximum_concurrent_searches == 5
     assert received == [
-        ("IT companies in Denver", 2),
-        ("SaaS startups in Austin", 1),
         ("managed IT providers Denver", 1),
-        ("Austin SaaS software companies", 1),
+        ("SaaS software startups Austin", 1),
+        ("small business software vendors Austin", 1),
+        ("Denver IT consultants", 1),
+        ("small business technology providers", 1),
     ]
 
 

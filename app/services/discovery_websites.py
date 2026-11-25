@@ -16,6 +16,7 @@ from app.schemas.discovery import (
     DiscoveryWebsiteInput,
     DiscoveryWebsiteSaveRequest,
     DiscoveryWebsiteSaveResponse,
+    parse_discovery_keywords,
 )
 from app.services.application_settings import get_hypestat_settings
 from app.services.crawl_jobs import create_website_crawl_job
@@ -36,6 +37,16 @@ class _WebsiteSavePreparation:
     hypestat_api_key: str | None
     hypestat_profiles_reused: int
     crawl_jobs_already_present: int
+
+
+def _matches_recorded_search_keyword(query: str, keyword: str) -> bool:
+    if query == keyword:
+        return True
+    try:
+        normalized_query = "\n".join(parse_discovery_keywords(query))
+    except ValueError:
+        return False
+    return normalized_query == keyword
 
 
 async def save_discovered_websites(
@@ -105,7 +116,10 @@ def _prepare_discovered_websites(
 ) -> _WebsiteSavePreparation:
     if request.search_id is not None:
         search_keyword = db.get(SearchKeyword, request.search_id)
-        if search_keyword is None or search_keyword.keyword != request.query:
+        if search_keyword is None or not _matches_recorded_search_keyword(
+            request.query,
+            search_keyword.keyword,
+        ):
             raise HTTPException(
                 status_code=422,
                 detail="search_id does not match a recorded search keyword.",

@@ -186,8 +186,21 @@ class TavilyDiscoverySearchRequest(DiscoverySearchRequest):
 
 
 class DiscoveryAiSearchRequest(TavilyDiscoverySearchRequest):
+    query: str = Field(min_length=3, max_length=300)
     ai_provider: Literal["gemini", "groq"] = "gemini"
     model: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("Enter a search prompt with at least 3 characters.")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_keyword_result_limit(self) -> "DiscoveryAiSearchRequest":
+        return self
 
     @field_validator("model")
     @classmethod
@@ -270,7 +283,9 @@ class DiscoverySearchResponse(BaseModel):
 
 
 class DiscoveryAiSearchResponse(DiscoverySearchResponse):
-    search_queries: list[str] = Field(min_length=1, max_length=7)
+    search_queries: list[str] = Field(min_length=1, max_length=5)
+    ai_provider_used: Literal["gemini", "groq"] = "gemini"
+    ai_fallback_reason: str | None = None
 
 
 class SearchKeywordResponse(BaseModel):
@@ -290,9 +305,18 @@ class DiscoveryWebsiteInput(BaseModel):
 
 
 class DiscoveryWebsiteSaveRequest(DiscoverySearchRequest):
+    query: str = Field(min_length=3, max_length=300)
     max_results: int = Field(default=20, ge=1, le=100)
     results: list[DiscoveryWebsiteInput] = Field(max_length=100)
     search_id: UUID | None = None
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("Enter a search prompt with at least 3 characters.")
+        return normalized
 
 
 class DiscoveryCrawlFailure(BaseModel):

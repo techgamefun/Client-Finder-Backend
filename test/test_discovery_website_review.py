@@ -5,7 +5,12 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from conftest import TestingSessionLocal
-from app.models import Website, WebsiteCrawlJob, WebsiteHypeStatProfile
+from app.models import (
+    SearchKeyword,
+    Website,
+    WebsiteCrawlJob,
+    WebsiteHypeStatProfile,
+)
 from app.schemas.discovery import DiscoveryWebsiteSaveRequest
 from app.services import crawl_jobs
 from app.services.hypestat import HypeStatFetchResult
@@ -101,6 +106,44 @@ def test_saving_discovery_results_canonicalizes_domains_and_queues_crawls(
     assert website_response.status_code == 200
     assert website_response.json()[0]["crawl_job_status"] == "queued"
     assert website_response.json()[0]["favicon_url"] == websites[0].favicon_url
+
+
+def test_saving_ai_search_results_preserves_the_original_prompt(
+    client,
+    monkeypatch,
+):
+    _disable_redis_enqueue(monkeypatch)
+    prompt = (
+        "Find IT companies in Denver, including managed service providers, "
+        "cybersecurity firms, cloud consultants, local vendors, and small "
+        "businesses"
+    )
+    with TestingSessionLocal() as db:
+        search = SearchKeyword(
+            keyword=prompt,
+            searched_at=datetime.now(timezone.utc),
+        )
+        db.add(search)
+        db.flush()
+        search_id = str(search.id)
+        db.commit()
+
+    response = client.post(
+        "/api/v1/discovery/save-websites",
+        json={
+            "query": prompt,
+            "search_id": search_id,
+            "results": [{"url": "https://example.com", "provider": "tavily"}],
+        },
+    )
+
+    assert response.status_code == 200
+    with TestingSessionLocal() as db:
+        website = db.scalar(select(Website))
+        assert website is not None
+        assert [keyword.keyword for keyword in website.search_keywords] == [
+            prompt,
+        ]
 
 
 def test_repeat_discovery_reuses_domain_and_does_not_queue_another_job(

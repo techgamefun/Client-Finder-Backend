@@ -41,7 +41,7 @@ from app.services.discovery import (
     search_with_selected_tools,
 )
 from app.services.discovery_query_generator import (
-    generate_discovery_search_queries,
+    generate_discovery_search_keywords,
 )
 from app.services.ahrefs import fetch_discovery_domain_ratings
 from app.services.discovery_websites import save_discovered_websites
@@ -176,33 +176,27 @@ async def discover_companies_with_ai(
             detail="Configure Tavily in Settings to run AI Search.",
         )
 
-    keywords = parse_discovery_keywords(payload.query)
-    if len(keywords) == 1:
-        queries = await generate_discovery_search_queries(
-            keywords[0],
+    if payload.ai_provider == "gemini":
+        fallback_api_key = get_user_provider_api_key(
+            db,
+            "groq",
+            user_id=context.user_id,
+        )
+        keyword_generation = await generate_discovery_search_keywords(
+            payload.query,
+            payload.ai_provider,
+            ai_api_key,
+            model=payload.model,
+            fallback_api_key=fallback_api_key,
+        )
+    else:
+        keyword_generation = await generate_discovery_search_keywords(
+            payload.query,
             payload.ai_provider,
             ai_api_key,
             model=payload.model,
         )
-    else:
-        expansion_count = min(2, payload.max_results - len(keywords))
-        queries = list(keywords)
-        if expansion_count > 0:
-            generated_queries = await generate_discovery_search_queries(
-                "; ".join(keywords),
-                payload.ai_provider,
-                ai_api_key,
-                model=payload.model,
-            )
-            seen = {query.casefold() for query in keywords}
-            for generated_query in generated_queries[1:]:
-                normalized_query = generated_query.strip()
-                if normalized_query.casefold() in seen:
-                    continue
-                queries.append(normalized_query)
-                seen.add(normalized_query.casefold())
-                if len(queries) >= len(keywords) + expansion_count:
-                    break
+    queries = keyword_generation.keywords[: payload.max_results]
 
     result_counts = distribute_result_limit(payload.max_results, len(queries))
     search_tasks = [
@@ -265,6 +259,8 @@ async def discover_companies_with_ai(
         credits_used=credits_used or None,
         provider_failures=failures,
         search_queries=queries,
+        ai_provider_used=keyword_generation.provider_used,
+        ai_fallback_reason=keyword_generation.fallback_reason,
     )
 @router.post(
     "/domain-ratings",

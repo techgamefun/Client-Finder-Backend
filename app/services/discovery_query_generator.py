@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from typing import Literal
 
 import httpx
@@ -21,26 +22,68 @@ GEMINI_QUERY_URL = (
 GROQ_QUERY_URL = "https://api.groq.com/openai/v1/chat/completions"
 QUERY_GENERATION_TIMEOUT_SECONDS = 30.0
 MAX_QUERY_LENGTH = 300
+MAX_GENERATED_SEARCH_KEYWORDS = 5
 
 
-class GeneratedSearchQueries(BaseModel):
-    queries: list[str] = Field(min_length=2, max_length=2)
+@dataclass(frozen=True)
+class DiscoverySearchKeywordGeneration:
+    keywords: list[str]
+    provider_used: DiscoveryAiProvider
+    fallback_reason: str | None = None
 
-    @field_validator("queries")
+
+class GeneratedSearchKeywords(BaseModel):
+    keywords: list[str] = Field(
+        min_length=MAX_GENERATED_SEARCH_KEYWORDS,
+        max_length=MAX_GENERATED_SEARCH_KEYWORDS,
+    )
+
+    @field_validator("keywords")
     @classmethod
-    def trim_queries(cls, values: list[str]) -> list[str]:
+    def trim_keywords(cls, values: list[str]) -> list[str]:
         return [value.strip() for value in values]
 
 
-async def generate_discovery_search_queries(
-    keywords: str,
+async def generate_discovery_search_keywords(
+    prompt: str,
     provider: DiscoveryAiProvider,
     api_key: str,
     *,
     model: str | None = None,
-) -> list[str]:
+    fallback_api_key: str | None = None,
+) -> DiscoverySearchKeywordGeneration:
+    provider_used = provider
+    fallback_reason = None
     if provider == "gemini":
-        generated_text = await _generate_with_gemini(keywords, api_key)
+        try:
+            generated_text = await _generate_with_gemini(prompt, api_key)
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_503_SERVICE_UNAVAILABLE:
+                raise
+            if not fallback_api_key:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=(
+                        f"{exc.detail} Groq fallback is unavailable because "
+                        "no Groq API key is configured."
+                    ),
+                ) from exc
+            fallback_reason = str(exc.detail)
+            provider_used = "groq"
+            try:
+                generated_text = await _generate_with_groq(
+                    prompt,
+                    fallback_api_key,
+                    model=GROQ_MODEL,
+                )
+            except HTTPException as fallback_exc:
+                raise HTTPException(
+                    status_code=fallback_exc.status_code,
+                    detail=(
+                        f"{exc.detail} Groq fallback failed: "
+                        f"{fallback_exc.detail}"
+                    ),
+                ) from fallback_exc
     else:
         selected_model = model or GROQ_MODEL
         if selected_model not in STRUCTURED_OUTPUT_MODEL_IDS:
@@ -52,65 +95,75 @@ async def generate_discovery_search_queries(
                 ),
             )
         generated_text = await _generate_with_groq(
-            keywords,
+            prompt,
             api_key,
             model=selected_model,
         )
 
     try:
-        generated = GeneratedSearchQueries.model_validate_json(generated_text)
+        generated = GeneratedSearchKeywords.model_validate_json(generated_text)
     except ValidationError as exc:
+        detail = (
+            f"{provider_used.capitalize()} returned invalid search keywords."
+        )
+        if fallback_reason:
+            detail = f"{fallback_reason} Groq fallback failed: {detail}"
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"{provider.capitalize()} returned invalid search queries.",
+            detail=detail,
         ) from exc
 
-    queries = [keywords]
-    seen = {keywords.casefold()}
-    for query in generated.queries:
-        normalized = query.strip()
-        folded = normalized.casefold()
-        if (
-            len(normalized) < 3
-            or len(normalized) > MAX_QUERY_LENGTH
-            or folded in seen
-        ):
-            continue
-        seen.add(folded)
-        queries.append(normalized)
-    if len(queries) < 2:
+    keywords = generated.keywords
+    if (
+        any(
+            len(keyword) < 3 or len(keyword) > MAX_QUERY_LENGTH
+            for keyword in keywords
+        )
+        or len({keyword.casefold() for keyword in keywords})
+        != MAX_GENERATED_SEARCH_KEYWORDS
+    ):
+        detail = (
+            f"{provider_used.capitalize()} did not provide five distinct, "
+            "useful search keywords."
+        )
+        if fallback_reason:
+            detail = f"{fallback_reason} Groq fallback failed: {detail}"
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"{provider.capitalize()} did not provide a useful query expansion.",
+            detail=detail,
         )
-    return queries
+    return DiscoverySearchKeywordGeneration(
+        keywords=keywords,
+        provider_used=provider_used,
+        fallback_reason=fallback_reason,
+    )
 
 
-async def _generate_with_gemini(keywords: str, api_key: str) -> str:
+async def _generate_with_gemini(prompt: str, api_key: str) -> str:
     payload = {
         "systemInstruction": {
             "parts": [
                 {
                     "text": (
-                        "Create exactly two distinct web search queries that "
-                        "expand the user's business discovery keywords. "
-                        "Preserve the user's industry, audience, and location "
-                        "when present. Use realistic search phrasing, do not "
-                        "add unsupported facts or locations, and do not "
-                        "repeat the original query. Return only the required "
-                        "JSON object."
+                        "Interpret the user's natural-language business "
+                        "discovery request and create exactly five distinct, "
+                        "concise search keyword phrases for finding matching "
+                        "businesses or websites. Preserve the requested "
+                        "business type, audience, location, and intent when "
+                        "present. Do not invent details. Return only the "
+                        "required JSON object."
                     ),
                 },
             ],
         },
-        "contents": [{"role": "user", "parts": [{"text": keywords}]}],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "OBJECT",
-                "required": ["queries"],
+                "required": ["keywords"],
                 "properties": {
-                    "queries": {
+                    "keywords": {
                         "type": "ARRAY",
                         "items": {"type": "STRING"},
                     },
@@ -138,13 +191,13 @@ async def _generate_with_gemini(keywords: str, api_key: str) -> str:
     if text is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini did not return usable search queries.",
+            detail="Gemini did not return usable search keywords.",
         )
     return text
 
 
 async def _generate_with_groq(
-    keywords: str,
+    prompt: str,
     api_key: str,
     *,
     model: str = GROQ_MODEL,
@@ -155,30 +208,30 @@ async def _generate_with_groq(
             {
                 "role": "system",
                 "content": (
-                    "Create exactly two distinct web search queries that "
-                    "expand the user's business discovery keywords. Preserve "
-                    "the user's industry, audience, and location when "
-                    "present. Use realistic search phrasing, do not add "
-                    "unsupported facts or locations, and do not repeat the "
-                    "original query. Return only the required JSON object."
+                    "Interpret the user's natural-language business "
+                    "discovery request and create exactly five distinct, "
+                    "concise search keyword phrases for finding matching "
+                    "businesses or websites. Preserve the requested business "
+                    "type, audience, location, and intent when present. Do "
+                    "not invent details. Return only the required JSON object."
                 ),
             },
-            {"role": "user", "content": keywords},
+            {"role": "user", "content": prompt},
         ],
         "response_format": {
             "type": "json_schema",
             "json_schema": {
-                "name": "discovery_search_queries",
+                "name": "discovery_search_keywords",
                 "strict": True,
                 "schema": {
                     "type": "object",
                     "properties": {
-                        "queries": {
+                        "keywords": {
                             "type": "array",
                             "items": {"type": "string"},
                         },
                     },
-                    "required": ["queries"],
+                    "required": ["keywords"],
                     "additionalProperties": False,
                 },
             },
@@ -204,7 +257,7 @@ async def _generate_with_groq(
     if text is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Groq did not return usable search queries.",
+            detail="Groq did not return usable search keywords.",
         )
     return text
 
@@ -237,6 +290,38 @@ async def _post_provider(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"{provider} rate limit reached. Try again shortly.",
+        )
+    if response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+        detail = (
+            f"{provider} query generation failed "
+            "(HTTP 503): The provider is temporarily unavailable."
+        )
+        try:
+            response_data = response.json()
+        except (json.JSONDecodeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=detail,
+            )
+        error = (
+            response_data.get("error")
+            if isinstance(response_data, dict)
+            else None
+        )
+        message = error.get("message") if isinstance(error, dict) else None
+        safe_message = (
+            message.strip().replace(api_key, "[redacted]")[:500]
+            if isinstance(message, str) and message.strip()
+            else ""
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"{provider} query generation failed (HTTP 503): "
+                f"{safe_message}"
+                if safe_message
+                else detail
+            ),
         )
     if response.is_error:
         default = (
