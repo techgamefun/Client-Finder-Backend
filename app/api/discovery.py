@@ -1,32 +1,53 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_authenticated_context
 from app.models import DiscoveryProviderJob, SearchKeyword
 from app.schemas.discovery import (
+    DiscoveryAiSearchRequest,
+    DiscoveryAiSearchResponse,
     DiscoveryDomainRatingRequest,
     DiscoveryDomainRatingResult,
     DiscoveryIngestRequest,
     DiscoveryIngestResponse,
-    DiscoverySearchResponse,
+    DiscoveryProvider,
+    DiscoveryProviderFailure,
     DiscoveryProviderJobResponse,
+    DiscoverySearchResponse,
     TavilyDiscoverySearchRequest,
     DiscoveryWebsiteSaveRequest,
     DiscoveryWebsiteSaveResponse,
     SearchKeywordResponse,
+    parse_discovery_keywords,
 )
-from app.services.discovery import StartedProviderJob, search_with_selected_tools
+from app.services.application_settings import (
+    get_tavily_api_key,
+    get_user_provider_api_key,
+)
+from app.services.discovery import (
+    StartedProviderJob,
+    deduplicate_discovery_results,
+    distribute_result_limit,
+    search_companies,
+    search_multiple_with_selected_tools,
+    search_with_selected_tools,
+)
+from app.services.discovery_query_generator import (
+    generate_discovery_search_queries,
+)
 from app.services.ahrefs import fetch_discovery_domain_ratings
 from app.services.discovery_websites import save_discovered_websites
 from app.services.lead_ingestion import ingest_search_results
 from app.services.octoparse import poll_octoparse_job
+from app.tenant_context import TenantContext
 
 router = APIRouter(
     prefix="/discovery",
@@ -81,14 +102,25 @@ async def discover_companies(
     payload: TavilyDiscoverySearchRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> DiscoverySearchResponse:
-    results, started_jobs, provider_failures, answer, credits_used = (
-        await search_with_selected_tools(
-            query=payload.query,
-            max_results=payload.max_results,
-            db=db,
-            options=payload,
+    queries = parse_discovery_keywords(payload.query)
+    if len(queries) == 1:
+        results, started_jobs, provider_failures, answer, credits_used = (
+            await search_with_selected_tools(
+                queries[0],
+                payload.max_results,
+                db,
+                options=payload,
+            )
         )
-    )
+    else:
+        results, started_jobs, provider_failures, answer, credits_used = (
+            await search_multiple_with_selected_tools(
+                queries,
+                payload.max_results,
+                db,
+                options=payload,
+            )
+        )
     search_id, provider_jobs = await run_in_threadpool(
         _persist_discovery_search,
         payload,
@@ -103,9 +135,137 @@ async def discover_companies(
         credits_used=credits_used,
         provider_jobs=provider_jobs,
         provider_failures=provider_failures,
+        search_queries=queries,
     )
 
 
+@router.post(
+    "/ai-search",
+    response_model=DiscoveryAiSearchResponse,
+)
+async def discover_companies_with_ai(
+    payload: DiscoveryAiSearchRequest,
+    db: Annotated[Session, Depends(get_db)],
+    context: Annotated[
+        TenantContext,
+        Depends(require_authenticated_context),
+    ],
+) -> DiscoveryAiSearchResponse:
+    if context.user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="An authenticated user is required.",
+        )
+    ai_api_key = get_user_provider_api_key(
+        db,
+        payload.ai_provider,
+        user_id=context.user_id,
+    )
+    if not ai_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Add your {payload.ai_provider.capitalize()} API key in "
+                "Settings before using AI Search."
+            ),
+        )
+    search_api_key = await run_in_threadpool(get_tavily_api_key, db)
+    if not search_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Configure Tavily in Settings to run AI Search.",
+        )
+
+    keywords = parse_discovery_keywords(payload.query)
+    if len(keywords) == 1:
+        queries = await generate_discovery_search_queries(
+            keywords[0],
+            payload.ai_provider,
+            ai_api_key,
+            model=payload.model,
+        )
+    else:
+        expansion_count = min(2, payload.max_results - len(keywords))
+        queries = list(keywords)
+        if expansion_count > 0:
+            generated_queries = await generate_discovery_search_queries(
+                "; ".join(keywords),
+                payload.ai_provider,
+                ai_api_key,
+                model=payload.model,
+            )
+            seen = {query.casefold() for query in keywords}
+            for generated_query in generated_queries[1:]:
+                normalized_query = generated_query.strip()
+                if normalized_query.casefold() in seen:
+                    continue
+                queries.append(normalized_query)
+                seen.add(normalized_query.casefold())
+                if len(queries) >= len(keywords) + expansion_count:
+                    break
+
+    result_counts = distribute_result_limit(payload.max_results, len(queries))
+    search_tasks = [
+        search_companies(
+            query,
+            db,
+            max_results,
+            options=payload.model_copy(
+                update={
+                    "query": query,
+                    "max_results": max_results,
+                    "providers": ["tavily"],
+                },
+            ),
+            api_key=search_api_key,
+            api_key_is_loaded=True,
+        )
+        for query, max_results in zip(queries, result_counts, strict=True)
+    ]
+    outcomes = await asyncio.gather(*search_tasks, return_exceptions=True)
+    results = []
+    failures = []
+    answers = []
+    credits_used = 0.0
+    for query, outcome in zip(queries, outcomes, strict=True):
+        if isinstance(outcome, HTTPException):
+            failures.append(
+                DiscoveryProviderFailure(
+                    provider=DiscoveryProvider.TAVILY,
+                    detail=f"{query}: {outcome.detail}",
+                )
+            )
+            continue
+        if isinstance(outcome, BaseException):
+            raise outcome
+        results.extend(outcome.results)
+        if outcome.answer:
+            answers.append(f"{query}: {outcome.answer}")
+        if outcome.credits_used is not None:
+            credits_used += outcome.credits_used
+
+    if failures and not results:
+        detail = "; ".join(failure.detail for failure in failures)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"All AI Search queries failed. {detail}",
+        )
+
+    search_id, _ = await run_in_threadpool(
+        _persist_discovery_search,
+        payload,
+        [],
+        db,
+    )
+    return DiscoveryAiSearchResponse(
+        query=payload.query,
+        results=deduplicate_discovery_results(results)[: payload.max_results],
+        search_id=search_id,
+        answer="\n\n".join(answers) or None,
+        credits_used=credits_used or None,
+        provider_failures=failures,
+        search_queries=queries,
+    )
 @router.post(
     "/domain-ratings",
     response_model=list[DiscoveryDomainRatingResult],

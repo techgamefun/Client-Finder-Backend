@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import HTTPException, status
@@ -283,6 +284,112 @@ async def search_with_selected_tools(
     str | None,
     float | None,
 ]:
+    selected_tools, provider_configs, failures = (
+        await _load_selected_discovery_tools(db, options)
+    )
+    results, jobs, failures, answer, credits_used = (
+        await _search_with_preloaded_tools(
+            query,
+            max_results,
+            db,
+            options,
+            selected_tools,
+            provider_configs,
+            failures,
+        )
+    )
+    if failures and not results and not jobs:
+        detail = "; ".join(
+            f"{failure.provider.value}: {failure.detail}"
+            for failure in failures
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"All selected discovery tools failed. {detail}",
+        )
+    return results, jobs, failures, answer, credits_used
+
+
+async def search_multiple_with_selected_tools(
+    queries: list[str],
+    max_results: int,
+    db: Session,
+    *,
+    options: TavilyDiscoverySearchRequest,
+) -> tuple[
+    list[DiscoveryResult],
+    list[StartedProviderJob],
+    list[DiscoveryProviderFailure],
+    str | None,
+    float | None,
+]:
+    if not queries:
+        raise ValueError("At least one discovery query is required.")
+    selected_tools, provider_configs, setup_failures = (
+        await _load_selected_discovery_tools(db, options)
+    )
+    result_counts = distribute_result_limit(max_results, len(queries))
+    outcomes = await asyncio.gather(
+        *(
+            _search_with_preloaded_tools(
+                query,
+                result_count,
+                db,
+                options.model_copy(
+                    update={"query": query, "max_results": result_count},
+                ),
+                selected_tools,
+                provider_configs,
+                setup_failures,
+            )
+            for query, result_count in zip(queries, result_counts, strict=True)
+        )
+    )
+
+    results: list[DiscoveryResult] = []
+    jobs: list[StartedProviderJob] = []
+    failures: list[DiscoveryProviderFailure] = []
+    answers: list[str] = []
+    credits_used = 0.0
+    for query, outcome in zip(queries, outcomes, strict=True):
+        query_results, query_jobs, query_failures, answer, query_credits = outcome
+        results.extend(query_results)
+        jobs.extend(query_jobs)
+        failures.extend(
+            DiscoveryProviderFailure(
+                provider=failure.provider,
+                detail=f"{query}: {failure.detail}",
+            )
+            for failure in query_failures
+        )
+        if answer:
+            answers.append(f"{query}: {answer}")
+        if query_credits is not None:
+            credits_used += query_credits
+
+    if failures and not results and not jobs:
+        detail = "; ".join(failure.detail for failure in failures)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"All selected discovery searches failed. {detail}",
+        )
+    return (
+        deduplicate_discovery_results(results)[:max_results],
+        jobs,
+        failures,
+        "\n\n".join(answers) or None,
+        credits_used or None,
+    )
+
+
+async def _load_selected_discovery_tools(
+    db: Session,
+    options: TavilyDiscoverySearchRequest | None,
+) -> tuple[
+    list[DiscoveryProvider],
+    dict[DiscoveryProvider, str | OctoparseSearchConfig | None],
+    list[DiscoveryProviderFailure],
+]:
     selected_tools = (
         options.providers
         if options is not None and options.providers is not None
@@ -319,6 +426,28 @@ async def search_with_selected_tools(
                     detail=str(exc.detail),
                 )
             )
+    return selected_tools, provider_configs, failures
+
+
+async def _search_with_preloaded_tools(
+    query: str,
+    max_results: int,
+    db: Session,
+    options: TavilyDiscoverySearchRequest | None,
+    selected_tools: list[DiscoveryProvider],
+    provider_configs: dict[
+        DiscoveryProvider,
+        str | OctoparseSearchConfig | None,
+    ],
+    initial_failures: list[DiscoveryProviderFailure],
+) -> tuple[
+    list[DiscoveryResult],
+    list[StartedProviderJob],
+    list[DiscoveryProviderFailure],
+    str | None,
+    float | None,
+]:
+    failures = list(initial_failures)
 
     async def run_tool(
         provider: DiscoveryProvider,
@@ -367,17 +496,34 @@ async def search_with_selected_tools(
             if outcome.job is not None:
                 jobs.append(outcome.job)
 
-    if failures and not results and not jobs:
-        detail = "; ".join(
-            f"{failure.provider.value}: {failure.detail}"
-            for failure in failures
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"All selected discovery tools failed. {detail}",
-        )
-
     return results, jobs, failures, answer, credits_used
+
+
+def distribute_result_limit(max_results: int, query_count: int) -> list[int]:
+    base, remainder = divmod(max_results, query_count)
+    return [
+        base + (1 if index < remainder else 0)
+        for index in range(query_count)
+    ]
+
+
+def deduplicate_discovery_results(
+    results: list[DiscoveryResult],
+) -> list[DiscoveryResult]:
+    unique_results: list[DiscoveryResult] = []
+    seen_domains: set[str] = set()
+    for result in results:
+        hostname = urlsplit(str(result.url)).hostname
+        if hostname is None:
+            continue
+        domain = hostname.casefold()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        unique_results.append(result)
+    return unique_results
 
 
 async def get_tavily_usage(db: Session) -> TavilyUsageResponse:

@@ -221,6 +221,18 @@ status and mapped results. `GET /api/v1/discovery/suggestions` returns up to
 ten recent unique keywords matching the supplied query. Search results are
 kept transient until the user saves them for website review.
 
+Both discovery search endpoints accept up to five comma- or newline-separated
+keywords and run their searches concurrently after loading provider settings
+once. Results are combined, deduplicated by website domain, and capped by
+distributing the requested result limit across searches. The searched terms
+are returned in the response and one normalized search record is saved for the
+existing website-review flow.
+
+`POST /api/v1/discovery/ai-search` additionally uses the authenticated user's
+Gemini or Groq credential to produce up to two related queries when the shared
+result limit allows, then searches those queries through Tavily in parallel
+with the user-entered keywords.
+
 ### Domain registry and discovery crawl queue
 
 The Discover leads page's save action sends only result URLs and providers to

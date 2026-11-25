@@ -33,9 +33,41 @@ class DiscoveryTool(BaseModel):
     name: str
 
 
+MAX_DISCOVERY_KEYWORDS = 5
+
+
+def parse_discovery_keywords(value: str) -> list[str]:
+    keywords = [
+        keyword.strip()
+        for keyword in re.split(r"[,\r\n]+", value)
+        if keyword.strip()
+    ]
+    normalized_keywords = []
+    seen = set()
+    for keyword in keywords:
+        normalized = keyword.casefold()
+        if normalized not in seen:
+            normalized_keywords.append(keyword)
+            seen.add(normalized)
+    if not normalized_keywords:
+        raise ValueError("Enter at least one keyword.")
+    if any(len(keyword) < 3 for keyword in normalized_keywords):
+        raise ValueError("Each keyword must contain at least 3 characters.")
+    if len(normalized_keywords) > MAX_DISCOVERY_KEYWORDS:
+        raise ValueError(
+            f"Enter no more than {MAX_DISCOVERY_KEYWORDS} keywords."
+        )
+    return normalized_keywords
+
+
 class DiscoverySearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=300)
     max_results: int = Field(default=20, ge=1, le=20)
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        return "\n".join(parse_discovery_keywords(value))
 
 
 TavilySearchDepth = Literal["basic", "fast", "ultra-fast", "advanced"]
@@ -144,6 +176,29 @@ class TavilyDiscoverySearchRequest(DiscoverySearchRequest):
             raise ValueError("start_date cannot be after end_date.")
         return self
 
+    @model_validator(mode="after")
+    def validate_keyword_result_limit(self) -> "TavilyDiscoverySearchRequest":
+        if self.max_results < len(parse_discovery_keywords(self.query)):
+            raise ValueError(
+                "Set the result limit to at least one result per keyword."
+            )
+        return self
+
+
+class DiscoveryAiSearchRequest(TavilyDiscoverySearchRequest):
+    ai_provider: Literal["gemini", "groq"] = "gemini"
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("model")
+    @classmethod
+    def trim_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("model cannot be blank.")
+        return normalized
+
 
 class DiscoveryResult(BaseModel):
     title: str
@@ -202,6 +257,7 @@ class DiscoveryProviderJobResponse(BaseModel):
 class DiscoverySearchResponse(BaseModel):
     query: str
     results: list[DiscoveryResult]
+    search_queries: list[str] = Field(default_factory=list, max_length=5)
     search_id: UUID | None = None
     answer: str | None = None
     credits_used: float | None = None
@@ -211,6 +267,10 @@ class DiscoverySearchResponse(BaseModel):
     provider_failures: list[DiscoveryProviderFailure] = Field(
         default_factory=list,
     )
+
+
+class DiscoveryAiSearchResponse(DiscoverySearchResponse):
+    search_queries: list[str] = Field(min_length=1, max_length=7)
 
 
 class SearchKeywordResponse(BaseModel):

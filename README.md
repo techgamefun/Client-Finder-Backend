@@ -183,7 +183,14 @@ date range, domain filters, minimum relevance score, and optional AI summary
 settings. It returns Tavily usage credits and result favicon and publication
 metadata when available. Organization admins can set the default search depth,
 country, and excluded domains from **Settings → Tavily**; these defaults
-prefill the Discover Leads filters. Apply pending database changes with
+prefill the Discover Leads filters. `POST /api/v1/discovery/ai-search` uses
+the authenticated user's Gemini or Groq key to generate related queries,
+searches the original and expanded keywords through Tavily, and distributes
+the requested result limit across those queries. Tavily credits apply to each
+query. The search endpoints accept up to five comma- or newline-separated
+keywords, search them concurrently, deduplicate results by website domain, and
+share the result limit across the search terms. AI Search adds up to two
+related queries when the limit leaves room. Apply pending database changes with
 `.\.venv\Scripts\python.exe -m alembic upgrade head` from the `Agent` directory.
 
 ## Requirements
