@@ -21,6 +21,7 @@ def test_user_preferences_save_and_merge_per_user(client):
         "theme": "system",
         "sidebar_collapsed": False,
         "search": {"providers": None, "tavily": None},
+        "websites": {"visible_columns": None},
     }
 
     updated = client.patch(
@@ -45,12 +46,24 @@ def test_user_preferences_save_and_merge_per_user(client):
                     "auto_find_more": True,
                 },
             },
+            "websites": {
+                "visible_columns": [
+                    "keywords",
+                    "hypestat_monthly_visits",
+                    "pagespeed_mobile_seo",
+                ],
+            },
         },
     )
     assert updated.status_code == 200
     assert updated.json()["theme"] == "dark"
     assert updated.json()["sidebar_collapsed"] is True
     assert updated.json()["search"]["providers"] == ["tavily"]
+    assert updated.json()["websites"]["visible_columns"] == [
+        "keywords",
+        "hypestat_monthly_visits",
+        "pagespeed_mobile_seo",
+    ]
 
     partial_update = client.patch(
         "/api/v1/preferences",
@@ -61,6 +74,11 @@ def test_user_preferences_save_and_merge_per_user(client):
     assert partial_update.json()["sidebar_collapsed"] is True
     assert partial_update.json()["search"]["tavily"]["topic"] == "news"
     assert partial_update.json()["search"]["tavily"]["exclude_domains"] == []
+    assert partial_update.json()["websites"]["visible_columns"] == [
+        "keywords",
+        "hypestat_monthly_visits",
+        "pagespeed_mobile_seo",
+    ]
 
     persisted = client.get("/api/v1/preferences")
     assert persisted.status_code == 200
@@ -113,6 +131,16 @@ def test_user_preferences_validate_values_and_require_authentication(client):
         json={"search": {"tavily": {"country": "Canada"}}},
     )
     assert invalid_country.status_code == 422
+    invalid_website_column = client.patch(
+        "/api/v1/preferences",
+        json={"websites": {"visible_columns": ["not_a_column"]}},
+    )
+    assert invalid_website_column.status_code == 422
+    duplicate_website_columns = client.patch(
+        "/api/v1/preferences",
+        json={"websites": {"visible_columns": ["keywords", "keywords"]}},
+    )
+    assert duplicate_website_columns.status_code == 422
 
     client.cookies.clear()
     unauthenticated = client.get("/api/v1/preferences")
@@ -124,6 +152,7 @@ def test_user_preferences_read_from_cache_before_database(client, monkeypatch):
         "theme": "dark",
         "sidebar_collapsed": True,
         "search": {"providers": None, "tavily": None},
+        "websites": {"visible_columns": None},
     }
     monkeypatch.setattr(
         user_preferences_api,
@@ -188,6 +217,7 @@ def test_redis_preferences_cache_uses_user_scoped_ttl_commands(monkeypatch):
         "theme": "dark",
         "sidebar_collapsed": True,
         "search": {"providers": None, "tavily": None},
+        "websites": {"visible_columns": None},
     }
     commands = []
 

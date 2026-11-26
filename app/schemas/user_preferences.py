@@ -20,6 +20,28 @@ from app.schemas.discovery import (
 
 
 ThemePreference = Literal["light", "dark", "system"]
+WebsiteColumn = Literal[
+    "keywords",
+    "website_type",
+    "site_topic",
+    "hypestat_monthly_visits",
+    "hypestat_referring_domains",
+    "hypestat_global_rank",
+    "hypestat_country",
+    "hypestat_backlink_countries",
+    "hypestat_audience_countries",
+    "language",
+    "crawled_at",
+    "ahrefs_domain_rating",
+    "pagespeed_desktop_performance",
+    "pagespeed_desktop_accessibility",
+    "pagespeed_desktop_best_practices",
+    "pagespeed_desktop_seo",
+    "pagespeed_mobile_performance",
+    "pagespeed_mobile_accessibility",
+    "pagespeed_mobile_best_practices",
+    "pagespeed_mobile_seo",
+]
 
 
 class TavilySearchPreferences(BaseModel):
@@ -98,18 +120,38 @@ class UserSearchPreferences(BaseModel):
         return value
 
 
+class WebsiteTablePreferences(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    visible_columns: list[WebsiteColumn] | None = Field(
+        default=None,
+        max_length=20,
+    )
+
+    @field_validator("visible_columns")
+    @classmethod
+    def columns_must_be_unique(
+        cls,
+        value: list[WebsiteColumn] | None,
+    ) -> list[WebsiteColumn] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("Website columns must be unique.")
+        return value
+
+
 class UserPreferencesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     theme: ThemePreference | None = None
     sidebar_collapsed: bool | None = None
     search: UserSearchPreferences | None = None
+    websites: WebsiteTablePreferences | None = None
 
     @model_validator(mode="after")
     def require_a_preference(self) -> "UserPreferencesUpdate":
         if not self.model_fields_set:
             raise ValueError("At least one user preference must be provided.")
-        for field in ("theme", "sidebar_collapsed", "search"):
+        for field in ("theme", "sidebar_collapsed", "search", "websites"):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be null.")
         return self
@@ -119,3 +161,6 @@ class UserPreferencesResponse(BaseModel):
     theme: ThemePreference = "system"
     sidebar_collapsed: bool = False
     search: UserSearchPreferences = Field(default_factory=UserSearchPreferences)
+    websites: WebsiteTablePreferences = Field(
+        default_factory=WebsiteTablePreferences,
+    )
