@@ -324,6 +324,70 @@ def test_website_registry_page_includes_current_user_domain_rating(client):
     assert websites[str(unrated_website_id)]["ahrefs_domain_rating"] is None
 
 
+def test_website_registry_sorts_by_first_email_case_insensitively(client):
+    with TestingSessionLocal() as db:
+        website_by_domain = {}
+        for domain in (
+            "zeta.example",
+            "beta.example",
+            "alpha.example",
+            "no-email.example",
+        ):
+            website = Website(
+                website_url=f"https://{domain}/",
+                domain=domain,
+            )
+            db.add(website)
+            db.flush()
+            website_by_domain[domain] = website
+
+        db.add_all(
+            [
+                Contact(
+                    website_id=website_by_domain["zeta.example"].id,
+                    business_email="zeta@example.com",
+                ),
+                Contact(
+                    website_id=website_by_domain["beta.example"].id,
+                    business_email="Zulu@example.com",
+                ),
+                Contact(
+                    website_id=website_by_domain["beta.example"].id,
+                    business_email="alpha@example.com",
+                ),
+                Contact(
+                    website_id=website_by_domain["alpha.example"].id,
+                    business_email="Bravo@example.com",
+                ),
+            ]
+        )
+        db.commit()
+
+    ascending = client.get(
+        "/api/v1/websites/registry-page",
+        params={"sort_by": "emails", "sort_direction": "ascending"},
+    )
+    descending = client.get(
+        "/api/v1/websites/registry-page",
+        params={"sort_by": "emails", "sort_direction": "descending"},
+    )
+
+    assert ascending.status_code == 200
+    assert [row["domain"] for row in ascending.json()["items"]] == [
+        "beta.example",
+        "alpha.example",
+        "zeta.example",
+        "no-email.example",
+    ]
+    assert descending.status_code == 200
+    assert [row["domain"] for row in descending.json()["items"]] == [
+        "zeta.example",
+        "alpha.example",
+        "beta.example",
+        "no-email.example",
+    ]
+
+
 def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     with TestingSessionLocal() as db:
         for domain, status, topics in [

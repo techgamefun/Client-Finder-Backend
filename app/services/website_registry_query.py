@@ -30,6 +30,7 @@ from app.models import (
 
 WebsiteSortKey = Literal[
     "website",
+    "emails",
     "website_type",
     "site_topic",
     "language",
@@ -410,6 +411,17 @@ def get_website_registry_page(
 
     sort_columns = {
         "website": Website.domain,
+        "emails": (
+            select(func.min(func.lower(func.trim(Contact.business_email))))
+            .where(
+                Contact.website_id == Website.id,
+                Contact.organization_id == Website.organization_id,
+                Contact.business_email.is_not(None),
+                func.trim(Contact.business_email) != "",
+            )
+            .correlate(Website)
+            .scalar_subquery()
+        ),
         "website_type": Website.page_type,
         "site_topic": cast(Website.site_topic, String),
         "language": Website.language,
