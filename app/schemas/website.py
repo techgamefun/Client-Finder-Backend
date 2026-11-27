@@ -1,8 +1,16 @@
 from datetime import date, datetime
+import re
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
 
 from app.schemas.pagespeed import PageSpeedScanSummary
 from app.schemas.website_crawl import (
@@ -20,6 +28,14 @@ class WebsiteResponse(BaseModel):
     id: UUID
     website_url: str
     domain: str
+    business_name: str | None = None
+    industry: str | None = None
+    city: str | None = None
+    state: str | None = None
+    software_need: str | None = None
+    lead_score: int | None = None
+    last_email_sent_at: datetime | None = None
+    domain_resolution_needed: bool = False
     favicon_url: str | None
     crawl_id: UUID | None
     is_crawled: bool
@@ -36,7 +52,6 @@ class WebsiteResponse(BaseModel):
     language: str | None
     status: Literal[
         "new",
-        "lead",
         "checked",
         "qualified",
         "contacted",
@@ -101,6 +116,85 @@ class WebsiteDiscoveryKeywordResponse(BaseModel):
     searched_at: datetime
 
 
+class WebsiteContactCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    role: str | None = Field(default=None, max_length=150)
+    business_email: str | None = Field(default=None, max_length=320)
+    business_phone: str | None = Field(default=None, max_length=50)
+    is_publicly_listed: bool = False
+
+    @field_validator("name", "role", "business_email", "business_phone")
+    @classmethod
+    def trim_optional_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("business_email")
+    @classmethod
+    def validate_business_email(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(
+            r"[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+",
+            value,
+        ):
+            raise ValueError("Enter a valid business email address.")
+        return value
+
+    @model_validator(mode="after")
+    def require_contact_details(self) -> "WebsiteContactCreate":
+        if not any(
+            (self.name, self.role, self.business_email, self.business_phone)
+        ):
+            raise ValueError("Provide at least one contact detail.")
+        return self
+
+
+class WebsiteContactUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    role: str | None = Field(default=None, max_length=150)
+    business_email: str | None = Field(default=None, max_length=320)
+    business_phone: str | None = Field(default=None, max_length=50)
+    is_publicly_listed: bool | None = None
+
+    @field_validator("name", "role", "business_email", "business_phone")
+    @classmethod
+    def trim_optional_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("business_email")
+    @classmethod
+    def validate_business_email(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(
+            r"[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+",
+            value,
+        ):
+            raise ValueError("Enter a valid business email address.")
+        return value
+
+    @model_validator(mode="after")
+    def require_changes(self) -> "WebsiteContactUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one contact field must be provided.")
+        if "is_publicly_listed" in self.model_fields_set:
+            if self.is_publicly_listed is None:
+                raise ValueError("is_publicly_listed cannot be null.")
+        return self
+
+
+class WebsiteContactResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    website_id: UUID
+    name: str | None
+    role: str | None
+    business_email: str | None
+    business_phone: str | None
+    is_publicly_listed: bool
+
+
 class WebsiteHypeStatProfileResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -137,6 +231,7 @@ class WebsiteAhrefsMetricsResponse(BaseModel):
 
 class WebsiteDetailResponse(BaseModel):
     website: WebsiteResponse
+    contacts: list["WebsiteContactResponse"] = Field(default_factory=list)
     crawl: WebsiteCrawlResponse | None
     pagespeed_scans: list[PageSpeedScanSummary] = Field(default_factory=list)
     hypestat_profile: WebsiteHypeStatProfileResponse | None = None
@@ -221,39 +316,72 @@ class WebsiteEnrichmentCountsResponse(BaseModel):
     pagespeed_missing_scan_count: int
 
 
-class WebsiteAddToLeadsRequest(BaseModel):
-    website_ids: list[UUID] = Field(min_length=1, max_length=500)
-    batch_id: UUID | None = None
-    batch_name: str | None = Field(default=None, max_length=160)
+class WebsiteGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    website_ids: list[UUID] = Field(default_factory=list, max_length=5000)
 
-    @field_validator("batch_name")
+    @field_validator("name")
     @classmethod
-    def trim_batch_name(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
+    def trim_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Group name cannot be blank.")
+        return normalized
+
+    @field_validator("website_ids")
+    @classmethod
+    def unique_website_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("Website IDs must be unique.")
+        return value
+
+
+class WebsiteGroupUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
             raise ValueError("Group name cannot be blank.")
         return normalized
 
 
-class WebsiteAddToLeadsResponse(BaseModel):
-    requested_count: int
-    created_count: int
-    already_existing_count: int
-    status_updated_count: int
-    skipped_listing_count: int
-    skipped_uncrawled_count: int
-    not_found_count: int
-    batch_id: UUID | None = None
-    batch_name: str | None = None
+class WebsiteGroupMembershipUpdate(BaseModel):
+    website_ids: list[UUID] = Field(min_length=1, max_length=5000)
+    action: Literal["add", "move", "ungroup"]
+    group_id: UUID | None = None
+
+    @field_validator("website_ids")
+    @classmethod
+    def unique_website_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("Website IDs must be unique.")
+        return value
+
+    @model_validator(mode="after")
+    def require_group_for_membership(self) -> "WebsiteGroupMembershipUpdate":
+        if self.action in ("add", "move") and self.group_id is None:
+            raise ValueError("Choose a group for this action.")
+        return self
+
+
+class WebsiteGroupResponse(BaseModel):
+    id: UUID
+    name: str
+    created_at: datetime
+    website_count: int
+
+
+class WebsiteGroupMembershipResponse(BaseModel):
+    updated_count: int
 
 
 class WebsiteBatchStatusUpdateRequest(BaseModel):
     website_ids: list[UUID] = Field(min_length=1, max_length=500)
     status: Literal[
         "new",
-        "lead",
         "checked",
         "qualified",
         "contacted",
@@ -274,7 +402,6 @@ class WebsiteUpdate(BaseModel):
 
     status: Literal[
         "new",
-        "lead",
         "checked",
         "qualified",
         "contacted",
@@ -282,6 +409,13 @@ class WebsiteUpdate(BaseModel):
         "disqualified",
         "needs_review",
     ] = "new"
+    website_url: HttpUrl | None = None
+    business_name: str | None = Field(default=None, max_length=200)
+    industry: str | None = Field(default=None, max_length=150)
+    city: str | None = Field(default=None, max_length=100)
+    state: str | None = Field(default=None, max_length=100)
+    software_need: str | None = None
+    lead_score: int | None = Field(default=None, ge=0)
     page_type: Literal[
         "business_site",
         "business_listing",

@@ -686,9 +686,9 @@ class EmailCampaignRecipient(Base):
         nullable=False,
         index=True,
     )
-    company_id: Mapped[UUID] = mapped_column(
+    website_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
+        ForeignKey("websites.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -832,36 +832,19 @@ website_search_keywords = Table(
     ),
 )
 
-pagespeed_scan_job_companies = Table(
-    "pagespeed_scan_job_companies",
+website_group_websites = Table(
+    "website_group_websites",
     Base.metadata,
     Column(
-        "job_id",
+        "website_group_id",
         Uuid(as_uuid=True),
-        ForeignKey("pagespeed_scan_jobs.id", ondelete="CASCADE"),
+        ForeignKey("website_groups.id", ondelete="CASCADE"),
         primary_key=True,
     ),
     Column(
-        "company_id",
+        "website_id",
         Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
-)
-
-lead_batch_companies = Table(
-    "lead_batch_companies",
-    Base.metadata,
-    Column(
-        "lead_batch_id",
-        Uuid(as_uuid=True),
-        ForeignKey("lead_batches.id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
-    Column(
-        "company_id",
-        Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
+        ForeignKey("websites.id", ondelete="CASCADE"),
         primary_key=True,
     ),
 )
@@ -927,115 +910,6 @@ class EmailCampaignDelivery(Base):
     )
 
 
-class Company(TenantOwnedMixin, Base):
-    __tablename__ = "companies"
-
-    id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    normalized_name: Mapped[str | None] = mapped_column(
-        String(200),
-        index=True,
-    )
-    website: Mapped[str | None] = mapped_column(String(500))
-    domain: Mapped[str | None] = mapped_column(
-        String(255),
-    )
-    industry: Mapped[str | None] = mapped_column(String(150))
-    city: Mapped[str | None] = mapped_column(String(100))
-    state: Mapped[str | None] = mapped_column(String(100))
-
-    software_need: Mapped[str | None] = mapped_column(Text)
-    lead_score: Mapped[int | None] = mapped_column(Integer)
-    lead_status: Mapped[str] = mapped_column(
-        String(30),
-        default="new",
-        server_default="new",
-        nullable=False,
-    )
-    last_email_sent_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-
-    contacts: Mapped[list["Contact"]] = relationship(
-        back_populates="company",
-        cascade="all, delete-orphan",
-    )
-    created_by_user: Mapped["User | None"] = relationship(
-        foreign_keys="Company.created_by_user_id",
-    )
-
-    pagespeed_scans: Mapped[list["PageSpeedScan"]] = relationship(
-        back_populates="company",
-        cascade="all, delete-orphan",
-        order_by="desc(PageSpeedScan.scanned_at)",
-    )
-    lead_batches: Mapped[list["LeadBatch"]] = relationship(
-        secondary=lead_batch_companies,
-        back_populates="companies",
-    )
-
-    @property
-    def created_by_email(self) -> str | None:
-        return (
-            self.created_by_user.email
-            if self.created_by_user is not None
-            else None
-        )
-
-    __table_args__ = (
-        UniqueConstraint(
-            "organization_id",
-            "domain",
-            name="uq_companies_organization_domain",
-        ),
-        Index("ix_companies_name", "name"),
-        Index("ix_companies_industry", "industry"),
-        Index(
-            "ix_companies_organization_created_at",
-            "organization_id",
-            "created_at",
-        ),
-    )
-
-
-class LeadBatch(TenantOwnedMixin, Base):
-    __tablename__ = "lead_batches"
-
-    id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
-    name: Mapped[str] = mapped_column(String(160), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-    companies: Mapped[list[Company]] = relationship(
-        secondary=lead_batch_companies,
-        back_populates="lead_batches",
-    )
-
-    __table_args__ = (
-        Index(
-            "ix_lead_batches_organization_created_at",
-            "organization_id",
-            "created_at",
-        ),
-    )
-
-
 class Contact(TenantOwnedMixin, Base):
     __tablename__ = "contacts"
 
@@ -1045,9 +919,9 @@ class Contact(TenantOwnedMixin, Base):
         default=uuid4,
     )
 
-    company_id: Mapped[UUID] = mapped_column(
+    website_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
+        ForeignKey("websites.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -1063,14 +937,14 @@ class Contact(TenantOwnedMixin, Base):
         nullable=False,
     )
 
-    company: Mapped["Company"] = relationship(
+    website: Mapped["Website"] = relationship(
         back_populates="contacts",
     )
 
     __table_args__ = (
         Index(
-            "ix_contacts_company_organization",
-            "company_id",
+            "ix_contacts_website_organization",
+            "website_id",
             "organization_id",
         ),
     )
@@ -1320,6 +1194,21 @@ class Website(TenantOwnedMixin, Base):
         String(255),
         nullable=False,
     )
+    business_name: Mapped[str | None] = mapped_column(String(200))
+    industry: Mapped[str | None] = mapped_column(String(150))
+    city: Mapped[str | None] = mapped_column(String(100))
+    state: Mapped[str | None] = mapped_column(String(100))
+    software_need: Mapped[str | None] = mapped_column(Text)
+    lead_score: Mapped[int | None] = mapped_column(Integer)
+    last_email_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    domain_resolution_needed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
     favicon_url: Mapped[str | None] = mapped_column(String(2000))
     crawl_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
@@ -1387,6 +1276,20 @@ class Website(TenantOwnedMixin, Base):
         back_populates="websites",
         order_by="desc(SearchKeyword.searched_at)",
     )
+    contacts: Mapped[list[Contact]] = relationship(
+        back_populates="website",
+        cascade="all, delete-orphan",
+        order_by="Contact.id",
+    )
+    website_groups: Mapped[list["WebsiteGroup"]] = relationship(
+        secondary=website_group_websites,
+        back_populates="websites",
+    )
+    pagespeed_scans: Mapped[list["PageSpeedScan"]] = relationship(
+        back_populates="website",
+        cascade="all, delete-orphan",
+        order_by="desc(PageSpeedScan.scanned_at)",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1400,7 +1303,7 @@ class Website(TenantOwnedMixin, Base):
             name="uq_websites_organization_domain",
         ),
         CheckConstraint(
-            "status IN ('new', 'lead', 'checked', 'qualified', 'contacted', "
+            "status IN ('new', 'checked', 'qualified', 'contacted', "
             "'converted', 'disqualified', 'needs_review')",
             name="ck_websites_status_allowed",
         ),
@@ -1408,6 +1311,34 @@ class Website(TenantOwnedMixin, Base):
         Index("ix_websites_created_at", "created_at"),
         Index(
             "ix_websites_organization_created_at",
+            "organization_id",
+            "created_at",
+        ),
+    )
+
+
+class WebsiteGroup(TenantOwnedMixin, Base):
+    __tablename__ = "website_groups"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    websites: Mapped[list[Website]] = relationship(
+        secondary=website_group_websites,
+        back_populates="website_groups",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_website_groups_organization_created_at",
             "organization_id",
             "created_at",
         ),
@@ -1833,18 +1764,14 @@ class PageSpeedScan(TenantOwnedMixin, Base):
         primary_key=True,
         default=uuid4,
     )
-    company_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
-        nullable=True,
-    )
-    website_id: Mapped[UUID | None] = mapped_column(
+    website_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey(
             "websites.id",
             ondelete="CASCADE",
             name="fk_pagespeed_scans_website_id_websites",
         ),
+        nullable=False,
     )
     website_url: Mapped[str] = mapped_column(String(2000), nullable=False)
     strategy: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -1858,21 +1785,9 @@ class PageSpeedScan(TenantOwnedMixin, Base):
         nullable=False,
     )
 
-    company: Mapped["Company | None"] = relationship(
-        back_populates="pagespeed_scans",
-    )
-    website: Mapped["Website | None"] = relationship()
+    website: Mapped["Website"] = relationship(back_populates="pagespeed_scans")
 
     __table_args__ = (
-        CheckConstraint(
-            "company_id IS NOT NULL OR website_id IS NOT NULL",
-            name="ck_pagespeed_scans_has_owner",
-        ),
-        Index(
-            "ix_pagespeed_scans_company_scanned_at",
-            "company_id",
-            "scanned_at",
-        ),
         Index(
             "ix_pagespeed_scans_website_scanned_at",
             "website_id",
@@ -1889,18 +1804,14 @@ class PageSpeedScanJob(TenantOwnedMixin, Base):
         primary_key=True,
         default=uuid4,
     )
-    company_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
-        nullable=True,
-    )
-    website_id: Mapped[UUID | None] = mapped_column(
+    website_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey(
             "websites.id",
             ondelete="CASCADE",
             name="fk_pagespeed_scan_jobs_website_id_websites",
         ),
+        nullable=False,
     )
     website_url: Mapped[str] = mapped_column(String(2000), nullable=False)
     strategy: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -1937,17 +1848,10 @@ class PageSpeedScanJob(TenantOwnedMixin, Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    companies: Mapped[list[Company]] = relationship(
-        secondary=pagespeed_scan_job_companies,
-    )
-    website: Mapped["Website | None"] = relationship()
+    website: Mapped["Website"] = relationship()
     scan: Mapped[PageSpeedScan | None] = relationship()
 
     __table_args__ = (
-        CheckConstraint(
-            "company_id IS NOT NULL OR website_id IS NOT NULL",
-            name="ck_pagespeed_scan_jobs_has_owner",
-        ),
         Index(
             "ix_pagespeed_scan_jobs_status",
             "status",
@@ -1967,7 +1871,6 @@ class PageSpeedScanJob(TenantOwnedMixin, Base):
 
 
 _TENANT_MODELS = (
-    Company,
     Contact,
     SearchKeyword,
     DiscoveryProviderJob,
@@ -1975,6 +1878,7 @@ _TENANT_MODELS = (
     WebsiteCorpusAnalysis,
     WebsiteCorpusAnalysisJob,
     Website,
+    WebsiteGroup,
     WebsiteHypeStatProfile,
     WebsiteHypeStatFetchJob,
     WebsiteAhrefsMetrics,

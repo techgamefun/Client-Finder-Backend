@@ -28,7 +28,7 @@ def parse_token_expiry(value: str, *, maximum_seconds: int) -> int:
 
 
 class Settings(BaseSettings):
-    app_name: str = "AI Lead Generation API"
+    app_name: str = "Business Intelligence API"
     app_version: str = "0.1.0"
     environment: str = "development"
 

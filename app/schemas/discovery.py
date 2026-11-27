@@ -341,10 +341,10 @@ class DiscoveryWebsiteSaveResponse(BaseModel):
 class DiscoveryIngestResponse(BaseModel):
     query: str
     results_found: int
-    candidates_created: int
+    websites_created: int
     results_skipped: int
     websites_crawled: int
-    companies_enriched: int
+    websites_enriched: int
     contacts_added: int
     crawl_failures: list[DiscoveryCrawlFailure] = Field(default_factory=list)
     pagespeed_scans_queued: int

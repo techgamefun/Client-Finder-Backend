@@ -127,7 +127,7 @@ class EmailTemplateVariableMetadata(BaseModel):
 
 
 class EmailTemplatePreviewRequest(BaseModel):
-    company_id: UUID
+    website_id: UUID
     contact_id: UUID | None = None
     gmail_account_id: UUID | None = None
     custom_variables: dict[str, Any] = Field(default_factory=dict)
@@ -143,7 +143,7 @@ class EmailTemplatePreviewRequest(BaseModel):
 
 
 class EmailTemplateSendRequest(BaseModel):
-    company_id: UUID
+    website_id: UUID
     contact_id: UUID
     gmail_account_id: UUID
     custom_variables: dict[str, Any] = Field(default_factory=dict)

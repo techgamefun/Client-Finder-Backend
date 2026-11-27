@@ -7,7 +7,6 @@ from urllib.parse import parse_qs, urlsplit
 from app import main
 from conftest import TestingSessionLocal
 from app.models import (
-    Company,
     Contact,
     Organization,
     OrganizationMembership,
@@ -49,13 +48,13 @@ def test_overview_empty_organization(client):
     assert data["range"] == "30d"
     assert data["kpis"]["websites_discovered"]["current"] == 0
     assert data["kpis"]["websites_discovered"]["delta_percent"] is None
-    assert data["kpis"]["reachable_leads"]["percentage"] is None
+    assert data["kpis"]["reachable_websites"]["percentage"] is None
     assert data["funnel"]["stages"][0]["count"] == 0
     assert data["status_breakdown"] == []
     assert data["coverage"]["with_email"]["percentage"] is None
     assert data["jobs"]["failed_badge_count"] == 0
     assert data["attention"] == []
-    assert data["recent_leads"] == []
+    assert data["recent_websites"] == []
     assert data["onboarding"] is not None
 
 
@@ -68,64 +67,54 @@ def test_overview_populated_organization_periods_and_funnel(
 
     with TestingSessionLocal() as db:
         crawl = WebsiteCrawl(website_url="https://current.example/")
-        current_company = Company(
-            name="Current Example",
-            website="https://current.example/",
-            domain="current.example",
-            industry="Software",
-            lead_status="qualified",
-            created_at=now - timedelta(days=10),
-        )
-        previous_company = Company(
-            name="Previous Example",
-            domain="previous.example",
-            lead_status="new",
-            created_at=now - timedelta(days=40),
-        )
-        company_without_contact = Company(
-            name="Company Without Contact",
-            domain="no-contact.example",
-            created_at=now - timedelta(days=5),
-        )
-        db.add_all(
-            [crawl, current_company, previous_company, company_without_contact]
-        )
+        db.add(crawl)
         db.flush()
-        db.add_all(
-            [
-                Contact(
-                    company_id=current_company.id,
-                    business_email="hello@current.example",
-                ),
-                Contact(company_id=previous_company.id),
-            ]
-        )
         search_keyword = SearchKeyword(
             keyword="software companies",
             searched_at=now - timedelta(days=10),
         )
         current_website = Website(
+            business_name="Current Example",
             website_url="https://current.example/",
             domain="current.example",
             crawl_id=crawl.id,
-            status="lead",
+            status="qualified",
             created_at=now - timedelta(days=10),
+        )
+        previous_website = Website(
+            business_name="Previous Example",
+            website_url="https://previous.example/",
+            domain="previous.example",
+            created_at=now - timedelta(days=40),
+        )
+        no_contact_website = Website(
+            business_name="Website Without Contact",
+            website_url="https://no-contact.example/",
+            domain="no-contact.example",
+            created_at=now - timedelta(days=120),
         )
         current_website.search_keywords.append(search_keyword)
         db.add_all(
             [
                 search_keyword,
                 current_website,
-                Website(
-                    website_url="https://previous.example/",
-                    domain="previous.example",
-                    created_at=now - timedelta(days=40),
-                ),
+                previous_website,
+                no_contact_website,
                 WebsiteCrawlJob(
                     website_url="https://failed.example/",
                     status="failed",
                     created_at=now - timedelta(hours=2),
                 ),
+            ]
+        )
+        db.flush()
+        db.add_all(
+            [
+                Contact(
+                    website_id=current_website.id,
+                    business_email="hello@current.example",
+                ),
+                Contact(website_id=previous_website.id),
             ]
         )
         db.commit()
@@ -137,11 +126,11 @@ def test_overview_populated_organization_periods_and_funnel(
     assert data["kpis"]["websites_discovered"]["current"] == 1
     assert data["kpis"]["websites_discovered"]["previous"] == 1
     assert data["kpis"]["websites_discovered"]["absolute_change"] == 0
-    assert data["kpis"]["leads_created"]["current"] == 1
-    assert data["kpis"]["leads_created"]["previous"] == 1
-    assert data["kpis"]["reachable_leads"]["current"] == 1
-    assert data["kpis"]["reachable_leads"]["denominator"] == 2
-    assert data["kpis"]["reachable_leads"]["percentage"] == 50.0
+    assert data["kpis"]["websites_created"]["current"] == 1
+    assert data["kpis"]["websites_created"]["previous"] == 1
+    assert data["kpis"]["reachable_websites"]["current"] == 1
+    assert data["kpis"]["reachable_websites"]["denominator"] == 1
+    assert data["kpis"]["reachable_websites"]["percentage"] == 100.0
     assert data["funnel"]["stages"][0]["count"] == 1
     assert data["funnel"]["stages"][1]["count"] == 1
     assert data["funnel"]["stages"][2]["count"] == 1
@@ -156,7 +145,7 @@ def test_overview_populated_organization_periods_and_funnel(
         "total": 3,
         "percentage": 33.3,
     }
-    assert data["recent_leads"][0]["source_keyword"] == "software companies"
+    assert data["recent_websites"][0]["source_keyword"] == "software companies"
     assert data["onboarding"] is not None
     assert data["onboarding"]["steps"][2]["completed"] is True
     assert data["onboarding"]["steps"][3]["completed"] is True
@@ -174,16 +163,17 @@ def test_overview_does_not_include_another_organizations_data(client):
             email="other@example.test",
             role="admin",
         )
-        other_company = Company(
-            name="Private company",
+        private_website = Website(
+            business_name="Private website",
+            website_url="https://private.example/",
             domain="private.example",
             created_at=datetime.now(timezone.utc),
         )
-        db.add(other_company)
+        db.add(private_website)
         db.flush()
         db.add(
             Contact(
-                company_id=other_company.id,
+                website_id=private_website.id,
                 business_email="private@private.example",
             )
         )
@@ -194,9 +184,9 @@ def test_overview_does_not_include_another_organizations_data(client):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["kpis"]["leads_created"]["current"] == 0
-    assert data["coverage"]["companies_total"] == 0
-    assert data["recent_leads"] == []
+    assert data["kpis"]["websites_created"]["current"] == 0
+    assert data["coverage"]["websites_total"] == 0
+    assert data["recent_websites"] == []
 
 
 def test_personal_overview_scopes_records_and_admin_overview_shows_team(
@@ -232,25 +222,15 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
                     searched_at=now,
                     created_by_user_id=other_user.id,
                 ),
-                Company(
-                    name="Admin-owned company",
-                    domain="admin-owned.example",
-                    created_by_user_id=context.user_id,
-                    created_at=now,
-                ),
-                Company(
-                    name="Member-owned company",
-                    domain="member-owned.example",
-                    created_by_user_id=other_user.id,
-                    created_at=now,
-                ),
                 Website(
+                    business_name="Admin-owned website",
                     website_url="https://admin-owned.example/",
                     domain="admin-owned.example",
                     created_by_user_id=context.user_id,
                     created_at=now,
                 ),
                 Website(
+                    business_name="Member-owned website",
                     website_url="https://member-owned.example/",
                     domain="member-owned.example",
                     created_by_user_id=other_user.id,
@@ -259,15 +239,15 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
             ]
         )
         db.flush()
-        companies = db.query(Company).order_by(Company.name).all()
+        websites = db.query(Website).order_by(Website.business_name).all()
         db.add_all(
             [
                 Contact(
-                    company_id=company.id,
-                    created_by_user_id=company.created_by_user_id,
-                    business_email=f"hello@{company.domain}",
+                    website_id=website.id,
+                    created_by_user_id=website.created_by_user_id,
+                    business_email=f"hello@{website.domain}",
                 )
-                for company in companies
+                for website in websites
             ]
         )
         db.commit()
@@ -276,17 +256,20 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
     assert personal.status_code == 200
     personal_data = personal.json()
     assert personal_data["kpis"]["websites_discovered"]["current"] == 1
-    assert personal_data["kpis"]["leads_created"]["current"] == 1
-    assert personal_data["coverage"]["companies_total"] == 1
-    assert [lead["name"] for lead in personal_data["recent_leads"]] == [
-        "Admin-owned company"
+    assert personal_data["kpis"]["websites_created"]["current"] == 1
+    assert personal_data["coverage"]["websites_total"] == 1
+    assert [
+        website["business_name"]
+        for website in personal_data["recent_websites"]
+    ] == [
+        "Admin-owned website"
     ]
 
     admin = client.get("/api/v1/overview/admin?range=30d&tz=UTC")
     assert admin.status_code == 200
     admin_data = admin.json()
     assert admin_data["kpis"]["websites_discovered"]["current"] == 2
-    assert admin_data["kpis"]["leads_created"]["current"] == 2
+    assert admin_data["kpis"]["websites_created"]["current"] == 2
     progress_by_email = {
         row["email"]: row for row in admin_data["user_progress"]
     }
@@ -294,7 +277,7 @@ def test_personal_overview_scopes_records_and_admin_overview_shows_team(
     assert progress_by_email["member@example.test"]["websites_discovered"] == 1
     assert progress_by_email["admin@example.test"]["searches_run"] == 1
     assert progress_by_email["member@example.test"]["searches_run"] == 1
-    assert progress_by_email["member@example.test"]["leads_created"] == 1
+    assert progress_by_email["member@example.test"]["websites_created"] == 1
 
 
 def test_admin_overview_endpoint_requires_admin(client):
@@ -348,26 +331,21 @@ def test_admin_member_activity_returns_daily_service_counts(
                 role="user",
             )
         )
-        company = Company(
-            name="Activity Company",
+        website = Website(
+            business_name="Activity Website",
+            website_url="https://activity.example/",
             domain="activity.example",
             created_by_user_id=member.id,
             created_at=now - timedelta(days=2),
         )
         db.add_all(
             [
-                company,
                 SearchKeyword(
                     keyword="activity search",
                     searched_at=now - timedelta(days=3),
                     created_by_user_id=member.id,
                 ),
-                Website(
-                    website_url="https://activity.example/",
-                    domain="activity.example",
-                    created_by_user_id=member.id,
-                    created_at=now - timedelta(days=2),
-                ),
+                website,
                 WebsiteCrawlJob(
                     website_url="https://activity.example/",
                     status="succeeded",
@@ -379,7 +357,7 @@ def test_admin_member_activity_returns_daily_service_counts(
         db.flush()
         db.add(
             Contact(
-                company_id=company.id,
+                website_id=website.id,
                 created_by_user_id=member.id,
                 business_email="hello@activity.example",
             )
@@ -399,8 +377,7 @@ def test_admin_member_activity_returns_daily_service_counts(
     assert data["timezone"] == "UTC"
     assert data["member"]["searches_run"] == 1
     assert data["member"]["websites_discovered"] == 1
-    assert data["member"]["companies_created"] == 1
-    assert data["member"]["leads_created"] == 1
+    assert data["member"]["websites_created"] == 1
     assert data["member"]["crawls_completed"] == 1
     assert len(data["series"]) == 7
     assert data["series"][0]["date"] == "2025-06-24"
@@ -408,8 +385,7 @@ def test_admin_member_activity_returns_daily_service_counts(
     assert data["series"][0]["searches_run"] == 0
     assert data["series"][3]["searches_run"] == 1
     assert data["series"][4]["websites_discovered"] == 1
-    assert data["series"][4]["companies_created"] == 1
-    assert data["series"][4]["leads_created"] == 1
+    assert data["series"][4]["websites_created"] == 1
     assert data["series"][5]["crawls_completed"] == 1
     assert sum(point["searches_run"] for point in data["series"]) == 1
     assert sum(point["emails_sent"] for point in data["series"]) == 0
@@ -433,7 +409,7 @@ def test_overview_delta_handles_zero_previous_value():
 def test_overview_onboarding_disappears_when_all_steps_are_complete():
     onboarding = overview_service._build_onboarding(
         websites_total=1,
-        companies_total=1,
+        has_qualified_website=True,
         has_search=True,
         has_tavily_key=True,
         has_assigned_gmail=True,

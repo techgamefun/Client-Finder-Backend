@@ -36,7 +36,7 @@ from app.services.discovery import (
     StartedProviderJob,
     deduplicate_discovery_results,
     distribute_result_limit,
-    search_companies,
+    search_websites,
     search_multiple_with_selected_tools,
     search_with_selected_tools,
 )
@@ -45,13 +45,13 @@ from app.services.discovery_query_generator import (
 )
 from app.services.ahrefs import fetch_discovery_domain_ratings
 from app.services.discovery_websites import save_discovered_websites
-from app.services.lead_ingestion import ingest_search_results
+from app.services.discovery_ingestion import ingest_search_results
 from app.services.octoparse import poll_octoparse_job
 from app.tenant_context import TenantContext
 
 router = APIRouter(
     prefix="/discovery",
-    tags=["Lead Discovery"],
+    tags=["Website discovery"],
 )
 
 
@@ -98,7 +98,7 @@ def _persist_discovery_search(
     "/search",
     response_model=DiscoverySearchResponse,
 )
-async def discover_companies(
+async def discover_websites(
     payload: TavilyDiscoverySearchRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> DiscoverySearchResponse:
@@ -143,7 +143,7 @@ async def discover_companies(
     "/ai-search",
     response_model=DiscoveryAiSearchResponse,
 )
-async def discover_companies_with_ai(
+async def discover_websites_with_ai(
     payload: DiscoveryAiSearchRequest,
     db: Annotated[Session, Depends(get_db)],
     context: Annotated[
@@ -200,7 +200,7 @@ async def discover_companies_with_ai(
 
     result_counts = distribute_result_limit(payload.max_results, len(queries))
     search_tasks = [
-        search_companies(
+        search_websites(
             query,
             db,
             max_results,
@@ -330,7 +330,7 @@ def suggest_search_keywords(
 
 
 @router.post("/ingest", response_model=DiscoveryIngestResponse)
-async def ingest_companies(
+async def ingest_websites(
     payload: DiscoveryIngestRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> DiscoveryIngestResponse:

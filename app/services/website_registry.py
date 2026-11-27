@@ -123,7 +123,6 @@ def update_websites_status(
     website_ids: list[UUID],
     status: Literal[
         "new",
-        "lead",
         "checked",
         "qualified",
         "contacted",

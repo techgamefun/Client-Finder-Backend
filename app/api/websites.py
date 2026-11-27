@@ -14,16 +14,28 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_db, require_authenticated_context
-from app.models import PageSpeedScan, Website, WebsiteCrawlJob
+from app.models import (
+    Contact,
+    PageSpeedScan,
+    Website,
+    WebsiteCrawlJob,
+    WebsiteGroup,
+)
 from app.schemas.job_queue import BatchJobRetryRequest, BatchJobRetryResponse
 from app.schemas.job_queue import QueueJobsPageResponse
 from app.schemas.pagespeed import PageSpeedScanSummary
 from app.schemas.website import (
-    WebsiteAddToLeadsRequest,
-    WebsiteAddToLeadsResponse,
     WebsiteCorpusWordsResponse,
     WebsiteCorpusAnalysisJobResponse,
     WebsiteCrawlJobHistoryResponse,
+    WebsiteContactCreate,
+    WebsiteContactResponse,
+    WebsiteContactUpdate,
+    WebsiteGroupCreate,
+    WebsiteGroupMembershipResponse,
+    WebsiteGroupMembershipUpdate,
+    WebsiteGroupResponse,
+    WebsiteGroupUpdate,
     WebsiteDetailResponse,
     WebsiteDiscoveryKeywordResponse,
     WebsiteHypeStatProfileResponse,
@@ -71,8 +83,11 @@ from app.services.website_classification import (
 from app.services.website_enrichment_counts import (
     get_website_enrichment_counts,
 )
-from app.services.website_leads import add_websites_to_leads
-from app.services.website_registry import update_websites_status
+from app.services.normalization import normalize_domain
+from app.services.website_registry import (
+    canonical_website_url,
+    update_websites_status,
+)
 from app.services.ahrefs import (
     fetch_website_ahrefs_metrics,
     get_cached_website_ahrefs_metrics,
@@ -152,6 +167,141 @@ def list_websites(
     ]
 
 
+@router.get("/groups", response_model=list[WebsiteGroupResponse])
+def list_website_groups(
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> list[WebsiteGroupResponse]:
+    groups = db.scalars(
+        select(WebsiteGroup)
+        .options(selectinload(WebsiteGroup.websites))
+        .where(WebsiteGroup.organization_id == context.organization_id)
+        .order_by(WebsiteGroup.created_at.desc(), WebsiteGroup.id.desc())
+    ).all()
+    return [
+        WebsiteGroupResponse(
+            id=group.id,
+            name=group.name,
+            created_at=group.created_at,
+            website_count=len(group.websites),
+        )
+        for group in groups
+    ]
+
+
+@router.post(
+    "/groups",
+    response_model=WebsiteGroupResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_website_group(
+    payload: WebsiteGroupCreate,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> WebsiteGroupResponse:
+    websites = _websites_for_context(db, payload.website_ids, context)
+    group = WebsiteGroup(
+        organization_id=context.organization_id,
+        created_by_user_id=context.user_id,
+        name=payload.name,
+        websites=websites,
+    )
+    db.add(group)
+    db.commit()
+    db.refresh(group)
+    return WebsiteGroupResponse(
+        id=group.id,
+        name=group.name,
+        created_at=group.created_at,
+        website_count=len(websites),
+    )
+
+
+@router.patch(
+    "/groups/{group_id}",
+    response_model=WebsiteGroupResponse,
+)
+def update_website_group(
+    group_id: UUID,
+    payload: WebsiteGroupUpdate,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> WebsiteGroupResponse:
+    group = _website_group_for_context(db, group_id, context)
+    group.name = payload.name
+    db.commit()
+    db.refresh(group)
+    return WebsiteGroupResponse(
+        id=group.id,
+        name=group.name,
+        created_at=group.created_at,
+        website_count=len(group.websites),
+    )
+
+
+@router.delete(
+    "/groups/{group_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_website_group(
+    group_id: UUID,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> None:
+    group = _website_group_for_context(db, group_id, context)
+    db.delete(group)
+    db.commit()
+
+
+@router.post(
+    "/groups/members",
+    response_model=WebsiteGroupMembershipResponse,
+)
+def update_website_group_members(
+    payload: WebsiteGroupMembershipUpdate,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> WebsiteGroupMembershipResponse:
+    websites = _websites_for_context(db, payload.website_ids, context)
+    groups = db.scalars(
+        select(WebsiteGroup)
+        .options(selectinload(WebsiteGroup.websites))
+        .where(WebsiteGroup.organization_id == context.organization_id)
+    ).all()
+    target_group = (
+        next((group for group in groups if group.id == payload.group_id), None)
+        if payload.group_id is not None
+        else None
+    )
+    if payload.action in ("add", "move") and target_group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website group not found.",
+        )
+
+    updated_count = 0
+    for website in websites:
+        existing_groups = [
+            group for group in groups if website in group.websites
+        ]
+        if payload.action == "ungroup":
+            for group in existing_groups:
+                group.websites.remove(website)
+                updated_count += 1
+            continue
+        if payload.action == "move":
+            for group in existing_groups:
+                if group.id != payload.group_id:
+                    group.websites.remove(website)
+                    updated_count += 1
+        if target_group is not None and website not in target_group.websites:
+            target_group.websites.append(website)
+            updated_count += 1
+
+    db.commit()
+    return WebsiteGroupMembershipResponse(updated_count=updated_count)
+
+
 @router.get("/registry-page", response_model=WebsiteRegistryPageResponse)
 def list_website_registry_page(
     db: WebsiteSession,
@@ -160,7 +310,6 @@ def list_website_registry_page(
     search: Annotated[str, Query(max_length=300)] = "",
     status_filter: Literal[
         "new",
-        "lead",
         "checked",
         "qualified",
         "contacted",
@@ -356,34 +505,6 @@ async def retry_website_corpus_analysis(
     return await retry_website_corpus_analysis_job(job_id, db)
 
 
-@router.post(
-    "/add-to-leads",
-    response_model=WebsiteAddToLeadsResponse,
-)
-def add_to_leads(
-    payload: WebsiteAddToLeadsRequest,
-    db: WebsiteSession,
-) -> WebsiteAddToLeadsResponse:
-    try:
-        result = add_websites_to_leads(
-            db,
-            payload.website_ids,
-            batch_id=payload.batch_id,
-            batch_name=payload.batch_name,
-        )
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "A company for one of these domains was added concurrently. "
-                "Refresh the websites and retry."
-            ),
-        ) from exc
-    return result
-
-
 @router.patch(
     "/batch-status",
     response_model=WebsiteBatchStatusUpdateResponse,
@@ -520,6 +641,7 @@ def get_website_detail(
             selectinload(Website.crawl),
             selectinload(Website.hypestat_profile),
             selectinload(Website.search_keywords),
+            selectinload(Website.contacts),
         )
         .where(Website.id == website_id)
     )
@@ -544,6 +666,10 @@ def get_website_detail(
     ahrefs_metrics = get_cached_website_ahrefs_metrics(website.id, db)
     return WebsiteDetailResponse(
         website=_website_response(website, crawl_job_status),
+        contacts=[
+            WebsiteContactResponse.model_validate(contact)
+            for contact in website.contacts
+        ],
         crawl=(
             WebsiteCrawlResponse.model_validate(website.crawl)
             if website.crawl is not None
@@ -574,6 +700,109 @@ def get_website_detail(
             for keyword in website.search_keywords
         ],
     )
+
+
+@router.get(
+    "/{website_id}/contacts",
+    response_model=list[WebsiteContactResponse],
+)
+def list_website_contacts(
+    website_id: UUID,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> list[WebsiteContactResponse]:
+    website = _get_website_for_context(db, website_id, context)
+    contacts = db.scalars(
+        select(Contact)
+        .where(
+            Contact.website_id == website.id,
+            Contact.organization_id == context.organization_id,
+        )
+        .order_by(Contact.name, Contact.id)
+    ).all()
+    return [WebsiteContactResponse.model_validate(contact) for contact in contacts]
+
+
+@router.post(
+    "/{website_id}/contacts",
+    response_model=WebsiteContactResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_website_contact(
+    website_id: UUID,
+    payload: WebsiteContactCreate,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> WebsiteContactResponse:
+    website = _get_website_for_context(db, website_id, context)
+    contact = Contact(
+        organization_id=website.organization_id,
+        created_by_user_id=context.user_id,
+        website_id=website.id,
+        **payload.model_dump(),
+    )
+    db.add(contact)
+    db.commit()
+    db.refresh(contact)
+    return WebsiteContactResponse.model_validate(contact)
+
+
+@router.patch(
+    "/{website_id}/contacts/{contact_id}",
+    response_model=WebsiteContactResponse,
+)
+def update_website_contact(
+    website_id: UUID,
+    contact_id: UUID,
+    payload: WebsiteContactUpdate,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> WebsiteContactResponse:
+    website = _get_website_for_context(db, website_id, context)
+    contact = db.scalar(
+        select(Contact).where(
+            Contact.id == contact_id,
+            Contact.website_id == website.id,
+            Contact.organization_id == context.organization_id,
+        )
+    )
+    if contact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contact not found for this website.",
+        )
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(contact, field, value)
+    db.commit()
+    db.refresh(contact)
+    return WebsiteContactResponse.model_validate(contact)
+
+
+@router.delete(
+    "/{website_id}/contacts/{contact_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_website_contact(
+    website_id: UUID,
+    contact_id: UUID,
+    context: CurrentContext,
+    db: WebsiteSession,
+) -> None:
+    website = _get_website_for_context(db, website_id, context)
+    contact = db.scalar(
+        select(Contact).where(
+            Contact.id == contact_id,
+            Contact.website_id == website.id,
+            Contact.organization_id == context.organization_id,
+        )
+    )
+    if contact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contact not found for this website.",
+        )
+    db.delete(contact)
+    db.commit()
 
 
 @router.get(
@@ -633,12 +862,16 @@ async def refresh_ahrefs_metrics(
 def update_website(
     website_id: UUID,
     payload: WebsiteUpdate,
+    context: CurrentContext,
     db: WebsiteSession,
 ) -> WebsiteResponse:
     website = db.scalar(
         select(Website)
         .options(selectinload(Website.crawl))
-        .where(Website.id == website_id)
+        .where(
+            Website.id == website_id,
+            Website.organization_id == context.organization_id,
+        )
     )
     if website is None:
         raise HTTPException(
@@ -647,6 +880,29 @@ def update_website(
         )
 
     changes = payload.model_dump(exclude_unset=True)
+    requested_website_url = changes.pop("website_url", None)
+    if requested_website_url is not None:
+        domain = normalize_domain(str(requested_website_url))
+        if domain is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Enter a valid website URL.",
+            )
+        duplicate = db.scalar(
+            select(Website.id).where(
+                Website.organization_id == context.organization_id,
+                Website.domain == domain,
+                Website.id != website.id,
+            )
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A website with this domain already exists.",
+            )
+        website.domain = domain
+        website.website_url = canonical_website_url(str(requested_website_url))
+        website.domain_resolution_needed = False
     if "page_type" in changes:
         website.classification_manual = True
         if changes["page_type"] == "business_listing":
@@ -656,7 +912,14 @@ def update_website(
                 website.discovery_source = website.discovery_provider or "manual"
     for field, value in changes.items():
         setattr(website, field, value)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A website with this domain already exists.",
+        ) from exc
     db.refresh(website)
     crawl_job_status = _crawl_job_statuses(db, [website]).get(website.website_url)
     return _website_response(website, crawl_job_status)
@@ -749,6 +1012,14 @@ def _website_response(
         id=website.id,
         website_url=website.website_url,
         domain=website.domain,
+        business_name=website.business_name,
+        industry=website.industry,
+        city=website.city,
+        state=website.state,
+        software_need=website.software_need,
+        lead_score=website.lead_score,
+        last_email_sent_at=website.last_email_sent_at,
+        domain_resolution_needed=website.domain_resolution_needed,
         favicon_url=website.favicon_url,
         crawl_id=website.crawl_id,
         is_crawled=website.crawl_id is not None,
@@ -790,6 +1061,67 @@ def _website_response(
         ),
         **hypestat_summary,
     )
+
+
+def _get_website_for_context(
+    db: Session,
+    website_id: UUID,
+    context: TenantContext,
+) -> Website:
+    website = db.scalar(
+        select(Website).where(
+            Website.id == website_id,
+            Website.organization_id == context.organization_id,
+        )
+    )
+    if website is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website not found.",
+        )
+    return website
+
+
+def _websites_for_context(
+    db: Session,
+    website_ids: list[UUID],
+    context: TenantContext,
+) -> list[Website]:
+    websites = list(
+        db.scalars(
+            select(Website).where(
+                Website.id.in_(website_ids),
+                Website.organization_id == context.organization_id,
+            )
+        ).all()
+    )
+    if len(websites) != len(website_ids):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="One or more websites were not found.",
+        )
+    return websites
+
+
+def _website_group_for_context(
+    db: Session,
+    group_id: UUID,
+    context: TenantContext,
+) -> WebsiteGroup:
+    group = db.scalar(
+        select(WebsiteGroup)
+        .options(selectinload(WebsiteGroup.websites))
+        .where(
+            WebsiteGroup.id == group_id,
+            WebsiteGroup.organization_id == context.organization_id,
+        )
+    )
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website group not found.",
+        )
+    return group
 
 
 def _website_hypestat_summary(

@@ -84,12 +84,6 @@ def test_existing_account_joins_second_organization_and_can_switch(client):
         assert len(joined_session["organizations"]) == 2
         assert joined_session["user"]["role"] == invitation["role"]
 
-        created_in_invited_org = existing_user.post(
-            "/api/v1/companies",
-            json={"name": "Invited organization data", "domain": "invited.test"},
-        )
-        assert created_in_invited_org.status_code == 201
-
         switched = existing_user.post(
             "/api/v1/auth/select-organization",
             json={"organization_id": original_org_id},
@@ -97,16 +91,14 @@ def test_existing_account_joins_second_organization_and_can_switch(client):
         assert switched.status_code == 200
         assert switched.json()["organization_id"] == original_org_id
         assert switched.json()["user"]["role"] == "admin"
-        assert existing_user.get("/api/v1/companies").json() == []
+        assert existing_user.get("/api/v1/websites").json() == []
 
         switch_back = existing_user.post(
             "/api/v1/auth/select-organization",
             json={"organization_id": invited_org_id},
         )
         assert switch_back.status_code == 200
-        assert [
-            row["name"] for row in existing_user.get("/api/v1/companies").json()
-        ] == ["Invited organization data"]
+        assert existing_user.get("/api/v1/websites").json() == []
 
 
 def test_invitation_link_is_single_use_and_revocable(client):

@@ -20,7 +20,7 @@ from conftest import TestingSessionLocal
 
 def test_frontend_origin_is_allowed_for_api_requests(client):
     response = client.options(
-        "/api/v1/companies",
+        "/api/v1/websites",
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",
@@ -190,7 +190,7 @@ def test_ai_search_generates_keywords_and_aggregates_tavily_results(
         "generate_discovery_search_keywords",
         fake_generate_keywords,
     )
-    monkeypatch.setattr(discovery, "search_companies", fake_search)
+    monkeypatch.setattr(discovery, "search_websites", fake_search)
 
     response = client.post(
         "/api/v1/discovery/ai-search",
@@ -318,7 +318,7 @@ def test_ai_search_returns_groq_fallback_metadata(client, monkeypatch):
         "generate_discovery_search_keywords",
         fake_generate_keywords,
     )
-    monkeypatch.setattr(discovery, "search_companies", fake_search)
+    monkeypatch.setattr(discovery, "search_websites", fake_search)
 
     response = client.post(
         "/api/v1/discovery/ai-search",
@@ -442,7 +442,7 @@ def test_search_multiple_runs_tools_concurrently_and_deduplicates_domains(
         lambda _db: "tavily-test-key",
     )
     monkeypatch.setitem(
-        discovery_service.LEAD_DISCOVERY_TOOLS,
+        discovery_service.WEBSITE_DISCOVERY_TOOLS,
         DiscoveryProvider.TAVILY,
         FakeTavilyTool(),
     )
@@ -559,7 +559,7 @@ def test_ai_search_uses_generated_keywords_within_shared_limit(
         "generate_discovery_search_keywords",
         fake_generate_keywords,
     )
-    monkeypatch.setattr(discovery, "search_companies", fake_search)
+    monkeypatch.setattr(discovery, "search_websites", fake_search)
 
     response = client.post(
         "/api/v1/discovery/ai-search",
@@ -699,7 +699,7 @@ def test_tavily_payload_and_response_metadata_are_mapped(monkeypatch):
     )
 
     response = asyncio.run(
-        discovery_service.search_companies(
+        discovery_service.search_websites(
             options.query,
             db=None,
             options=options,
@@ -764,7 +764,7 @@ def test_tavily_depth_and_country_options_are_conditionally_sent(monkeypatch):
     )
 
     asyncio.run(
-        discovery_service.search_companies(
+        discovery_service.search_websites(
             options.query,
             db=None,
             options=options,

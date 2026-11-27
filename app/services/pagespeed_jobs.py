@@ -4,11 +4,10 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.models import (
-    Company,
     PageSpeedScan,
     PageSpeedScanJob,
     UserProviderCredential,
@@ -53,17 +52,11 @@ def create_website_pagespeed_jobs(
         raise RuntimeError(
             f"Website registry record for {domain} was not created by the crawl."
         )
-    company = db.scalar(
-        select(Company).where(Company.domain == domain).limit(1)
-    )
-
     jobs = [
         PageSpeedScanJob(
-            company_id=company.id if company is not None else None,
             website_id=website.id,
             website_url=website.website_url,
             strategy=strategy,
-            companies=[company] if company is not None else [],
         )
         for strategy in PAGESPEED_STRATEGIES
     ]
@@ -197,7 +190,6 @@ def serialize_pagespeed_scan_job(
 ) -> PageSpeedScanJobResponse:
     return PageSpeedScanJobResponse(
         id=job.id,
-        company_ids=[company.id for company in job.companies],
         website_id=job.website_id,
         website_url=job.website_url,
         strategy=job.strategy,
@@ -224,14 +216,14 @@ def _job_has_pagespeed_key(job: PageSpeedScanJob, db: Session) -> bool:
 
 
 def get_pagespeed_scan_job(
-    company_id: UUID,
+    website_id: UUID,
     job_id: UUID,
     db: Session,
 ) -> PageSpeedScanJobResponse:
     job = db.scalar(
         select(PageSpeedScanJob).where(
             PageSpeedScanJob.id == job_id,
-            PageSpeedScanJob.companies.any(id=company_id),
+            PageSpeedScanJob.website_id == website_id,
         )
     )
     if job is None:
@@ -262,7 +254,6 @@ def _retry_pagespeed_scan_job_sync(
 ) -> tuple[UUID, PageSpeedScanJobResponse]:
     job = db.scalar(
         select(PageSpeedScanJob)
-        .options(selectinload(PageSpeedScanJob.companies))
         .where(PageSpeedScanJob.id == job_id)
         .with_for_update()
     )
@@ -396,7 +387,6 @@ def list_pagespeed_scan_jobs(
         filters.append(PageSpeedScanJob.status == status)
     jobs = db.scalars(
         select(PageSpeedScanJob)
-        .options(selectinload(PageSpeedScanJob.companies))
         .order_by(PageSpeedScanJob.created_at.desc(), PageSpeedScanJob.id.desc())
         .where(*filters)
         .limit(page_size)

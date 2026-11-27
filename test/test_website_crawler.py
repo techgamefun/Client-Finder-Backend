@@ -10,7 +10,6 @@ from sqlalchemy import func, select
 
 from conftest import TestingSessionLocal
 from app.models import (
-    Company,
     WebsiteCrawl,
     WebsiteCrawlJob,
 )
@@ -38,7 +37,6 @@ def test_main_api_crawler_client_calls_standalone_service(monkeypatch):
         "emails": ["hello@example.com"],
         "social_links": [],
         "phones": [],
-        "company_links": [],
     }
 
     def handle_request(request: httpx.Request) -> httpx.Response:
@@ -227,7 +225,6 @@ def test_crawl_endpoint_queues_job_and_exposes_status(client, monkeypatch):
 
     with TestingSessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(WebsiteCrawl)) == 0
-        assert db.scalar(select(func.count()).select_from(Company)) == 0
         assert db.get(WebsiteCrawlJob, UUID(job["id"])) is not None
 
 

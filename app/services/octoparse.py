@@ -191,7 +191,7 @@ async def start_octoparse_search(
     parameters[template.query_field] = query
     payload = {
         "templateName": template.template_name,
-        "taskName": f"Lead discovery: {query[:180]}",
+        "taskName": f"Website discovery: {query[:180]}",
         "parameters": json.dumps(parameters, ensure_ascii=False),
         "maxCollectedRows": max_results,
     }

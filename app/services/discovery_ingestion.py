@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.models import (
-    Company,
     PageSpeedScanJob,
     SearchKeyword,
+    Website,
     WebsiteCrawl,
 )
 from app.schemas.discovery import (
@@ -23,16 +23,16 @@ from app.schemas.discovery import (
     DiscoveryResult,
 )
 from app.services.application_settings import get_crawl_settings
-from app.services.discovery import search_companies
+from app.services.discovery import search_websites
 from app.services.contact_import import add_crawl_contacts
-from app.services.normalization import normalize_company_name, normalize_domain
+from app.services.normalization import normalize_domain
 from app.services.pagespeed import PAGESPEED_STRATEGIES
 from app.services.pagespeed_jobs import (
     enqueue_pagespeed_jobs,
     serialize_pagespeed_scan_job,
 )
 from app.services.website_crawler import CrawlData, crawl_website
-from app.services.website_registry import upsert_website
+from app.services.website_registry import canonical_website_url, upsert_website
 
 
 def _persist_search_results(
@@ -44,13 +44,12 @@ def _persist_search_results(
     search_id: UUID | None,
 ) -> tuple[int, int, int, int, list[PageSpeedScanJob]]:
     for attempt in range(2):
-        companies_created = 0
+        websites_created_ids: set[UUID] = set()
         skipped = 0
         contacts_added = 0
-        enriched_company_ids: set[UUID] = set()
+        enriched_website_ids: set[UUID] = set()
         pagespeed_jobs_by_key: dict[tuple[str, str], PageSpeedScanJob] = {}
         pagespeed_jobs: list[PageSpeedScanJob] = []
-        claimed_domains: set[str] = set()
         seen_urls: set[str] = set()
         linked_website_ids: set[UUID] = set()
 
@@ -76,6 +75,16 @@ def _persist_search_results(
                     continue
                 seen_urls.add(source_url)
 
+                source_domain = normalize_domain(source_url)
+                existing_website_id = (
+                    db.scalar(
+                        select(Website.id)
+                        .where(Website.domain == source_domain)
+                        .limit(1)
+                    )
+                    if source_domain is not None
+                    else None
+                )
                 crawl = crawls_by_url.get(source_url)
                 crawl_record = (
                     _upsert_crawl(
@@ -102,25 +111,17 @@ def _persist_search_results(
                 )
 
                 candidate_name = result.title.strip()[:200]
-                normalized_name = normalize_company_name(candidate_name)
-                if not candidate_name or not normalized_name:
+                if not candidate_name:
                     skipped += 1
                     continue
 
-                company = db.scalar(
-                    select(Company)
-                    .where(Company.normalized_name == normalized_name)
-                    .limit(1)
-                )
-                if company is None:
-                    company = Company(
-                        name=candidate_name,
-                        normalized_name=normalized_name,
-                        lead_status="needs_review",
-                    )
-                    db.add(company)
-                    db.flush()
-                    companies_created += 1
+                if existing_website_id is None:
+                    websites_created_ids.add(website.id)
+                if not website.business_name:
+                    website.business_name = candidate_name
+                    enriched_website_ids.add(website.id)
+                if website.status == "new":
+                    website.status = "needs_review"
 
                 if website.id not in linked_website_ids:
                     if all(
@@ -132,48 +133,14 @@ def _persist_search_results(
 
                 is_listing = website.page_type == "business_listing"
                 if crawl is not None and not is_listing:
-                    homepage = _homepage_url(crawl.website_url)
-                    if not company.website:
-                        company.website = homepage
-                        enriched_company_ids.add(company.id)
-                        upsert_website(
-                            db,
-                            homepage,
-                            discovery_source=result.provider.value,
-                            discovery_provider=result.provider.value,
-                            category=crawl.site_type,
-                            crawl_id=(
-                                crawl_record.id
-                                if crawl_record.website_url == homepage
-                                else None
-                            ),
-                        )
-
-                    domain = normalize_domain(company.website)
-                    if (
-                        not company.domain
-                        and domain
-                        and domain not in claimed_domains
-                    ):
-                        domain_owner = db.scalar(
-                            select(Company.id)
-                            .where(Company.domain == domain)
-                            .where(Company.id != company.id)
-                            .limit(1)
-                        )
-                        if domain_owner is None:
-                            company.domain = domain
-                            enriched_company_ids.add(company.id)
-                            claimed_domains.add(domain)
-
                     added_contacts = add_crawl_contacts(
-                        company,
+                        website,
                         crawl.emails,
                         crawl.phones,
                     )
                     if added_contacts:
                         contacts_added += added_contacts
-                        enriched_company_ids.add(company.id)
+                        enriched_website_ids.add(website.id)
 
                 if not is_listing:
                     website_url = pagespeed_targets_by_source.get(
@@ -181,29 +148,23 @@ def _persist_search_results(
                         _homepage_url(source_url),
                     )
                     for strategy in PAGESPEED_STRATEGIES:
-                        job_key = (website_url, strategy)
+                        job_key = (str(website.id), strategy)
                         job = pagespeed_jobs_by_key.get(job_key)
                         if job is None:
                             job = PageSpeedScanJob(
-                                company_id=company.id,
                                 website_url=website_url,
                                 strategy=strategy,
-                                companies=[company],
+                                website_id=website.id,
                             )
                             db.add(job)
                             pagespeed_jobs_by_key[job_key] = job
                             pagespeed_jobs.append(job)
-                        elif all(
-                            linked_company.id != company.id
-                            for linked_company in job.companies
-                        ):
-                            job.companies.append(company)
 
             db.commit()
             return (
-                companies_created,
+                len(websites_created_ids),
                 skipped,
-                len(enriched_company_ids),
+                len(enriched_website_ids),
                 contacts_added,
                 pagespeed_jobs,
             )
@@ -273,38 +234,9 @@ def _upsert_crawl(
 
 def _pagespeed_target_urls(
     results: Sequence[DiscoveryResult],
-    db: Session,
 ) -> dict[str, str]:
-    normalized_names = {
-        normalized_name
-        for result in results
-        if (
-            normalized_name := normalize_company_name(
-                result.title.strip()[:200],
-            )
-        )
-    }
-    websites_by_name: dict[str, str] = {}
-    if normalized_names:
-        company_rows = db.execute(
-            select(Company.normalized_name, Company.website)
-            .where(
-                Company.normalized_name.in_(normalized_names),
-                Company.website.is_not(None),
-            )
-            .order_by(Company.created_at.desc(), Company.id.desc())
-        ).all()
-        for normalized_name, website in company_rows:
-            if normalized_name is not None and website is not None:
-                websites_by_name.setdefault(normalized_name, website)
-
     return {
-        str(result.url): _homepage_url(
-            websites_by_name.get(
-                normalize_company_name(result.title.strip()[:200]) or "",
-                str(result.url),
-            )
-        )
+        str(result.url): canonical_website_url(str(result.url))
         for result in results
     }
 
@@ -326,7 +258,7 @@ async def ingest_search_results(
             )
 
     if request.results is None:
-        search_response = await search_companies(
+        search_response = await search_websites(
             query=request.query,
             db=db,
             max_results=request.max_results,
@@ -380,7 +312,6 @@ async def ingest_search_results(
     pagespeed_targets_by_source = await run_in_threadpool(
         _pagespeed_target_urls,
         unique_results,
-        db,
     )
     crawl_results = await crawl_results_task
     for source_url, crawl, failure in crawl_results:
@@ -390,9 +321,9 @@ async def ingest_search_results(
             crawl_failures.append(failure)
 
     (
-        companies_created,
+        websites_created,
         skipped,
-        companies_enriched,
+        websites_enriched,
         contacts_added,
         pagespeed_jobs,
     ) = await run_in_threadpool(
@@ -410,10 +341,10 @@ async def ingest_search_results(
     return DiscoveryIngestResponse(
         query=request.query,
         results_found=len(results),
-        candidates_created=companies_created,
+        websites_created=websites_created,
         results_skipped=skipped,
         websites_crawled=len(crawls_by_url),
-        companies_enriched=companies_enriched,
+        websites_enriched=websites_enriched,
         contacts_added=contacts_added,
         crawl_failures=crawl_failures,
         pagespeed_scans_queued=len(pagespeed_jobs),

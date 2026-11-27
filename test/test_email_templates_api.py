@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from app import main
 from app.config import settings
 from app.models import (
-    Company,
     ConnectedGmailAccount,
     Contact,
     UserGmailAssignment,
@@ -28,16 +27,16 @@ def _session_ids(client):
     return UUID(session["organization_id"]), UUID(session["user"]["id"])
 
 
-def _create_company_with_contact(organization_id, *, email="jane@example.test"):
+def _create_website_with_contact(organization_id, *, email="jane@example.test"):
     with TestingSessionLocal() as db:
-        company = Company(
+        website = Website(
             organization_id=organization_id,
-            name="Example Manufacturing",
+            business_name="Example Manufacturing",
+            website_url="https://example.test/",
             domain="example.test",
-            website="https://example.test",
             industry="Manufacturing",
             city="Austin",
-            lead_status="qualified",
+            status="qualified",
             lead_score=82,
             software_need="Inventory planning",
         )
@@ -47,17 +46,12 @@ def _create_company_with_contact(organization_id, *, email="jane@example.test"):
             home_content="We build useful products.",
             about_content="A locally owned manufacturer.",
         )
-        db.add_all([company, crawl])
+        db.add_all([website, crawl])
         db.flush()
-        website = Website(
-            organization_id=organization_id,
-            website_url="https://example.test",
-            domain="example.test",
-            crawl_id=crawl.id,
-        )
+        website.crawl_id = crawl.id
         contact = Contact(
             organization_id=organization_id,
-            company_id=company.id,
+            website_id=website.id,
             name=None,
             role="Operations Director",
             business_email=email,
@@ -65,7 +59,7 @@ def _create_company_with_contact(organization_id, *, email="jane@example.test"):
         )
         db.add_all([website, contact])
         db.commit()
-        return company.id, contact.id
+        return website.id, contact.id
 
 
 def test_email_template_crud_and_organization_scoping(client):
@@ -75,8 +69,8 @@ def test_email_template_crud_and_organization_scoping(client):
     variables = client.get(f"{endpoint}/variables")
     assert variables.status_code == 200
     placeholders = {item["placeholder"] for item in variables.json()}
-    assert "{{ company.phone }}" in placeholders
-    assert "{{ company.crawled_text }}" in placeholders
+    assert "{{ website.phone }}" in placeholders
+    assert "{{ website.crawled_text }}" in placeholders
     assert "{{ contact.first_name }}" in placeholders
     assert "{{ sender.email }}" in placeholders
 
@@ -323,7 +317,7 @@ def test_groq_model_list_requires_personal_key(client):
 
 def test_email_template_preview_builds_context_and_escapes_values(client):
     organization_id, _ = _session_ids(client)
-    company_id, contact_id = _create_company_with_contact(organization_id)
+    website_id, contact_id = _create_website_with_contact(organization_id)
     endpoint = f"/api/v1/orgs/{organization_id}/templates"
     created = client.post(
         endpoint,
@@ -332,9 +326,9 @@ def test_email_template_preview_builds_context_and_escapes_values(client):
             "subject": "Hello {{ contact.first_name | default('there') }}",
             "body_content": (
                 "<p>Hello {{ contact.first_name | default('there') }}</p>"
-                "<p>{{ company.status }} · {{ company.phone }}</p>"
-                "<p>{{ company.name }}</p>"
-                "<div>{{ company.crawled_text }}</div>"
+                "<p>{{ website.status }} · {{ website.phone }}</p>"
+                "<p>{{ website.name }}</p>"
+                "<div>{{ website.crawled_text }}</div>"
                 "<p>{{ promo_code }}</p>"
             ),
         },
@@ -344,10 +338,10 @@ def test_email_template_preview_builds_context_and_escapes_values(client):
     preview = client.post(
         f"{endpoint}/{created.json()['id']}/preview",
         json={
-            "company_id": str(company_id),
+            "website_id": str(website_id),
             "contact_id": str(contact_id),
             "custom_variables": {
-                "company": {"name": "<strong>Custom name</strong>"},
+                "website": {"name": "<strong>Custom name</strong>"},
                 "promo_code": "WELCOME10",
             },
         },
@@ -364,8 +358,8 @@ def test_email_template_preview_builds_context_and_escapes_values(client):
     overridden_sender = client.post(
         f"{endpoint}/{created.json()['id']}/preview",
         json={
-            "company_id": str(company_id),
             "contact_id": str(contact_id),
+            "website_id": str(website_id),
             "custom_variables": {"sender": {"email": "spoof@example.test"}},
         },
     )
@@ -376,13 +370,13 @@ def test_email_template_preview_builds_context_and_escapes_values(client):
         json={
             "name": "Sandbox check",
             "subject": "Hello",
-            "body_content": "{{ company.__class__ }}",
+            "body_content": "{{ website.__class__ }}",
         },
     )
     assert unsafe_template.status_code == 201
     unsafe_preview = client.post(
         f"{endpoint}/{unsafe_template.json()['id']}/preview",
-        json={"company_id": str(company_id)},
+        json={"website_id": str(website_id)},
     )
     assert unsafe_preview.status_code == 422
 
@@ -391,7 +385,7 @@ def test_email_template_preview_builds_context_and_escapes_values(client):
         json={
             "name": "Unsafe filter",
             "subject": "Hello",
-            "body_content": "{{ company.name | safe }}",
+            "body_content": "{{ website.name | safe }}",
         },
     )
     assert unsafe_filter.status_code == 422
@@ -399,7 +393,7 @@ def test_email_template_preview_builds_context_and_escapes_values(client):
     invalid_contact = client.post(
         f"{endpoint}/{created.json()['id']}/preview",
         json={
-            "company_id": str(company_id),
+            "website_id": str(website_id),
             "contact_id": str(uuid4()),
         },
     )
@@ -408,7 +402,7 @@ def test_email_template_preview_builds_context_and_escapes_values(client):
 
 def test_email_template_send_uses_assigned_gmail_and_contact(client, monkeypatch):
     organization_id, admin_user_id = _session_ids(client)
-    company_id, contact_id = _create_company_with_contact(organization_id)
+    website_id, contact_id = _create_website_with_contact(organization_id)
     endpoint = f"/api/v1/orgs/{organization_id}/templates"
     created = client.post(
         endpoint,
@@ -417,7 +411,7 @@ def test_email_template_send_uses_assigned_gmail_and_contact(client, monkeypatch
             "subject": "A note for {{ contact.first_name | default('you') }}",
             "body_content": (
                 "<p>Hello {{ contact.first_name | default('there') }},</p>"
-                "<p>{{ sender.email }} · {{ company.domain }}</p>"
+                "<p>{{ sender.email }} · {{ website.domain }}</p>"
             ),
         },
     )
@@ -442,7 +436,7 @@ def test_email_template_send_uses_assigned_gmail_and_contact(client, monkeypatch
 
     send_endpoint = f"{endpoint}/{created.json()['id']}/send"
     request_payload = {
-        "company_id": str(company_id),
+        "website_id": str(website_id),
         "contact_id": str(contact_id),
         "gmail_account_id": str(gmail_account_id),
     }

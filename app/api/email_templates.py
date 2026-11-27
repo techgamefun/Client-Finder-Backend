@@ -27,7 +27,7 @@ from app.schemas.email_templates import (
 )
 from app.services.email_templates import (
     TEMPLATE_VARIABLES,
-    build_lead_context,
+    build_website_context,
     build_sender_info,
     render_email_template,
     validate_email_template_syntax,
@@ -244,9 +244,9 @@ def preview_email_template(
         if payload.gmail_account_id is not None
         else context.email
     )
-    lead_context = build_lead_context(
+    website_context = build_website_context(
         db,
-        payload.company_id,
+        payload.website_id,
         payload.contact_id,
         build_sender_info(
             db,
@@ -259,7 +259,7 @@ def preview_email_template(
     subject, body_content = render_email_template(
         template.subject,
         template.body_content,
-        lead_context,
+        website_context,
         payload.custom_variables,
     )
     return EmailTemplatePreviewResponse(
@@ -282,9 +282,9 @@ def send_email_template(
     _require_matching_organization(org_id, context)
     template = _get_email_template_or_404(db, org_id, template_id)
     sender_email = get_gmail_account_email(db, payload.gmail_account_id)
-    lead_context = build_lead_context(
+    website_context = build_website_context(
         db,
-        payload.company_id,
+        payload.website_id,
         payload.contact_id,
         build_sender_info(
             db,
@@ -294,7 +294,7 @@ def send_email_template(
             email=sender_email,
         ),
     )
-    recipient_email = lead_context["contact"]["email"]
+    recipient_email = website_context["contact"]["email"]
     if not recipient_email:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -303,7 +303,7 @@ def send_email_template(
     subject, body_content = render_email_template(
         template.subject,
         template.body_content,
-        lead_context,
+        website_context,
         payload.custom_variables,
     )
     sent = send_gmail_message(

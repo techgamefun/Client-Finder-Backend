@@ -4,13 +4,13 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.models import (
-    Company,
     ConnectedGmailAccount,
     Contact,
     EmailCampaign,
     EmailCampaignRecipient,
     EmailTemplate,
     UserGmailAssignment,
+    Website,
 )
 from app.services import campaign_service
 from conftest import TestingSessionLocal
@@ -45,48 +45,49 @@ def _create_account(organization_id, user_id, *, assigned=True):
         return account.id
 
 
-def _create_company_with_contact(organization_id, *, email="jane@example.test"):
+def _create_website_with_contact(organization_id, *, email="jane@example.test"):
     with TestingSessionLocal() as db:
         domain = f"example-{uuid4().hex}.test"
-        company = Company(
+        website = Website(
             organization_id=organization_id,
-            name=f"Example {uuid4().hex[:8]}",
+            business_name=f"Example {uuid4().hex[:8]}",
             domain=domain,
-            website=f"https://{domain}",
+            website_url=f"https://{domain}/",
             industry="Manufacturing",
         )
-        db.add(company)
+        db.add(website)
         db.flush()
         contact = Contact(
             organization_id=organization_id,
-            company_id=company.id,
+            website_id=website.id,
             name="Jane Doe",
             role="Operations Director",
             business_email=email,
         )
         db.add(contact)
         db.commit()
-        return company.id, contact.id
+        return website.id, contact.id
 
 
-def _create_company_without_valid_email(organization_id):
+def _create_website_without_valid_email(organization_id):
     with TestingSessionLocal() as db:
-        company = Company(
+        website = Website(
             organization_id=organization_id,
-            name=f"No email {uuid4().hex[:8]}",
+            business_name=f"No email {uuid4().hex[:8]}",
+            website_url="https://no-email.example.test/",
             domain="no-email.example.test",
         )
-        db.add(company)
+        db.add(website)
         db.flush()
         contact = Contact(
             organization_id=organization_id,
-            company_id=company.id,
+            website_id=website.id,
             name="No Email",
             business_email="not-an-email",
         )
         db.add(contact)
         db.commit()
-        return company.id
+        return website.id
 
 
 def _create_template(client, organization_id):
@@ -97,7 +98,7 @@ def _create_template(client, organization_id):
             "subject": "Hello {{ contact.first_name | default('there') }}",
             "body_content": (
                 "<p>Hello {{ contact.first_name | default('there') }}</p>"
-                "<p>{{ sender.email }} · {{ company.domain }}</p>"
+                "<p>{{ sender.email }} · {{ website.domain }}</p>"
             ),
         },
     )
@@ -138,15 +139,15 @@ def test_campaign_preview_and_start_round_robin_accounts(client):
         _create_account(organization_id, user_id),
     ]
     template_id = _create_template(client, organization_id)
-    company_contacts = [
-        _create_company_with_contact(
+    website_contacts = [
+        _create_website_with_contact(
             organization_id,
             email=f"person{index}@example.test",
         )
         for index in range(2)
     ]
-    skipped_company_id = _create_company_without_valid_email(organization_id)
-    company_ids = [item[0] for item in company_contacts] + [skipped_company_id]
+    skipped_website_id = _create_website_without_valid_email(organization_id)
+    website_ids = [item[0] for item in website_contacts] + [skipped_website_id]
 
     created = _create_campaign(
         client,
@@ -160,12 +161,12 @@ def test_campaign_preview_and_start_round_robin_accounts(client):
 
     preview = client.post(
         f"/api/v1/orgs/{organization_id}/campaigns/{campaign_id}/preview",
-        json={"company_ids": [str(company_id) for company_id in company_ids]},
+        json={"website_ids": [str(website_id) for website_id in website_ids]},
     )
     assert preview.status_code == 200, preview.text
     assert preview.json()["eligible_contact_count"] == 2
-    assert preview.json()["skipped_companies_without_email"] == 1
-    assert preview.json()["skipped_company_ids"] == [str(skipped_company_id)]
+    assert preview.json()["skipped_websites_without_email"] == 1
+    assert preview.json()["skipped_website_ids"] == [str(skipped_website_id)]
     assert preview.json()["daily_capacity_per_day"] == 4
     assert preview.json()["estimated_completion_at"] is not None
 
@@ -176,7 +177,7 @@ def test_campaign_preview_and_start_round_robin_accounts(client):
 
     started = client.post(
         f"/api/v1/orgs/{organization_id}/campaigns/{campaign_id}/start",
-        json={"company_ids": [str(company_id) for company_id in company_ids]},
+        json={"website_ids": [str(website_id) for website_id in website_ids]},
     )
     assert started.status_code == 200, started.text
     assert started.json()["status"] == "running"
@@ -198,8 +199,8 @@ def test_campaign_preview_and_start_round_robin_accounts(client):
             recipient_accounts[recipient.contact_id] = recipient.gmail_account_id
 
     assert recipient_accounts == {
-        company_contacts[0][1]: account_ids[0],
-        company_contacts[1][1]: account_ids[1],
+        website_contacts[0][1]: account_ids[0],
+        website_contacts[1][1]: account_ids[1],
     }
 
 
@@ -207,7 +208,7 @@ def test_campaign_preview_excludes_suppressed_contacts(client):
     organization_id, user_id = _session_ids(client)
     account_id = _create_account(organization_id, user_id)
     template_id = _create_template(client, organization_id)
-    company_id, _ = _create_company_with_contact(
+    website_id, _ = _create_website_with_contact(
         organization_id,
         email="blocked@example.test",
     )
@@ -231,14 +232,14 @@ def test_campaign_preview_excludes_suppressed_contacts(client):
 
     preview = client.post(
         f"/api/v1/orgs/{organization_id}/campaigns/{created.json()['id']}/preview",
-        json={"company_ids": [str(company_id)]},
+        json={"website_ids": [str(website_id)]},
     )
 
     assert preview.status_code == 200, preview.text
     assert preview.json()["eligible_contact_count"] == 0
     assert preview.json()["skipped_suppressed_contacts"] == 1
-    assert preview.json()["skipped_companies_without_email"] == 0
-    assert preview.json()["skipped_company_ids"] == []
+    assert preview.json()["skipped_websites_without_email"] == 0
+    assert preview.json()["skipped_website_ids"] == []
 
 
 def test_campaign_accepts_configured_follow_up_steps(client):
@@ -293,8 +294,8 @@ def test_campaign_pause_and_resume_recalculate_pending_schedule(
     organization_id, user_id = _session_ids(client)
     account_id = _create_account(organization_id, user_id)
     template_id = _create_template(client, organization_id)
-    company_contacts = [
-        _create_company_with_contact(
+    website_contacts = [
+        _create_website_with_contact(
             organization_id,
             email=f"person{index}@example.test",
         )
@@ -318,8 +319,8 @@ def test_campaign_pause_and_resume_recalculate_pending_schedule(
     started = client.post(
         f"/api/v1/orgs/{organization_id}/campaigns/{campaign_id}/start",
         json={
-            "company_ids": [
-                str(company_id) for company_id, _ in company_contacts
+            "website_ids": [
+                str(website_id) for website_id, _ in website_contacts
             ]
         },
     )
@@ -389,7 +390,7 @@ def test_scheduler_respects_business_hours_weekends_and_daily_cap(monkeypatch):
     ]
 
 
-def test_campaign_api_rejects_companies_outside_organization(client):
+def test_campaign_api_rejects_websites_outside_organization(client):
     organization_id, user_id = _session_ids(client)
     account_id = _create_account(organization_id, user_id)
     template_id = _create_template(client, organization_id)
@@ -404,7 +405,7 @@ def test_campaign_api_rejects_companies_outside_organization(client):
     campaign_id = campaign_response.json()["id"]
     preview = client.post(
         f"/api/v1/orgs/{organization_id}/campaigns/{campaign_id}/preview",
-        json={"company_ids": [str(uuid4())]},
+        json={"website_ids": [str(uuid4())]},
     )
     assert preview.status_code == 404
 
@@ -413,7 +414,7 @@ def test_paused_campaign_delete_removes_pending_recipients(client):
     organization_id, user_id = _session_ids(client)
     account_id = _create_account(organization_id, user_id)
     template_id = _create_template(client, organization_id)
-    company_id, _ = _create_company_with_contact(organization_id)
+    website_id, _ = _create_website_with_contact(organization_id)
     created = _create_campaign(
         client,
         organization_id,
@@ -425,7 +426,7 @@ def test_paused_campaign_delete_removes_pending_recipients(client):
 
     started = client.post(
         f"/api/v1/orgs/{organization_id}/campaigns/{campaign_id}/start",
-        json={"company_ids": [str(company_id)]},
+        json={"website_ids": [str(website_id)]},
     )
     assert started.status_code == 200, started.text
     paused = client.post(

@@ -24,8 +24,8 @@ class OverviewKpi(BaseModel):
 
 class OverviewKpis(BaseModel):
     websites_discovered: OverviewKpi
-    leads_created: OverviewKpi
-    reachable_leads: OverviewKpi
+    websites_created: OverviewKpi
+    reachable_websites: OverviewKpi
     emails_sent: OverviewKpi
 
 
@@ -44,7 +44,7 @@ class OverviewFunnel(BaseModel):
 class OverviewSeriesPoint(BaseModel):
     date: str
     websites_discovered: int
-    leads_created: int
+    websites_created: int
 
 
 class OverviewStatus(BaseModel):
@@ -60,7 +60,7 @@ class OverviewCoverageRate(BaseModel):
 
 
 class OverviewCoverage(BaseModel):
-    companies_total: int
+    websites_total: int
     with_email: OverviewCoverageRate
     with_phone: OverviewCoverageRate
     with_website: OverviewCoverageRate
@@ -99,13 +99,13 @@ class OverviewOnboarding(BaseModel):
     steps: list[OverviewOnboardingStep]
 
 
-class OverviewRecentLead(BaseModel):
+class OverviewRecentWebsite(BaseModel):
     id: str
-    name: str
+    business_name: str | None
     domain: str | None
     contact_count: int
     source_keyword: str | None
-    lead_status: str
+    status: str
     created_at: datetime
     last_email_sent_at: datetime | None
 
@@ -121,7 +121,7 @@ class OverviewResponse(BaseModel):
     jobs: OverviewJobs
     attention: list[OverviewAttentionItem]
     onboarding: OverviewOnboarding | None
-    recent_leads: list[OverviewRecentLead]
+    recent_websites: list[OverviewRecentWebsite]
 
 
 class OverviewUserProgress(BaseModel):
@@ -131,8 +131,7 @@ class OverviewUserProgress(BaseModel):
     is_active: bool
     searches_run: int
     websites_discovered: int
-    companies_created: int
-    leads_created: int
+    websites_created: int
     crawls_completed: int
     emails_sent: int
 
@@ -141,8 +140,7 @@ class MemberActivitySeriesPoint(BaseModel):
     date: str
     searches_run: int
     websites_discovered: int
-    companies_created: int
-    leads_created: int
+    websites_created: int
     crawls_completed: int
     emails_sent: int
 

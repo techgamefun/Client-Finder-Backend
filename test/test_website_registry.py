@@ -5,7 +5,6 @@ from sqlalchemy import select
 
 from conftest import TestingSessionLocal
 from app.models import (
-    Company,
     ExcludedDomain,
     PageSpeedScan,
     PageSpeedScanJob,
@@ -20,7 +19,7 @@ from app.schemas.discovery import (
     DiscoveryResult,
     DiscoverySearchResponse,
 )
-from app.services import lead_ingestion
+from app.services import discovery_ingestion
 from app.services.website_crawler import CrawlData
 
 
@@ -311,7 +310,7 @@ def test_website_registry_page_includes_current_user_domain_rating(client):
 def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     with TestingSessionLocal() as db:
         for domain, status, topics in [
-            ("alpha.example", "lead", ["saas"]),
+            ("alpha.example", "qualified", ["saas"]),
             ("bravo.example", "new", ["commerce"]),
             ("charlie.example", "checked", ["saas"]),
         ]:
@@ -635,7 +634,7 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     }
 
     filter_cases = [
-        ({"status": "lead"}, 1),
+        ({"status": "qualified"}, 1),
         ({"category": "saas"}, 2),
         ({"discovery_source": "tavily"}, 3),
         ({"minimum_monthly_visits": 1000}, 1),
@@ -683,7 +682,7 @@ def test_website_registry_page_filters_and_paginates_on_the_backend(client):
     filtered_page = client.get(
         "/api/v1/websites/registry-page",
         params={
-            "status": "lead",
+            "status": "qualified",
             "category": "saas",
             "discovery_source": "tavily",
             "minimum_monthly_visits": 1000,
@@ -1001,23 +1000,6 @@ def test_website_detail_includes_only_pagespeed_scores(client):
     assert unrelated_scan_response.status_code == 404
 
 
-def test_company_domain_is_added_to_website_registry(client):
-    response = client.post(
-        "/api/v1/companies",
-        json={"name": "Example Company", "domain": "example.com"},
-    )
-
-    assert response.status_code == 201
-    with TestingSessionLocal() as db:
-        website = db.scalar(select(Website))
-
-    assert website is not None
-    assert website.website_url == "https://example.com/"
-    assert website.domain == "example.com"
-    assert website.status == "new"
-    assert website.discovery_source == "company_profile"
-
-
 def test_listing_discovery_is_unlinked_and_not_queued_for_pagespeed(
     client,
     monkeypatch,
@@ -1048,9 +1030,9 @@ def test_listing_discovery_is_unlinked_and_not_queued_for_pagespeed(
     async def fake_enqueue(_job_ids):
         return None
 
-    monkeypatch.setattr(lead_ingestion, "search_companies", fake_search)
-    monkeypatch.setattr(lead_ingestion, "crawl_website", fake_crawl)
-    monkeypatch.setattr(lead_ingestion, "enqueue_pagespeed_jobs", fake_enqueue)
+    monkeypatch.setattr(discovery_ingestion, "search_websites", fake_search)
+    monkeypatch.setattr(discovery_ingestion, "crawl_website", fake_crawl)
+    monkeypatch.setattr(discovery_ingestion, "enqueue_pagespeed_jobs", fake_enqueue)
 
     response = client.post(
         "/api/v1/discovery/ingest",
@@ -1061,7 +1043,6 @@ def test_listing_discovery_is_unlinked_and_not_queued_for_pagespeed(
     assert response.json()["pagespeed_scans_queued"] == 0
     with TestingSessionLocal() as db:
         website = db.scalar(select(Website))
-        company = db.scalar(select(Company))
         crawl = db.scalar(select(WebsiteCrawl))
         pagespeed_job = db.scalar(select(PageSpeedScanJob))
 
@@ -1073,9 +1054,6 @@ def test_listing_discovery_is_unlinked_and_not_queued_for_pagespeed(
     assert website.discovery_source == "listing_website"
     assert website.discovery_provider == "octoparse"
     assert website.crawl_id == crawl.id
-    assert company is not None
-    assert company.website is None
-    assert company.domain is None
     assert pagespeed_job is None
     listing_response = client.get(
         "/api/v1/websites?page_type=business_listing"

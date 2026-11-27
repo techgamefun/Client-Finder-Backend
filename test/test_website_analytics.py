@@ -34,7 +34,7 @@ def test_website_analytics_aggregates_all_sites_and_latest_pagespeed(client):
             website_url=crawl.website_url,
             domain="crawled.example",
             crawl_id=crawl.id,
-            status="lead",
+            status="qualified",
             category="saas_corporate_marketing",
             page_type="normal",
             discovery_source="tavily",
@@ -140,7 +140,7 @@ def test_website_analytics_aggregates_all_sites_and_latest_pagespeed(client):
         "pagespeed_mobile": 1,
     }
     assert {item["key"]: item["count"] for item in data["status_breakdown"]} == {
-        "lead": 1,
+        "qualified": 1,
         "new": 1,
     }
     assert data["domain_rating"]["average"] == 50.0
@@ -205,7 +205,7 @@ def test_website_analytics_excludes_corpus_terms_from_older_crawl(client):
             website_url=crawl.website_url,
             domain="stale.example",
             crawl_id=crawl.id,
-            status="lead",
+            status="qualified",
             category="saas_corporate_marketing",
             page_type="normal",
             discovery_source="tavily",

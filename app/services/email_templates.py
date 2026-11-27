@@ -9,8 +9,8 @@ from jinja2.sandbox import SandboxedEnvironment
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Company, Contact, Organization, Website, WebsiteCrawl
-from app.services.normalization import normalize_domain
+from app.models import Contact, Organization, Website, WebsiteCrawl
+from app.services.normalization import normalize_company_name, normalize_domain
 from app.tenant_context import get_tenant_context
 
 
@@ -20,79 +20,74 @@ _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 TEMPLATE_VARIABLES = (
     {
-        "path": "company.id",
-        "label": "Company ID",
-        "description": "The UUID of the company profile.",
+        "path": "website.id",
+        "label": "Website ID",
+        "description": "The UUID of the website profile.",
     },
     {
-        "path": "company.name",
-        "label": "Company name",
-        "description": "The company profile name.",
+        "path": "website.name",
+        "label": "Website name",
+        "description": "The website profile name.",
     },
     {
-        "path": "company.normalized_name",
-        "label": "Normalized company name",
-        "description": "The normalized company name used for matching.",
+        "path": "website.normalized_name",
+        "label": "Normalized website name",
+        "description": "The normalized website name used for matching.",
     },
     {
-        "path": "company.domain",
-        "label": "Company domain",
-        "description": "The normalized domain from the company profile.",
+        "path": "website.domain",
+        "label": "Website domain",
+        "description": "The normalized domain from the website profile.",
     },
     {
-        "path": "company.website",
-        "label": "Company website",
-        "description": "The website URL from the company profile.",
+        "path": "website.website",
+        "label": "Website URL",
+        "description": "The website URL from the website profile.",
     },
     {
-        "path": "company.industry",
+        "path": "website.industry",
         "label": "Industry",
-        "description": "The company profile industry.",
+        "description": "The website profile industry.",
     },
     {
-        "path": "company.city",
+        "path": "website.city",
         "label": "City",
-        "description": "The company profile city.",
+        "description": "The website profile city.",
     },
     {
-        "path": "company.state",
+        "path": "website.state",
         "label": "State",
-        "description": "The company profile state or region.",
+        "description": "The website profile state or region.",
     },
     {
-        "path": "company.phone",
+        "path": "website.phone",
         "label": "Contact phone",
         "description": "The selected contact's business phone, if available.",
     },
     {
-        "path": "company.status",
-        "label": "Lead status",
-        "description": "The lead status stored on the company profile.",
+        "path": "website.status",
+        "label": "Website status",
+        "description": "The workflow status stored on the website profile.",
     },
     {
-        "path": "company.lead_status",
-        "label": "Lead status",
-        "description": "The lead status stored on the company profile.",
+        "path": "website.lead_score",
+        "label": "Website score",
+        "description": "The website score, if one has been set.",
     },
     {
-        "path": "company.lead_score",
-        "label": "Lead score",
-        "description": "The lead score, if one has been set.",
-    },
-    {
-        "path": "company.software_need",
+        "path": "website.software_need",
         "label": "Software need",
-        "description": "The software need recorded on the company profile.",
+        "description": "The software need recorded on the website profile.",
     },
     {
-        "path": "company.crawled_text",
+        "path": "website.crawled_text",
         "label": "Crawled website text",
-        "description": "A text summary of available crawl pages for the company domain.",
+        "description": "A text summary of available crawl pages for the website domain.",
     },
     {
-        "path": "company.created_at",
-        "label": "Company created date",
-        "description": "When the company profile was added.",
+        "path": "website.created_at",
+        "label": "Website created date",
+        "description": "When the website profile was added.",
     },
     {
         "path": "contact.id",
@@ -192,9 +187,9 @@ def build_sender_info(
     }
 
 
-def build_lead_context(
+def build_website_context(
     db: Session,
-    company_id: UUID,
+    website_id: UUID,
     contact_id: UUID | None,
     sender_info: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -205,17 +200,18 @@ def build_lead_context(
             detail="Authentication is required to build an email template context.",
         )
 
-    company = db.scalar(
-        select(Company)
+    website = db.scalar(
+        select(Website)
+        .options(selectinload(Website.crawl))
         .where(
-            Company.id == company_id,
-            Company.organization_id == tenant_context.organization_id,
+            Website.id == website_id,
+            Website.organization_id == tenant_context.organization_id,
         )
     )
-    if company is None:
+    if website is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Company not found.",
+            detail="Website not found.",
         )
 
     contact = None
@@ -223,40 +219,40 @@ def build_lead_context(
         contact = db.scalar(
             select(Contact).where(
                 Contact.id == contact_id,
-                Contact.company_id == company.id,
+                Contact.website_id == website.id,
                 Contact.organization_id == tenant_context.organization_id,
             )
         )
         if contact is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Contact not found for this company.",
+                detail="Contact not found for this website.",
             )
 
     contact_name = contact.name if contact is not None else None
     first_name, last_name = _split_name(contact_name)
-    crawled_text = _get_company_crawled_text(
+    crawled_text = _get_website_crawled_text(
         db,
-        company,
+        website,
         tenant_context.organization_id,
     )
+    website_name = website.business_name or website.domain
     return {
-        "company": {
-            "id": str(company.id),
-            "name": company.name,
-            "normalized_name": company.normalized_name,
-            "website": company.website,
-            "domain": company.domain,
-            "industry": company.industry,
-            "city": company.city,
-            "state": company.state,
+        "website": {
+            "id": str(website.id),
+            "name": website_name,
+            "normalized_name": normalize_company_name(website_name or ""),
+            "website": website.website_url,
+            "domain": website.domain,
+            "industry": website.industry,
+            "city": website.city,
+            "state": website.state,
             "phone": contact.business_phone if contact is not None else None,
-            "status": company.lead_status,
-            "lead_status": company.lead_status,
-            "lead_score": company.lead_score,
-            "software_need": company.software_need,
+            "status": website.status,
+            "lead_score": website.lead_score,
+            "software_need": website.software_need,
             "crawled_text": crawled_text,
-            "created_at": company.created_at,
+            "created_at": website.created_at,
         },
         "contact": {
             "id": str(contact.id) if contact is not None else None,
@@ -378,7 +374,7 @@ def _merge_custom_variables(
                 detail="sender.email is determined by the connected account and cannot be overridden.",
             )
         if len(path) == 1:
-            if key in {"company", "contact", "sender"}:
+            if key in {"website", "contact", "sender"}:
                 if not isinstance(value, Mapping):
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -443,12 +439,12 @@ def _split_name(name: str | None) -> tuple[str | None, str | None]:
     return parts[0], parts[1] if len(parts) > 1 else None
 
 
-def _get_company_crawled_text(
+def _get_website_crawled_text(
     db: Session,
-    company: Company,
+    website: Website,
     organization_id: UUID,
 ) -> str:
-    domain = normalize_domain(company.domain or company.website)
+    domain = normalize_domain(website.domain or website.website_url)
     if not domain:
         return ""
     websites = db.scalars(

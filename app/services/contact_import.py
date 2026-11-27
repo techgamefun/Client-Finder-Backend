@@ -1,19 +1,19 @@
-from app.models import Company, Contact
+from app.models import Contact, Website
 
 
 def add_crawl_contacts(
-    company: Company,
+    website: Website,
     emails: list[str],
     phones: list[str],
 ) -> int:
     existing_emails = {
         contact.business_email.casefold().strip()
-        for contact in company.contacts
+        for contact in website.contacts
         if contact.business_email
     }
     existing_phones = {
         _phone_key(contact.business_phone)
-        for contact in company.contacts
+        for contact in website.contacts
         if contact.business_phone
     }
     existing_phones.discard("")
@@ -23,8 +23,9 @@ def add_crawl_contacts(
         normalized_email = email.strip().casefold()
         if not normalized_email or normalized_email in existing_emails:
             continue
-        company.contacts.append(
+        website.contacts.append(
             Contact(
+                organization_id=website.organization_id,
                 business_email=normalized_email,
                 is_publicly_listed=True,
             )
@@ -37,8 +38,9 @@ def add_crawl_contacts(
         phone_key = _phone_key(normalized_phone)
         if not normalized_phone or not phone_key or phone_key in existing_phones:
             continue
-        company.contacts.append(
+        website.contacts.append(
             Contact(
+                organization_id=website.organization_id,
                 business_phone=normalized_phone,
                 is_publicly_listed=True,
             )

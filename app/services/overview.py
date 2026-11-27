@@ -8,7 +8,6 @@ from sqlalchemy import and_, case, exists, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Company,
     ConnectedGmailAccount,
     Contact,
     EmailCampaign,
@@ -39,7 +38,7 @@ from app.schemas.overview import (
     OverviewOnboardingStep,
     OverviewPeriod,
     OverviewQueueHealth,
-    OverviewRecentLead,
+    OverviewRecentWebsite,
     OverviewRange,
     OverviewResponse,
     OverviewSeriesPoint,
@@ -188,14 +187,14 @@ def build_overview(
 
     has_contact = exists(
         select(Contact.id).where(
-            Contact.company_id == Company.id,
+            Contact.website_id == Website.id,
             Contact.organization_id == organization_id,
             _owner_condition(Contact, organization_id, owner_user_id),
         )
     )
     has_reachable_contact = exists(
         select(Contact.id).where(
-            Contact.company_id == Company.id,
+            Contact.website_id == Website.id,
             Contact.organization_id == organization_id,
             _owner_condition(Contact, organization_id, owner_user_id),
             or_(
@@ -213,7 +212,7 @@ def build_overview(
     sent_recipient = EmailCampaignRecipient.sent_at.is_not(None)
     has_email = exists(
         select(Contact.id).where(
-            Contact.company_id == Company.id,
+            Contact.website_id == Website.id,
             Contact.organization_id == organization_id,
             _owner_condition(Contact, organization_id, owner_user_id),
             Contact.business_email.is_not(None),
@@ -222,7 +221,7 @@ def build_overview(
     )
     has_phone = exists(
         select(Contact.id).where(
-            Contact.company_id == Company.id,
+            Contact.website_id == Website.id,
             Contact.organization_id == organization_id,
             _owner_condition(Contact, organization_id, owner_user_id),
             Contact.business_phone.is_not(None),
@@ -231,17 +230,17 @@ def build_overview(
     )
     has_website = or_(
         and_(
-            Company.website.is_not(None),
-            func.trim(Company.website) != "",
+            Website.website_url.is_not(None),
+            func.trim(Website.website_url) != "",
         ),
         and_(
-            Company.domain.is_not(None),
-            func.trim(Company.domain) != "",
+            Website.domain.is_not(None),
+            func.trim(Website.domain) != "",
         ),
     )
     has_industry = and_(
-        Company.industry.is_not(None),
-        func.trim(Company.industry) != "",
+        Website.industry.is_not(None),
+        func.trim(Website.industry) != "",
     )
 
     kpi_row = db.execute(
@@ -263,36 +262,18 @@ def build_overview(
                 owner_user_id=owner_user_id,
             ).label("websites_previous"),
             _count_range(
-                Company,
+                Website,
                 organization_id,
-                Company.created_at,
-                current_start,
-                current_end,
-                has_contact,
-                owner_user_id=owner_user_id,
-            ).label("leads_current"),
-            _count_range(
-                Company,
-                organization_id,
-                Company.created_at,
-                previous_start,
-                current_start,
-                has_contact,
-                owner_user_id=owner_user_id,
-            ).label("leads_previous"),
-            _count_range(
-                Company,
-                organization_id,
-                Company.created_at,
+                Website.created_at,
                 current_start,
                 current_end,
                 has_reachable_contact,
                 owner_user_id=owner_user_id,
             ).label("reachable_current"),
             _count_range(
-                Company,
+                Website,
                 organization_id,
-                Company.created_at,
+                Website.created_at,
                 previous_start,
                 current_start,
                 has_reachable_contact,
@@ -316,17 +297,6 @@ def build_overview(
                 sent_recipient,
                 owner_user_id=owner_user_id,
             ).label("emails_previous"),
-            _count_range(
-                Company,
-                organization_id,
-                Company.created_at,
-                current_start,
-                current_end,
-                owner_user_id=owner_user_id,
-            ).label("companies_current"),
-            _count_all(
-                Company, organization_id, owner_user_id=owner_user_id
-            ).label("companies_total"),
             _count_all(
                 Website, organization_id, owner_user_id=owner_user_id
             ).label("websites_total"),
@@ -336,10 +306,10 @@ def build_overview(
                     0,
                 )
             )
-            .select_from(Company)
+            .select_from(Website)
             .where(
-                Company.organization_id == organization_id,
-                _owner_condition(Company, organization_id, owner_user_id),
+                Website.organization_id == organization_id,
+                _owner_condition(Website, organization_id, owner_user_id),
             )
             .scalar_subquery()
             .label("with_email"),
@@ -349,10 +319,10 @@ def build_overview(
                     0,
                 )
             )
-            .select_from(Company)
+            .select_from(Website)
             .where(
-                Company.organization_id == organization_id,
-                _owner_condition(Company, organization_id, owner_user_id),
+                Website.organization_id == organization_id,
+                _owner_condition(Website, organization_id, owner_user_id),
             )
             .scalar_subquery()
             .label("with_phone"),
@@ -362,10 +332,10 @@ def build_overview(
                     0,
                 )
             )
-            .select_from(Company)
+            .select_from(Website)
             .where(
-                Company.organization_id == organization_id,
-                _owner_condition(Company, organization_id, owner_user_id),
+                Website.organization_id == organization_id,
+                _owner_condition(Website, organization_id, owner_user_id),
             )
             .scalar_subquery()
             .label("with_website"),
@@ -375,10 +345,10 @@ def build_overview(
                     0,
                 )
             )
-            .select_from(Company)
+            .select_from(Website)
             .where(
-                Company.organization_id == organization_id,
-                _owner_condition(Company, organization_id, owner_user_id),
+                Website.organization_id == organization_id,
+                _owner_condition(Website, organization_id, owner_user_id),
             )
             .scalar_subquery()
             .label("with_industry"),
@@ -425,23 +395,22 @@ def build_overview(
             Website.created_at < current_end,
         ),
         select(
-            literal("leads").label("metric"),
-            Company.created_at.label("occurred_at"),
+            literal("websites_created").label("metric"),
+            Website.created_at.label("occurred_at"),
         ).where(
-            Company.organization_id == organization_id,
-            _owner_condition(Company, organization_id, owner_user_id),
-            Company.created_at >= chart_start,
-            Company.created_at < current_end,
-            has_contact,
+            Website.organization_id == organization_id,
+            _owner_condition(Website, organization_id, owner_user_id),
+            Website.created_at >= chart_start,
+            Website.created_at < current_end,
         ),
         select(
             literal("reachable").label("metric"),
-            Company.created_at.label("occurred_at"),
+            Website.created_at.label("occurred_at"),
         ).where(
-            Company.organization_id == organization_id,
-            _owner_condition(Company, organization_id, owner_user_id),
-            Company.created_at >= chart_start,
-            Company.created_at < current_end,
+            Website.organization_id == organization_id,
+            _owner_condition(Website, organization_id, owner_user_id),
+            Website.created_at >= chart_start,
+            Website.created_at < current_end,
             has_reachable_contact,
         ),
         select(
@@ -472,11 +441,11 @@ def build_overview(
     )
     series_counts = {
         "websites": {day: 0 for day in series_dates},
-        "leads": {day: 0 for day in series_dates},
+        "websites_created": {day: 0 for day in series_dates},
     }
     sparkline_counts = {
         name: {day: 0 for day in sparkline_dates}
-        for name in ("websites", "leads", "reachable", "emails")
+        for name in ("websites", "websites_created", "reachable", "emails")
     }
     for metric_name, occurred_at in event_rows_result:
         event_date = _as_utc(occurred_at).astimezone(user_timezone).date()
@@ -489,29 +458,23 @@ def build_overview(
         OverviewSeriesPoint(
             date=day.isoformat(),
             websites_discovered=series_counts["websites"][day],
-            leads_created=series_counts["leads"][day],
+            websites_created=series_counts["websites_created"][day],
         )
         for day in series_dates
     ]
 
     website_has_contact = exists(
         select(Contact.id)
-        .join(Company, Company.id == Contact.company_id)
         .where(
-            func.lower(Company.domain) == func.lower(Website.domain),
-            Company.organization_id == organization_id,
-            _owner_condition(Company, organization_id, owner_user_id),
+            Contact.website_id == Website.id,
             Contact.organization_id == organization_id,
             _owner_condition(Contact, organization_id, owner_user_id),
         )
     )
     website_has_sent_campaign = exists(
         select(EmailCampaignRecipient.id)
-        .join(Company, Company.id == EmailCampaignRecipient.company_id)
         .where(
-            func.lower(Company.domain) == func.lower(Website.domain),
-            Company.organization_id == organization_id,
-            _owner_condition(Company, organization_id, owner_user_id),
+            EmailCampaignRecipient.website_id == Website.id,
             EmailCampaignRecipient.org_id == organization_id,
             _owner_condition(
                 EmailCampaignRecipient,
@@ -534,7 +497,7 @@ def build_overview(
                         (
                             and_(
                                 Website.crawl_id.is_not(None),
-                                Website.status == "lead",
+                                Website.status == "qualified",
                             ),
                             1,
                         ),
@@ -549,7 +512,7 @@ def build_overview(
                         (
                             and_(
                                 Website.crawl_id.is_not(None),
-                                Website.status == "lead",
+                                Website.status == "qualified",
                                 website_has_contact,
                             ),
                             1,
@@ -565,7 +528,7 @@ def build_overview(
                         (
                             and_(
                                 Website.crawl_id.is_not(None),
-                                Website.status == "lead",
+                                Website.status == "qualified",
                                 website_has_contact,
                                 website_has_sent_campaign,
                             ),
@@ -593,7 +556,7 @@ def build_overview(
     funnel_labels = [
         ("discovered", "Discovered"),
         ("crawled", "Crawled"),
-        ("added", "Added to leads"),
+        ("added", "Qualified"),
         ("has_contact", "Has contact"),
         ("emailed", "Emailed"),
     ]
@@ -630,45 +593,44 @@ def build_overview(
     )
 
     status_rows = db.execute(
-        select(Company.lead_status, func.count(Company.id))
+        select(Website.status, func.count(Website.id))
         .where(
-            Company.organization_id == organization_id,
-            _owner_condition(Company, organization_id, owner_user_id),
-            has_contact,
+            Website.organization_id == organization_id,
+            _owner_condition(Website, organization_id, owner_user_id),
         )
-        .group_by(Company.lead_status)
-        .order_by(func.count(Company.id).desc(), Company.lead_status)
+        .group_by(Website.status)
+        .order_by(func.count(Website.id).desc(), Website.status)
     ).all()
-    lead_total = sum(int(count) for _, count in status_rows)
+    website_status_total = sum(int(count) for _, count in status_rows)
     status_breakdown = [
         OverviewStatus(
-            status=lead_status,
+            status=website_status,
             count=int(count),
-            percentage=_rounded_percentage(int(count), lead_total),
+            percentage=_rounded_percentage(int(count), website_status_total),
         )
-        for lead_status, count in status_rows
+        for website_status, count in status_rows
     ]
 
     successful_crawls = int(kpi_row.crawls_succeeded or 0)
     completed_crawls = successful_crawls + int(kpi_row.crawls_failed or 0)
-    companies_total = int(kpi_row.companies_total or 0)
+    websites_total = int(kpi_row.websites_total or 0)
     coverage = OverviewCoverage(
-        companies_total=companies_total,
+        websites_total=websites_total,
         with_email=_coverage_rate(
             int(kpi_row.with_email or 0),
-            companies_total,
+            websites_total,
         ),
         with_phone=_coverage_rate(
             int(kpi_row.with_phone or 0),
-            companies_total,
+            websites_total,
         ),
         with_website=_coverage_rate(
             int(kpi_row.with_website or 0),
-            companies_total,
+            websites_total,
         ),
         with_industry=_coverage_rate(
             int(kpi_row.with_industry or 0),
-            companies_total,
+            websites_total,
         ),
         crawl_success=_coverage_rate(successful_crawls, completed_crawls),
     )
@@ -781,7 +743,7 @@ def build_overview(
 
     has_detail_contact = exists(
         select(Contact.id).where(
-            Contact.company_id == Company.id,
+            Contact.website_id == Website.id,
             Contact.organization_id == organization_id,
             _owner_condition(Contact, organization_id, owner_user_id),
             or_(
@@ -854,7 +816,7 @@ def build_overview(
                 Website,
                 organization_id,
                 Website.crawl_id.is_not(None),
-                Website.status != "lead",
+                Website.status.in_(("new", "checked")),
                 or_(
                     Website.page_type.is_(None),
                     Website.page_type != "business_listing",
@@ -862,12 +824,12 @@ def build_overview(
                 owner_user_id=owner_user_id,
             ).label("unadded_crawled_websites"),
             _count_all(
-                Company,
+                Website,
                 organization_id,
                 has_contact,
                 ~has_detail_contact,
                 owner_user_id=owner_user_id,
-            ).label("leads_without_details"),
+            ).label("websites_without_details"),
             _count_all(
                 EmailCampaign,
                 organization_id,
@@ -884,12 +846,21 @@ def build_overview(
             has_search.label("has_search"),
             has_tavily_key.label("has_tavily_key"),
             has_sent_campaign.label("has_sent_campaign"),
+            exists(
+                select(Website.id).where(
+                    Website.organization_id == organization_id,
+                    _owner_condition(Website, organization_id, owner_user_id),
+                    Website.status.in_(("qualified", "contacted", "converted")),
+                )
+            ).label("has_qualified_website"),
         )
     ).one()
     unadded_crawled_websites = int(
         attention_row.unadded_crawled_websites or 0
     )
-    leads_without_details = int(attention_row.leads_without_details or 0)
+    websites_without_details = int(
+        attention_row.websites_without_details or 0
+    )
     paused_campaigns = int(attention_row.paused_campaigns or 0)
     failed_campaign_sends = int(attention_row.failed_campaign_sends or 0)
     attention_candidates = [
@@ -921,8 +892,8 @@ def build_overview(
             3,
             unadded_crawled_websites,
             "crawled_websites_not_added",
-            f"{unadded_crawled_websites} crawled websites have not been added to leads.",
-            "/websites?attention=not-added",
+            f"{unadded_crawled_websites} crawled websites need qualification.",
+            "/websites?attention=not-qualified",
             "crawled_websites_not_added",
         ),
         (
@@ -935,11 +906,11 @@ def build_overview(
         ),
         (
             5,
-            leads_without_details,
-            "leads_without_contact_details",
-            f"{leads_without_details} leads have no public email or phone.",
-            "/leads?contact_details=missing",
-            "leads_without_contact_details",
+            websites_without_details,
+            "websites_without_contact_details",
+            f"{websites_without_details} websites have no public email or phone.",
+            "/websites?contact_details=missing",
+            "websites_without_contact_details",
         ),
     ]
     attention = [
@@ -958,7 +929,7 @@ def build_overview(
     ][:4]
     onboarding = _build_onboarding(
         websites_total=int(kpi_row.websites_total or 0),
-        companies_total=companies_total,
+        has_qualified_website=bool(attention_row.has_qualified_website),
         has_search=bool(attention_row.has_search),
         has_tavily_key=bool(attention_row.has_tavily_key),
         has_assigned_gmail=bool(attention_row.has_assigned_gmail),
@@ -970,11 +941,11 @@ def build_overview(
     contact_count = (
         select(func.count(Contact.id))
         .where(
-            Contact.company_id == Company.id,
+            Contact.website_id == Website.id,
             Contact.organization_id == organization_id,
             _owner_condition(Contact, organization_id, owner_user_id),
         )
-        .correlate(Company)
+        .correlate(Website)
         .scalar_subquery()
     )
     source_keyword = (
@@ -994,41 +965,40 @@ def build_overview(
             _owner_condition(Website, organization_id, owner_user_id),
             SearchKeyword.organization_id == organization_id,
             _owner_condition(SearchKeyword, organization_id, owner_user_id),
-            Company.domain.is_not(None),
-            func.lower(Website.domain) == func.lower(Company.domain),
+            Website.id == website_search_keywords.c.website_id,
         )
         .order_by(SearchKeyword.searched_at.desc(), SearchKeyword.id.desc())
         .limit(1)
-        .correlate(Company)
+        .correlate(Website)
         .scalar_subquery()
     )
     recent_rows = db.execute(
         select(
-            Company.id,
-            Company.name,
-            Company.domain,
-            Company.lead_status,
-            Company.created_at,
-            Company.last_email_sent_at,
+            Website.id,
+            Website.business_name,
+            Website.domain,
+            Website.status,
+            Website.created_at,
+            Website.last_email_sent_at,
             contact_count.label("contact_count"),
             source_keyword.label("source_keyword"),
         )
         .where(
-            Company.organization_id == organization_id,
-            _owner_condition(Company, organization_id, owner_user_id),
+            Website.organization_id == organization_id,
+            _owner_condition(Website, organization_id, owner_user_id),
             has_contact,
         )
-        .order_by(Company.created_at.desc(), Company.id.desc())
+        .order_by(Website.created_at.desc(), Website.id.desc())
         .limit(5)
     ).all()
-    recent_leads = [
-        OverviewRecentLead(
+    recent_websites = [
+        OverviewRecentWebsite(
             id=str(row.id),
-            name=row.name,
+            business_name=row.business_name,
             domain=row.domain,
             contact_count=int(row.contact_count or 0),
             source_keyword=row.source_keyword,
-            lead_status=row.lead_status,
+            status=row.status,
             created_at=row.created_at,
             last_email_sent_at=row.last_email_sent_at,
         )
@@ -1044,16 +1014,16 @@ def build_overview(
                 int(kpi_row.websites_previous or 0),
                 _counts_for(sparkline_counts, "websites"),
             ),
-            leads_created=_metric(
-                int(kpi_row.leads_current or 0),
-                int(kpi_row.leads_previous or 0),
-                _counts_for(sparkline_counts, "leads"),
+            websites_created=_metric(
+                int(kpi_row.websites_current or 0),
+                int(kpi_row.websites_previous or 0),
+                _counts_for(sparkline_counts, "websites_created"),
             ),
-            reachable_leads=_metric(
+            reachable_websites=_metric(
                 int(kpi_row.reachable_current or 0),
                 int(kpi_row.reachable_previous or 0),
                 _counts_for(sparkline_counts, "reachable"),
-                denominator=int(kpi_row.companies_current or 0),
+                denominator=int(kpi_row.websites_current or 0),
             ),
             emails_sent=_metric(
                 int(kpi_row.emails_current or 0),
@@ -1068,7 +1038,7 @@ def build_overview(
         jobs=jobs,
         attention=attention,
         onboarding=onboarding,
-        recent_leads=recent_leads,
+        recent_websites=recent_websites,
     )
 
 
@@ -1084,13 +1054,6 @@ def build_admin_overview(
     range_duration = timedelta(days=RANGE_DAYS.get(range_name, 30))
     current_start = current_end - range_duration
     organization_id = context.organization_id
-    has_user_contact = exists(
-        select(Contact.id).where(
-            Contact.company_id == Company.id,
-            Contact.organization_id == organization_id,
-            Contact.created_by_user_id == User.id,
-        )
-    )
     emails_sent = (
         select(func.count(EmailCampaignRecipient.id))
         .join(
@@ -1131,22 +1094,13 @@ def build_admin_overview(
                 owner_user_id=User.id,
             ).label("websites_discovered"),
             _count_range(
-                Company,
+                Website,
                 organization_id,
-                Company.created_at,
+                Website.created_at,
                 current_start,
                 current_end,
                 owner_user_id=User.id,
-            ).label("companies_created"),
-            _count_range(
-                Company,
-                organization_id,
-                Company.created_at,
-                current_start,
-                current_end,
-                has_user_contact,
-                owner_user_id=User.id,
-            ).label("leads_created"),
+            ).label("websites_created"),
             _count_range(
                 WebsiteCrawlJob,
                 organization_id,
@@ -1183,8 +1137,7 @@ def build_admin_overview(
                 is_active=row.is_active,
                 searches_run=int(row.searches_run or 0),
                 websites_discovered=int(row.websites_discovered or 0),
-                companies_created=int(row.companies_created or 0),
-                leads_created=int(row.leads_created or 0),
+                websites_created=int(row.websites_created or 0),
                 crawls_completed=int(row.crawls_completed or 0),
                 emails_sent=int(row.emails_sent or 0),
             )
@@ -1245,13 +1198,6 @@ def build_member_activity(
         tzinfo=user_timezone,
     ).astimezone(timezone.utc)
     organization_id = context.organization_id
-    has_user_contact = exists(
-        select(Contact.id).where(
-            Contact.company_id == Company.id,
-            Contact.organization_id == organization_id,
-            Contact.created_by_user_id == member.id,
-        )
-    )
     event_rows = union_all(
         select(
             literal("searches_run").label("metric"),
@@ -1272,23 +1218,13 @@ def build_member_activity(
             Website.created_at < current_end,
         ),
         select(
-            literal("companies_created").label("metric"),
-            Company.created_at.label("occurred_at"),
+            literal("websites_created").label("metric"),
+            Website.created_at.label("occurred_at"),
         ).where(
-            Company.organization_id == organization_id,
-            Company.created_by_user_id == member.id,
-            Company.created_at >= current_start,
-            Company.created_at < current_end,
-        ),
-        select(
-            literal("leads_created").label("metric"),
-            Company.created_at.label("occurred_at"),
-        ).where(
-            Company.organization_id == organization_id,
-            Company.created_by_user_id == member.id,
-            Company.created_at >= current_start,
-            Company.created_at < current_end,
-            has_user_contact,
+            Website.organization_id == organization_id,
+            Website.created_by_user_id == member.id,
+            Website.created_at >= current_start,
+            Website.created_at < current_end,
         ),
         select(
             literal("crawls_completed").label("metric"),
@@ -1325,8 +1261,7 @@ def build_member_activity(
     metric_names = (
         "searches_run",
         "websites_discovered",
-        "companies_created",
-        "leads_created",
+        "websites_created",
         "crawls_completed",
         "emails_sent",
     )
@@ -1386,7 +1321,7 @@ def _coverage_rate(count: int, total: int) -> OverviewCoverageRate:
 def _build_onboarding(
     *,
     websites_total: int,
-    companies_total: int,
+    has_qualified_website: bool,
     has_search: bool,
     has_tavily_key: bool,
     has_assigned_gmail: bool,
@@ -1412,10 +1347,10 @@ def _build_onboarding(
             completed=websites_total > 0,
         ),
         OverviewOnboardingStep(
-            id="add_leads",
-            label="Add a company to Leads",
+            id="qualify_website",
+            label="Qualify a website",
             href="/websites",
-            completed=companies_total > 0,
+            completed=has_qualified_website,
         ),
         OverviewOnboardingStep(
             id="connect_gmail",

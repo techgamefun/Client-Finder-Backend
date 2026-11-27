@@ -167,7 +167,7 @@ def preview_email_campaign(
         campaign_id=campaign_id,
     )
     return EmailCampaignPreviewResponse(
-        **preview_campaign(db, campaign, payload.company_ids)
+        **preview_campaign(db, campaign, payload.website_ids)
     )
 
 
@@ -186,7 +186,7 @@ def start_email_campaign(
         campaign_id=campaign_id,
         for_update=True,
     )
-    start_campaign(db, campaign, payload.company_ids)
+    start_campaign(db, campaign, payload.website_ids)
     db.refresh(campaign)
     return _campaign_response(db, campaign)
 

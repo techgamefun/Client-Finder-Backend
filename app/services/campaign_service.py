@@ -11,7 +11,6 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Company,
     ConnectedGmailAccount,
     Contact,
     EmailCampaign,
@@ -19,6 +18,7 @@ from app.models import (
     EmailCampaignRecipient,
     EmailTemplate,
     UserGmailAssignment,
+    Website,
 )
 from app.services.email_suppression import (
     email_suppression_reasons,
@@ -122,42 +122,42 @@ def get_eligible_contacts(
     db: Session,
     *,
     org_id: UUID,
-    company_ids: Sequence[UUID],
+    website_ids: Sequence[UUID],
 ) -> tuple[list[tuple[UUID, UUID, str]], list[UUID], int]:
-    companies = db.scalars(
-        select(Company).where(
-            Company.organization_id == org_id,
-            Company.id.in_(company_ids),
+    websites = db.scalars(
+        select(Website).where(
+            Website.organization_id == org_id,
+            Website.id.in_(website_ids),
         )
     ).all()
-    if len(companies) != len(company_ids):
+    if len(websites) != len(website_ids):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="One or more companies were not found.",
+            detail="One or more websites were not found.",
         )
 
-    company_order = {company_id: index for index, company_id in enumerate(company_ids)}
+    website_order = {website_id: index for index, website_id in enumerate(website_ids)}
     contacts = db.scalars(
         select(Contact).where(
             Contact.organization_id == org_id,
-            Contact.company_id.in_(company_ids),
+            Contact.website_id.in_(website_ids),
         )
     ).all()
     contacts.sort(
         key=lambda contact: (
-            company_order[contact.company_id],
+            website_order[contact.website_id],
             str(contact.id),
         )
     )
 
     candidates: list[tuple[UUID, UUID, str]] = []
-    companies_with_email: set[UUID] = set()
+    websites_with_email: set[UUID] = set()
     for contact in contacts:
         email = _normalize_recipient_email(contact.business_email)
         if email is None:
             continue
-        candidates.append((contact.company_id, contact.id, email))
-        companies_with_email.add(contact.company_id)
+        candidates.append((contact.website_id, contact.id, email))
+        websites_with_email.add(contact.website_id)
 
     suppression_reasons = email_suppression_reasons(
         db,
@@ -169,21 +169,21 @@ def get_eligible_contacts(
         for candidate in candidates
         if candidate[2].lower() not in suppression_reasons
     ]
-    skipped_company_ids = [
-        company_id
-        for company_id in company_ids
-        if company_id not in companies_with_email
+    skipped_website_ids = [
+        website_id
+        for website_id in website_ids
+        if website_id not in websites_with_email
     ]
     skipped_suppressed_contacts = sum(
         candidate[2] in suppression_reasons for candidate in candidates
     )
-    return eligible, skipped_company_ids, skipped_suppressed_contacts
+    return eligible, skipped_website_ids, skipped_suppressed_contacts
 
 
 def preview_campaign(
     db: Session,
     campaign: EmailCampaign,
-    company_ids: Sequence[UUID],
+    website_ids: Sequence[UUID],
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -193,10 +193,10 @@ def preview_campaign(
         user_id=campaign.created_by,
         gmail_account_ids=_campaign_account_ids(campaign),
     )
-    contacts, skipped_company_ids, skipped_suppressed_contacts = get_eligible_contacts(
+    contacts, skipped_website_ids, skipped_suppressed_contacts = get_eligible_contacts(
         db,
         org_id=campaign.org_id,
-        company_ids=company_ids,
+        website_ids=website_ids,
     )
     assignments = _round_robin_accounts(
         _campaign_account_ids(campaign),
@@ -209,8 +209,8 @@ def preview_campaign(
     )
     return {
         "eligible_contact_count": len(contacts),
-        "skipped_companies_without_email": len(skipped_company_ids),
-        "skipped_company_ids": skipped_company_ids,
+        "skipped_websites_without_email": len(skipped_website_ids),
+        "skipped_website_ids": skipped_website_ids,
         "skipped_suppressed_contacts": skipped_suppressed_contacts,
         "daily_capacity_per_day": (
             len(campaign.gmail_account_ids) * campaign.daily_limit_per_account
@@ -222,7 +222,7 @@ def preview_campaign(
 def start_campaign(
     db: Session,
     campaign: EmailCampaign,
-    company_ids: Sequence[UUID],
+    website_ids: Sequence[UUID],
     *,
     now: datetime | None = None,
 ) -> None:
@@ -240,7 +240,7 @@ def start_campaign(
     contacts, _, _ = get_eligible_contacts(
         db,
         org_id=campaign.org_id,
-        company_ids=company_ids,
+        website_ids=website_ids,
     )
     assignments = _round_robin_accounts(
         _campaign_account_ids(campaign),
@@ -256,14 +256,14 @@ def start_campaign(
         EmailCampaignRecipient(
             org_id=campaign.org_id,
             campaign_id=campaign.id,
-            company_id=company_id,
+            website_id=website_id,
             contact_id=contact_id,
             gmail_account_id=account_id,
             to_email=to_email,
             scheduled_at=scheduled_at,
             status="pending",
         )
-        for (company_id, contact_id, to_email), (account_id, scheduled_at) in zip(
+        for (website_id, contact_id, to_email), (account_id, scheduled_at) in zip(
             contacts,
             slots,
         )

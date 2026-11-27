@@ -59,13 +59,13 @@ class EmailCampaignCreate(BaseModel):
 
 
 class EmailCampaignPreviewRequest(BaseModel):
-    company_ids: list[UUID] = Field(min_length=1, max_length=5000)
+    website_ids: list[UUID] = Field(min_length=1, max_length=5000)
 
-    @field_validator("company_ids")
+    @field_validator("website_ids")
     @classmethod
-    def company_ids_must_be_unique(cls, value: list[UUID]) -> list[UUID]:
+    def website_ids_must_be_unique(cls, value: list[UUID]) -> list[UUID]:
         if len(set(value)) != len(value):
-            raise ValueError("Company IDs must be unique.")
+            raise ValueError("Website IDs must be unique.")
         return value
 
 
@@ -106,8 +106,8 @@ class EmailCampaignResponse(BaseModel):
 
 class EmailCampaignPreviewResponse(BaseModel):
     eligible_contact_count: int
-    skipped_companies_without_email: int
+    skipped_websites_without_email: int
     skipped_suppressed_contacts: int = 0
-    skipped_company_ids: list[UUID]
+    skipped_website_ids: list[UUID]
     daily_capacity_per_day: int
     estimated_completion_at: datetime | None

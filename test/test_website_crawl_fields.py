@@ -1,6 +1,6 @@
 from sqlalchemy import select
 
-from app.models import Company, Contact, Website, WebsiteCrawl
+from app.models import Contact, Website, WebsiteCrawl
 from app.schemas.website_crawl import WebsiteCrawlResponse
 from app.services.website_crawler import CrawlData, _persist_crawl
 from conftest import TestingSessionLocal
@@ -67,16 +67,15 @@ def test_persist_crawl_stores_home_blog_and_service_pages(client):
     assert website.site_topic == ["real estate", "property management"]
 
 
-def test_persist_crawl_saves_phones_and_syncs_company_contacts(client):
+def test_persist_crawl_saves_phones_and_syncs_website_contacts(client):
     with TestingSessionLocal() as db:
-        company = Company(
-            name="Example Company",
-            website="https://example.com/",
+        website = Website(
+            website_url="https://example.com/",
             domain="example.com",
         )
-        db.add(company)
+        db.add(website)
         db.commit()
-        company_id = company.id
+        website_id = website.id
 
         data = CrawlData(
             website_url="https://example.com/",
@@ -93,7 +92,7 @@ def test_persist_crawl_saves_phones_and_syncs_company_contacts(client):
         response = WebsiteCrawlResponse.model_validate(crawl)
         _persist_crawl(data, db)
         contacts = db.scalars(
-            select(Contact).where(Contact.company_id == company_id)
+            select(Contact).where(Contact.website_id == website_id)
         ).all()
 
     assert response.emails == ["hello@example.com", "HELLO@example.com"]

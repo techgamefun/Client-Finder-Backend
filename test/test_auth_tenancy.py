@@ -1,3 +1,4 @@
+from uuid import UUID
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
@@ -10,6 +11,9 @@ from app.services.auth import (
     access_token_duration_seconds,
     refresh_token_duration_seconds,
 )
+from app.models import Website
+from app.tenant_context import TenantContext
+from conftest import TestingSessionLocal
 
 
 def _invite_user(
@@ -53,7 +57,7 @@ def test_refresh_rotates_tokens_and_revokes_the_previous_refresh_token(client):
         domain="testserver.local",
         path="/",
     )
-    assert client.get("/api/v1/companies").status_code == 401
+    assert client.get("/api/v1/websites").status_code == 401
 
     refreshed = client.post("/api/v1/auth/refresh")
     assert refreshed.status_code == 200
@@ -74,7 +78,7 @@ def test_refresh_rotates_tokens_and_revokes_the_previous_refresh_token(client):
     assert "access_token" not in refreshed.json()
     assert client.cookies.get(ACCESS_TOKEN_COOKIE) != "invalid-access-token"
     assert client.cookies.get(REFRESH_TOKEN_COOKIE) != old_refresh_token
-    assert client.get("/api/v1/companies").status_code == 200
+    assert client.get("/api/v1/websites").status_code == 200
 
     replay_client = TestClient(app)
     replay = replay_client.post(
@@ -158,11 +162,23 @@ def test_signup_starts_in_private_personal_workspace_then_can_create_org(client)
     assert personal_workspace["name"] == "Taylor's Personal Workspace"
     assert personal_session["organization_id"] == personal_workspace["id"]
 
-    personal_company = client.post(
-        "/api/v1/companies",
-        json={"name": "Personal company"},
-    )
-    assert personal_company.status_code == 201
+    with TestingSessionLocal() as db:
+        context = TenantContext(
+            organization_id=UUID(personal_workspace["id"]),
+            user_id=UUID(personal_session["user"]["id"]),
+            email=personal_session["user"]["email"],
+            role=personal_session["user"]["role"],
+        )
+        db.info["tenant_context"] = context
+        personal_website = Website(
+            organization_id=context.organization_id,
+            created_by_user_id=context.user_id,
+            website_url="https://personal.example/",
+            domain="personal.example",
+        )
+        db.add(personal_website)
+        db.commit()
+        personal_website_id = personal_website.id
 
     organization = client.post(
         "/api/v1/auth/organizations",
@@ -177,9 +193,7 @@ def test_signup_starts_in_private_personal_workspace_then_can_create_org(client)
     )
     assert team_workspace["is_personal"] is False
     assert organization_session["organization_id"] == team_workspace["id"]
-    assert client.get(
-        f"/api/v1/companies/{personal_company.json()['id']}"
-    ).status_code == 404
+    assert client.get(f"/api/v1/websites/{personal_website_id}").status_code == 404
 
     selected_personal = client.post(
         "/api/v1/auth/select-organization",
@@ -188,8 +202,8 @@ def test_signup_starts_in_private_personal_workspace_then_can_create_org(client)
     assert selected_personal.status_code == 200
     assert selected_personal.json()["organization_id"] == personal_workspace["id"]
     assert [
-        company["name"] for company in client.get("/api/v1/companies").json()
-    ] == ["Personal company"]
+        website["domain"] for website in client.get("/api/v1/websites").json()
+    ] == ["personal.example"]
     assert client.post(
         "/api/v1/auth/invitations",
         json={"email": "invite@example.test"},
@@ -205,7 +219,7 @@ def test_legacy_session_cookie_is_not_accepted(client):
         path="/",
     )
 
-    assert client.get("/api/v1/companies").status_code == 401
+    assert client.get("/api/v1/websites").status_code == 401
     assert client.post("/api/v1/auth/refresh").status_code == 401
 
 
@@ -251,13 +265,19 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
         last_name="Member",
     )
 
-    first_company = client.post(
-        "/api/v1/companies",
-        json={"name": "First tenant", "domain": "shared.example"},
-    )
-    assert first_company.status_code == 201
+    with TestingSessionLocal() as db:
+        first_context = db.info["tenant_context"]
+        first_website = Website(
+            organization_id=first_context.organization_id,
+            created_by_user_id=first_context.user_id,
+            website_url="https://first.example/",
+            domain="shared.example",
+        )
+        db.add(first_website)
+        db.commit()
+        first_website_id = first_website.id
     first_contact = client.post(
-        f"/api/v1/companies/{first_company.json()['id']}/contacts",
+        f"/api/v1/websites/{first_website_id}/contacts",
         json={"name": "Private first-tenant contact"},
     )
     assert first_contact.status_code == 201
@@ -285,26 +305,39 @@ def test_organizations_cannot_read_or_overwrite_each_others_data(client):
         )
         assert cross_tenant_role_change.status_code == 404
 
-        second_company = second_client.post(
-            "/api/v1/companies",
-            json={"name": "Second tenant", "domain": "shared.example"},
-        )
-        assert second_company.status_code == 201
+        second_session = registration.json()
+        with TestingSessionLocal() as db:
+            db.info["tenant_context"] = TenantContext(
+                organization_id=UUID(second_session["organization_id"]),
+                user_id=UUID(second_session["user"]["id"]),
+                email=second_session["user"]["email"],
+                role=second_session["user"]["role"],
+            )
+            second_website = Website(
+                organization_id=UUID(second_session["organization_id"]),
+                created_by_user_id=UUID(second_session["user"]["id"]),
+                website_url="https://second.example/",
+                domain="shared.example",
+            )
+            db.add(second_website)
+            db.commit()
+            second_website_id = second_website.id
 
         assert second_client.get(
-            f"/api/v1/companies/{first_company.json()['id']}"
+            f"/api/v1/websites/{first_website_id}"
         ).status_code == 404
         assert second_client.get(
-            f"/api/v1/companies/{first_company.json()['id']}/contacts"
+            f"/api/v1/websites/{first_website_id}/contacts"
         ).status_code == 404
-        assert second_client.get(
-            f"/api/v1/companies/{second_company.json()['id']}/contacts/"
-            f"{first_contact.json()['id']}"
+        assert second_client.patch(
+            f"/api/v1/websites/{second_website_id}/contacts/"
+            f"{first_contact.json()['id']}",
+            json={"name": "Cross-tenant edit"},
         ).status_code == 404
 
-    first_list = client.get("/api/v1/companies")
+    first_list = client.get("/api/v1/websites")
     assert first_list.status_code == 200
-    assert [row["name"] for row in first_list.json()] == ["First tenant"]
+    assert [row["domain"] for row in first_list.json()] == ["shared.example"]
     assert first_list.json()[0]["created_by_email"] == "admin@example.test"
 
 

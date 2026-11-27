@@ -13,7 +13,6 @@ from app.services.auth import validate_auth_configuration
 
 from app.api.auth import router as auth_router
 from app.api.media import router as media_router
-from app.api.companies import router as companies_router
 from app.api.discovery import router as discovery_router
 from app.api.excluded_domains import router as excluded_domains_router
 from app.api.gmail import router as gmail_router
@@ -122,13 +121,6 @@ app.include_router(
     prefix="/api/v1",
 )
 
-# Register the companies API.
-app.include_router(
-    companies_router,
-    prefix="/api/v1",
-)
-
-# Register the lead discovery API separately.
 app.include_router(
     discovery_router,
     prefix="/api/v1",

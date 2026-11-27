@@ -33,7 +33,7 @@ TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 TAVILY_USAGE_URL = "https://api.tavily.com/usage"
 
 
-async def search_companies(
+async def search_websites(
     query: str,
     db: Session,
     max_results: int = 20,
@@ -189,7 +189,7 @@ class ProviderSearchOutcome:
     credits_used: float | None = None
 
 
-class LeadDiscoveryTool(Protocol):
+class WebsiteDiscoveryTool(Protocol):
     provider: DiscoveryProvider
 
     async def search(
@@ -213,7 +213,7 @@ class TavilyDiscoveryTool:
         options: TavilyDiscoverySearchRequest | None = None,
         provider_config: str | OctoparseSearchConfig | None = None,
     ) -> ProviderSearchOutcome:
-        response = await search_companies(
+        response = await search_websites(
             query,
             db,
             max_results,
@@ -265,7 +265,7 @@ class OctoparseDiscoveryTool:
         )
 
 
-LEAD_DISCOVERY_TOOLS: dict[DiscoveryProvider, LeadDiscoveryTool] = {
+WEBSITE_DISCOVERY_TOOLS: dict[DiscoveryProvider, WebsiteDiscoveryTool] = {
     DiscoveryProvider.TAVILY: TavilyDiscoveryTool(),
     DiscoveryProvider.OCTOPARSE: OctoparseDiscoveryTool(),
 }
@@ -457,7 +457,7 @@ async def _search_with_preloaded_tools(
         DiscoveryProviderFailure | None,
     ]:
         try:
-            outcome = await LEAD_DISCOVERY_TOOLS[provider].search(
+            outcome = await WEBSITE_DISCOVERY_TOOLS[provider].search(
                 query,
                 max_results,
                 db,
