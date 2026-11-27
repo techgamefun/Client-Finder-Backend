@@ -90,7 +90,6 @@ def client(monkeypatch):
         bootstrap_response = test_client.post(
             "/api/v1/auth/bootstrap",
             json={
-                "organization_name": "Test Organization",
                 "email": "admin@example.test",
                 "password": "test-password-long-enough",
                 "first_name": "Test",
@@ -98,7 +97,14 @@ def client(monkeypatch):
             },
         )
         assert bootstrap_response.status_code == 200
-        session = bootstrap_response.json()
+        bootstrap_session = bootstrap_response.json()
+        assert bootstrap_session["organizations"][0]["is_personal"] is True
+        organization_response = test_client.post(
+            "/api/v1/auth/organizations",
+            json={"name": "Test Organization"},
+        )
+        assert organization_response.status_code == 201
+        session = organization_response.json()
         TestingSessionLocal.configure(
             info={
                 "tenant_context": TenantContext(

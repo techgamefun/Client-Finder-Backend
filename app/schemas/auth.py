@@ -21,11 +21,22 @@ class CredentialsInput(BaseModel):
         return normalized
 
 
-class OrganizationRegistration(CredentialsInput):
-    organization_name: str = Field(min_length=2, max_length=200)
-    organization_description: str | None = Field(default=None, max_length=1000)
+class AccountRegistration(CredentialsInput):
     first_name: str = Field(min_length=1, max_length=100)
     last_name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def normalize_registration_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("First name and last name are required.")
+        return normalized
+
+
+class OrganizationRegistration(AccountRegistration):
+    organization_name: str = Field(min_length=2, max_length=200)
+    organization_description: str | None = Field(default=None, max_length=1000)
 
     @field_validator("organization_name")
     @classmethod
@@ -35,12 +46,16 @@ class OrganizationRegistration(CredentialsInput):
             raise ValueError("Organization name must have at least 2 characters.")
         return normalized
 
-    @field_validator("first_name", "last_name")
+
+class OrganizationCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+
+    @field_validator("name")
     @classmethod
-    def normalize_registration_name(cls, value: str) -> str:
+    def normalize_name(cls, value: str) -> str:
         normalized = value.strip()
-        if not normalized:
-            raise ValueError("First name and last name are required.")
+        if len(normalized) < 2:
+            raise ValueError("Organization name must have at least 2 characters.")
         return normalized
 
 
@@ -97,6 +112,7 @@ class OrganizationOption(BaseModel):
     id: UUID
     name: str
     role: Role
+    is_personal: bool = False
 
 
 class OrganizationUserRoleUpdate(BaseModel):

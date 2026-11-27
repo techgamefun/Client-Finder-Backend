@@ -20,9 +20,17 @@ from app.models import (
     OrganizationMembership,
     User,
 )
-from app.schemas.auth import CredentialsInput, OrganizationRegistration
+from app.schemas.auth import (
+    AccountRegistration,
+    CredentialsInput,
+    OrganizationRegistration,
+)
 from app.services.excluded_domains import seed_system_excluded_domains
-from app.tenant_context import TenantContext
+from app.tenant_context import (
+    TenantContext,
+    reset_tenant_context,
+    set_tenant_context,
+)
 
 
 ACCESS_TOKEN_COOKIE = "lead_intelligence_access"
@@ -32,7 +40,7 @@ PASSWORD_HASH_ITERATIONS = 310_000
 
 
 def create_bootstrap_admin(
-    payload: OrganizationRegistration,
+    payload: AccountRegistration,
     db: Session,
 ) -> User:
     organization = db.scalar(
@@ -48,15 +56,16 @@ def create_bootstrap_admin(
         )
     if organization is None:
         organization = Organization(
-            name=payload.organization_name.strip(),
-            description=payload.organization_description,
+            name=_personal_workspace_name(payload),
+            is_personal=True,
         )
         db.add(organization)
         db.flush()
     else:
-        organization.name = payload.organization_name.strip()
-        organization.description = payload.organization_description
-    seed_system_excluded_domains(db, organization.id)
+        organization.name = _personal_workspace_name(payload)
+        organization.is_personal = True
+        organization.description = None
+    _seed_workspace_defaults(db, organization.id)
 
     user = _create_user(
         db,
@@ -71,6 +80,28 @@ def create_bootstrap_admin(
     return user
 
 
+def register_personal_workspace(
+    payload: AccountRegistration,
+    db: Session,
+) -> User:
+    organization = Organization(
+        name=_personal_workspace_name(payload),
+        is_personal=True,
+    )
+    db.add(organization)
+    db.flush()
+    _seed_workspace_defaults(db, organization.id)
+    return _create_user(
+        db,
+        organization_id=organization.id,
+        email=payload.email,
+        password=payload.password,
+        role="admin",
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+    )
+
+
 def register_organization(
     payload: OrganizationRegistration,
     db: Session,
@@ -81,7 +112,7 @@ def register_organization(
     )
     db.add(organization)
     db.flush()
-    seed_system_excluded_domains(db, organization.id)
+    _seed_workspace_defaults(db, organization.id)
     return _create_user(
         db,
         organization_id=organization.id,
@@ -91,6 +122,27 @@ def register_organization(
         first_name=payload.first_name,
         last_name=payload.last_name,
     )
+
+
+def create_organization_for_user(
+    *,
+    name: str,
+    user: User,
+    db: Session,
+) -> Organization:
+    organization = Organization(name=name)
+    db.add(organization)
+    db.flush()
+    _seed_workspace_defaults(db, organization.id, user=user)
+    create_organization_membership(
+        organization_id=organization.id,
+        user_id=user.id,
+        role="admin",
+        db=db,
+    )
+    db.commit()
+    db.refresh(organization)
+    return organization
 
 
 def create_organization_membership(
@@ -118,6 +170,30 @@ def create_organization_membership(
         membership.is_active = True
         membership.joined_at = datetime.now(timezone.utc)
     return membership
+
+
+def _personal_workspace_name(payload: AccountRegistration) -> str:
+    return f"{payload.first_name}'s Personal Workspace"
+
+
+def _seed_workspace_defaults(
+    db: Session,
+    organization_id: UUID,
+    *,
+    user: User | None = None,
+) -> None:
+    tenant_token = set_tenant_context(
+        TenantContext(
+            organization_id=organization_id,
+            user_id=user.id if user else None,
+            email=user.email if user else "",
+            role="admin" if user else "system",
+        )
+    )
+    try:
+        seed_system_excluded_domains(db, organization_id)
+    finally:
+        reset_tenant_context(tenant_token)
 
 
 def _create_user(

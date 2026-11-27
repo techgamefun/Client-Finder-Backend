@@ -141,6 +141,61 @@ def test_account_profile_updates_names(client):
     assert client.get("/api/v1/auth/me").json()["user"]["first_name"] == "Updated"
 
 
+def test_signup_starts_in_private_personal_workspace_then_can_create_org(client):
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "personal-user@example.test",
+            "password": "personal-password-long",
+            "first_name": "Taylor",
+            "last_name": "Reed",
+        },
+    )
+    assert registration.status_code == 200
+    personal_session = registration.json()
+    personal_workspace = personal_session["organizations"][0]
+    assert personal_workspace["is_personal"] is True
+    assert personal_workspace["name"] == "Taylor's Personal Workspace"
+    assert personal_session["organization_id"] == personal_workspace["id"]
+
+    personal_company = client.post(
+        "/api/v1/companies",
+        json={"name": "Personal company"},
+    )
+    assert personal_company.status_code == 201
+
+    organization = client.post(
+        "/api/v1/auth/organizations",
+        json={"name": "Taylor's Team"},
+    )
+    assert organization.status_code == 201
+    organization_session = organization.json()
+    team_workspace = next(
+        workspace
+        for workspace in organization_session["organizations"]
+        if workspace["name"] == "Taylor's Team"
+    )
+    assert team_workspace["is_personal"] is False
+    assert organization_session["organization_id"] == team_workspace["id"]
+    assert client.get(
+        f"/api/v1/companies/{personal_company.json()['id']}"
+    ).status_code == 404
+
+    selected_personal = client.post(
+        "/api/v1/auth/select-organization",
+        json={"organization_id": personal_workspace["id"]},
+    )
+    assert selected_personal.status_code == 200
+    assert selected_personal.json()["organization_id"] == personal_workspace["id"]
+    assert [
+        company["name"] for company in client.get("/api/v1/companies").json()
+    ] == ["Personal company"]
+    assert client.post(
+        "/api/v1/auth/invitations",
+        json={"email": "invite@example.test"},
+    ).status_code == 409
+
+
 def test_legacy_session_cookie_is_not_accepted(client):
     client.cookies.clear()
     client.cookies.set(

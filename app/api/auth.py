@@ -18,6 +18,7 @@ from app.models import (
     User,
 )
 from app.schemas.auth import (
+    AccountRegistration,
     AccountProfileUpdate,
     AuthSessionResponse,
     AuthUserResponse,
@@ -27,6 +28,7 @@ from app.schemas.auth import (
     OrganizationInvitationListItem,
     OrganizationInvitationPreview,
     OrganizationInvitationResponse,
+    OrganizationCreate,
     OrganizationOption,
     OrganizationProfileResponse,
     OrganizationProfileUpdate,
@@ -42,9 +44,11 @@ from app.services.auth import (
     clear_auth_cookies,
     create_auth_tokens,
     create_bootstrap_admin,
+    create_organization_for_user,
     create_organization_membership,
     hash_password,
     register_organization,
+    register_personal_workspace,
     revoke_refresh_token,
     revoke_user_refresh_tokens,
     rotate_refresh_token,
@@ -71,12 +75,23 @@ def bootstrap_status(db: DatabaseSession) -> dict[str, bool]:
 
 @router.post("/bootstrap", response_model=AuthSessionResponse)
 def bootstrap_admin(
-    payload: OrganizationRegistration,
+    payload: AccountRegistration,
     response: Response,
     db: DatabaseSession,
 ) -> AuthSessionResponse:
     validate_auth_configuration()
     user = create_bootstrap_admin(payload, db)
+    return _start_session(user, response, db)
+
+
+@router.post("/register", response_model=AuthSessionResponse)
+def register_account(
+    payload: AccountRegistration,
+    response: Response,
+    db: DatabaseSession,
+) -> AuthSessionResponse:
+    validate_auth_configuration()
+    user = register_personal_workspace(payload, db)
     return _start_session(user, response, db)
 
 
@@ -260,6 +275,15 @@ def create_organization_invitation(
     db: DatabaseSession,
 ) -> OrganizationInvitationResponse:
     context = require_admin_context()
+    organization = db.get(Organization, context.organization_id)
+    if organization is not None and organization.is_personal:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Personal workspaces cannot invite members. "
+                "Create an organization to collaborate."
+            ),
+        )
     membership = db.scalar(
         select(OrganizationMembership).join(
             User,
@@ -479,6 +503,37 @@ def revoke_organization_invitation(
     db.commit()
 
 
+@router.post(
+    "/organizations",
+    response_model=AuthSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_new_organization(
+    payload: OrganizationCreate,
+    request: Request,
+    response: Response,
+    db: DatabaseSession,
+) -> AuthSessionResponse:
+    context = _required_context(request)
+    user = db.get(User, context.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your account is no longer available.",
+        )
+    organization = create_organization_for_user(
+        name=payload.name,
+        user=user,
+        db=db,
+    )
+    return _start_session(
+        user,
+        response,
+        db,
+        organization_id=organization.id,
+    )
+
+
 @router.post("/select-organization", response_model=AuthSessionResponse)
 def select_organization(
     payload: OrganizationSelection,
@@ -689,6 +744,7 @@ def _session_response(
                 id=membership.organization_id,
                 name=member_organization.name,
                 role=membership.role,
+                is_personal=member_organization.is_personal,
             )
             for membership, member_organization in memberships
         ],

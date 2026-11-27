@@ -158,7 +158,7 @@ class UserPreferencesUpdate(BaseModel):
 
 
 class UserPreferencesResponse(BaseModel):
-    theme: ThemePreference = "system"
+    theme: ThemePreference = "light"
     sidebar_collapsed: bool = False
     search: UserSearchPreferences = Field(default_factory=UserSearchPreferences)
     websites: WebsiteTablePreferences = Field(

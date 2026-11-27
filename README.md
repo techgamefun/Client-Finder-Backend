@@ -349,7 +349,7 @@ is checked immediately before sending (MX, with the standard A/AAAA fallback).
 This does not validate that a specific mailbox exists; SMTP recipient probing
 is not performed.
 
-The Go background worker claims due recipients with
+The standalone Go `email-worker` claims due recipients with
 `FOR UPDATE SKIP LOCKED`, renders each message with the same sandboxed template
 service as single-email sends, and sends through the assigned Gmail account.
 It also periodically checks Gmail threads for contact
@@ -359,7 +359,7 @@ sent as unrelated new threads may not be associated. It recognizes hard-bounce
 reports containing common permanent-failure signals; this is not a general
 Gmail webhook or complaint feed. Detected hard bounces are added to the
 platform-wide suppression list. Monitoring defaults to every five minutes;
-set `EMAIL_MONITOR_INTERVAL_SECONDS` in the Go worker environment (30–86400
+set `EMAIL_MONITOR_INTERVAL_SECONDS` in the `email-worker` environment (30–86400
 seconds) to change it.
 `GET /api/v1/gmail/accounts/health` reports per-account send, reply, bounce,
 failure, unverified-address, and monitor status metrics for the last 30 days.
@@ -496,29 +496,27 @@ By default, Uvicorn listens on `http://127.0.0.1:8000`.
 
 ### Background workers
 
-The separate Go worker in `../background-worker` owns website crawl, PageSpeed,
-keyword, Ahrefs, and HypeStat jobs and persists results in PostgreSQL. The
-Python worker code has been removed. Campaign email sending and Gmail
-reply/bounce monitoring are also handled in Go, but require the opt-in
-`WORKER_CAMPAIGN_SENDING_ENABLED` and `WORKER_GMAIL_MONITORING_ENABLED` flags.
-Both default to false. Configure the Google OAuth client credentials and the
-same `GMAIL_TOKEN_ENCRYPTION_KEY` used by the API before enabling either job.
+Website crawl jobs are owned by the standalone Go worker in
+`../website-crawler-worker`. PageSpeed, keyword, Ahrefs, and HypeStat jobs are
+owned by `../background-worker`; both persist results in PostgreSQL. Campaign
+email sending and Gmail reply/bounce monitoring run in the standalone
+`../email-worker` project, which polls PostgreSQL directly and does not use
+Upstash queues. Configure the Google OAuth client credentials and the same
+`GMAIL_TOKEN_ENCRYPTION_KEY` used by the API. Campaign sending and Gmail
+monitoring are always active when this worker starts.
 Campaign sending also needs `FRONTEND_URL` and a matching
 `EMAIL_UNSUBSCRIBE_SECRET` (or the same `ACCESS_TOKEN_SECRET` as the API).
 
-For local development, run the Go service from `../background-worker`. The
-local Go worker configuration has campaign sending and Gmail monitoring enabled
-for this cutover. Starting it can immediately send due recipients in running
+For local development, run the relevant Go worker from each project directory.
+Starting the email worker can immediately send due recipients in running
 campaigns. If Gmail accepts a send but its response is ambiguous, Go marks the
 recipient failed rather than retrying it, to avoid duplicate messages.
 
-For one crawler, set `WEB_CRAWLER_SERVICE_URL`. To distribute crawls across multiple
-crawler services, set `WEB_CRAWLER_SERVICE_URLS` to a comma-separated list of
-their base URLs; `/health` suffixes are accepted and removed. The list takes
-precedence over the single-URL setting. `CRAWL_JOB_CONCURRENCY` controls the
-maximum number of queued crawls per worker (default 5, maximum 10). Set this
-to match the number of available crawler services, and account for each worker
-process applying its own limit.
+Configure `WEB_CRAWLER_SERVICE_URLS` and `CRAWL_JOB_CONCURRENCY` in
+`../website-crawler-worker` to set the crawler service URL list and crawl
+concurrency. That project consumes only the website-crawl queue;
+`../background-worker` handles provider queues, and `../email-worker` handles
+campaign and Gmail processing.
 
 ## API usage
 

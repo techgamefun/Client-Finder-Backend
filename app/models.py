@@ -40,6 +40,12 @@ class Organization(Base):
         default=uuid4,
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    is_personal: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
     description: Mapped[str | None] = mapped_column(String(1000))
     logo_url: Mapped[str | None] = mapped_column(String(2048))
     banner_url: Mapped[str | None] = mapped_column(String(2048))

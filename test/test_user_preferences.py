@@ -18,7 +18,7 @@ def test_user_preferences_save_and_merge_per_user(client):
     initial = client.get("/api/v1/preferences")
     assert initial.status_code == 200
     assert initial.json() == {
-        "theme": "system",
+        "theme": "light",
         "sidebar_collapsed": False,
         "search": {"providers": None, "tavily": None},
         "websites": {"visible_columns": None},
@@ -113,7 +113,7 @@ def test_user_preferences_are_isolated_between_users(client):
     response = client.get("/api/v1/preferences")
 
     assert response.status_code == 200
-    assert response.json()["theme"] == "system"
+    assert response.json()["theme"] == "light"
     assert response.json()["sidebar_collapsed"] is False
     with TestingSessionLocal() as db:
         own_preferences = db.get(UserPreferences, user_id)
