@@ -121,7 +121,16 @@ def upsert_website(
 def update_websites_status(
     db: Session,
     website_ids: list[UUID],
-    status: Literal["new", "lead", "checked"],
+    status: Literal[
+        "new",
+        "lead",
+        "checked",
+        "qualified",
+        "contacted",
+        "converted",
+        "disqualified",
+        "needs_review",
+    ],
 ) -> tuple[int, int]:
     unique_ids = list(dict.fromkeys(website_ids))
     websites = db.scalars(

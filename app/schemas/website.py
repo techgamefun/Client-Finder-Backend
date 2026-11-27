@@ -34,7 +34,16 @@ class WebsiteResponse(BaseModel):
     page_type: str | None
     site_topic: list[str]
     language: str | None
-    status: Literal["new", "lead", "checked"]
+    status: Literal[
+        "new",
+        "lead",
+        "checked",
+        "qualified",
+        "contacted",
+        "converted",
+        "disqualified",
+        "needs_review",
+    ]
     discovery_source: str
     discovery_provider: str | None
     created_at: datetime
@@ -242,7 +251,16 @@ class WebsiteAddToLeadsResponse(BaseModel):
 
 class WebsiteBatchStatusUpdateRequest(BaseModel):
     website_ids: list[UUID] = Field(min_length=1, max_length=500)
-    status: Literal["new", "lead", "checked"]
+    status: Literal[
+        "new",
+        "lead",
+        "checked",
+        "qualified",
+        "contacted",
+        "converted",
+        "disqualified",
+        "needs_review",
+    ]
 
 
 class WebsiteBatchStatusUpdateResponse(BaseModel):
@@ -254,7 +272,16 @@ class WebsiteBatchStatusUpdateResponse(BaseModel):
 class WebsiteUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["new", "lead", "checked"] = "new"
+    status: Literal[
+        "new",
+        "lead",
+        "checked",
+        "qualified",
+        "contacted",
+        "converted",
+        "disqualified",
+        "needs_review",
+    ] = "new"
     page_type: Literal[
         "business_site",
         "business_listing",

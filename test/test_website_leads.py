@@ -1,5 +1,6 @@
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -293,6 +294,50 @@ def test_website_status_can_be_updated_to_checked(client):
     assert response.status_code == 200
     assert response.json()["status"] == "checked"
     assert invalid_response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "website_status",
+    ["qualified", "contacted", "converted", "disqualified", "needs_review"],
+)
+def test_website_workflow_statuses_can_be_updated_and_filtered(
+    client,
+    website_status,
+):
+    domain = f"{website_status}.example"
+    with TestingSessionLocal() as db:
+        website = Website(
+            website_url=f"https://{domain}/",
+            domain=domain,
+        )
+        db.add(website)
+        db.commit()
+        website_id = website.id
+
+    batch_response = client.patch(
+        "/api/v1/websites/batch-status",
+        json={
+            "website_ids": [str(website_id)],
+            "status": website_status,
+        },
+    )
+    update_response = client.patch(
+        f"/api/v1/websites/{website_id}",
+        json={"status": website_status},
+    )
+    filtered_response = client.get(
+        "/api/v1/websites/registry-page",
+        params={"status": website_status},
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["status"] == website_status
+    assert filtered_response.status_code == 200
+    assert [item["id"] for item in filtered_response.json()["items"]] == [
+        str(website_id)
+    ]
+    assert batch_response.status_code == 200
+    assert batch_response.json()["updated_count"] == 1
 
 
 def test_batch_website_status_update_changes_selected_rows(client):

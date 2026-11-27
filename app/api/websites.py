@@ -158,10 +158,17 @@ def list_website_registry_page(
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     search: Annotated[str, Query(max_length=300)] = "",
-    status_filter: Literal["new", "lead", "checked"] | None = Query(
-        default=None,
-        alias="status",
-    ),
+    status_filter: Literal[
+        "new",
+        "lead",
+        "checked",
+        "qualified",
+        "contacted",
+        "converted",
+        "disqualified",
+        "needs_review",
+    ]
+    | None = Query(default=None, alias="status"),
     page_type: str | None = Query(default=None, max_length=64),
     category: str | None = Query(default=None, max_length=100),
     discovery_source: str | None = Query(default=None, max_length=255),

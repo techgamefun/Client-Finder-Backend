@@ -1400,7 +1400,8 @@ class Website(TenantOwnedMixin, Base):
             name="uq_websites_organization_domain",
         ),
         CheckConstraint(
-            "status IN ('new', 'lead', 'checked')",
+            "status IN ('new', 'lead', 'checked', 'qualified', 'contacted', "
+            "'converted', 'disqualified', 'needs_review')",
             name="ck_websites_status_allowed",
         ),
         Index("ix_websites_page_type", "page_type"),
