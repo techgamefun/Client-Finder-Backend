@@ -28,6 +28,7 @@ class WebsiteResponse(BaseModel):
     id: UUID
     website_url: str
     domain: str
+    emails: list[str] = Field(default_factory=list)
     business_name: str | None = None
     industry: str | None = None
     city: str | None = None

@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from conftest import TestingSessionLocal
 from app.models import (
+    Contact,
     ExcludedDomain,
     PageSpeedScan,
     PageSpeedScanJob,
@@ -31,18 +32,30 @@ def test_websites_endpoint_returns_domain_and_crawl_details(client):
         )
         db.add(crawl)
         db.flush()
-        db.add(
-            Website(
-                website_url=crawl.website_url,
-                domain="example.com",
-                crawl_id=crawl.id,
-                category=crawl.site_type,
-                discovery_source="tavily",
-                discovery_provider="tavily",
-            )
+        website = Website(
+            website_url=crawl.website_url,
+            domain="example.com",
+            crawl_id=crawl.id,
+            category=crawl.site_type,
+            discovery_source="tavily",
+            discovery_provider="tavily",
+        )
+        db.add(website)
+        db.flush()
+        db.add_all(
+            [
+                Contact(
+                    website_id=website.id,
+                    business_email="hello@example.com",
+                ),
+                Contact(
+                    website_id=website.id,
+                    business_email="sales@example.com",
+                ),
+            ]
         )
         db.commit()
-        website_id = db.scalar(select(Website.id))
+        website_id = website.id
 
     response = client.get("/api/v1/websites")
 
@@ -51,6 +64,7 @@ def test_websites_endpoint_returns_domain_and_crawl_details(client):
     assert website["id"] == str(website_id)
     assert website["website_url"] == "https://example.com/"
     assert website["domain"] == "example.com"
+    assert website["emails"] == ["hello@example.com", "sales@example.com"]
     assert website["status"] == "new"
     assert "company_id" not in website
     assert "review_status" not in website
@@ -63,6 +77,9 @@ def test_websites_endpoint_returns_domain_and_crawl_details(client):
     assert website["discovery_provider"] == "tavily"
     assert website["created_at"]
     assert website["crawled_at"]
+    registry_response = client.get("/api/v1/websites/registry-page")
+    assert registry_response.status_code == 200
+    assert registry_response.json()["items"][0]["emails"] == website["emails"]
     website_parameters = client.get("/openapi.json").json()["paths"][
         "/api/v1/websites"
     ]["get"]["parameters"]

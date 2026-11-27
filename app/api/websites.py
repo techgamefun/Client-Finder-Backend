@@ -143,6 +143,7 @@ def list_websites(
         .options(
             selectinload(Website.crawl),
             selectinload(Website.hypestat_profile),
+            selectinload(Website.contacts).load_only(Contact.business_email),
         )
         .order_by(Website.created_at.desc(), Website.id.desc())
         .limit(limit)
@@ -997,6 +998,11 @@ def _website_response(
     include_crawl_signals: bool = True,
     include_created_by: bool = True,
 ) -> WebsiteResponse:
+    emails_by_normalized: dict[str, str] = {}
+    for contact in website.contacts:
+        email = (contact.business_email or "").strip()
+        if email:
+            emails_by_normalized.setdefault(email.casefold(), email)
     crawl_signals = []
     if include_crawl_signals and website.crawl is not None:
         crawl_signals = [
@@ -1012,6 +1018,7 @@ def _website_response(
         id=website.id,
         website_url=website.website_url,
         domain=website.domain,
+        emails=sorted(emails_by_normalized.values(), key=str.casefold),
         business_name=website.business_name,
         industry=website.industry,
         city=website.city,

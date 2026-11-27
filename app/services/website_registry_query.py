@@ -11,9 +11,16 @@ from sqlalchemy import (
     or_,
     select,
 )
-from sqlalchemy.orm import Session, contains_eager, joinedload, load_only
+from sqlalchemy.orm import (
+    Session,
+    contains_eager,
+    joinedload,
+    load_only,
+    selectinload,
+)
 
 from app.models import (
+    Contact,
     ExcludedDomain,
     PageSpeedScan,
     Website,
@@ -491,6 +498,7 @@ def get_website_registry_page(
         joinedload(Website.hypestat_profile).load_only(
             WebsiteHypeStatProfile.payload,
         ),
+        selectinload(Website.contacts).load_only(Contact.business_email),
     )
     if needs_profile_join or sort_by in {
         "hypestat_monthly_visits",
