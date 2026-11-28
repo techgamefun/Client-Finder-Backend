@@ -109,8 +109,6 @@ class WebsiteCrawlResponse(BaseModel):
     classification_signals: list[CrawlPageClassification] = Field(
         default_factory=list,
     )
-    emails: list[str] = Field(default_factory=list)
-    phones: list[str] = Field(default_factory=list)
     social_links: list[str] = Field(default_factory=list)
     source: Literal["crawler", "manual"] = "crawler"
     crawled_at: datetime

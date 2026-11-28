@@ -930,7 +930,6 @@ def test_website_detail_includes_crawl_content_signals_and_job_history(client):
             home_content="Welcome to the store.",
             about_page_url="https://detail.example/about",
             about_content="About the store.",
-            emails=["hello@detail.example"],
             social_links=["https://social.example/detail"],
             classification_signals=[
                 {
@@ -958,6 +957,13 @@ def test_website_detail_includes_crawl_content_signals_and_job_history(client):
             discovery_provider="tavily",
         )
         db.add(website)
+        db.flush()
+        db.add(
+            Contact(
+                website_id=website.id,
+                business_email="hello@detail.example",
+            )
+        )
         website.search_keywords.append(
             SearchKeyword(
                 keyword="home goods manufacturers",
@@ -994,7 +1000,10 @@ def test_website_detail_includes_crawl_content_signals_and_job_history(client):
     assert result["website"]["crawl_job_status"] == "succeeded"
     assert result["crawl"]["home_content"] == "Welcome to the store."
     assert result["crawl"]["about_content"] == "About the store."
-    assert result["crawl"]["emails"] == ["hello@detail.example"]
+    assert "emails" not in result["crawl"]
+    assert [contact["business_email"] for contact in result["contacts"]] == [
+        "hello@detail.example"
+    ]
     assert result["crawl"]["social_links"] == [
         "https://social.example/detail",
     ]

@@ -215,8 +215,6 @@ def _upsert_crawl(
     record.contact_content = crawl.contact_content
     record.goals_page_url = crawl.goals_page_url
     record.goals_content = crawl.goals_content
-    record.emails = crawl.emails
-    record.phones = crawl.phones
     record.social_links = crawl.social_links
     record.crawled_at = datetime.now(timezone.utc)
     db.flush()

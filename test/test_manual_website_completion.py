@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from conftest import TestingSessionLocal
 from app.models import (
+    Contact,
     PageSpeedScanJob,
     UserProviderCredential,
     Website,
@@ -114,12 +115,22 @@ def test_manual_completion_saves_data_and_queues_configured_enrichment(
         assert crawl.source == "manual"
         assert crawl.site_type == "B2B SaaS"
         assert crawl.home_content == "Reporting tools for growing teams."
-        assert crawl.emails == ["hello@manual.example"]
 
         website = db.scalar(
             select(Website).where(Website.domain == "manual.example")
         )
         assert website is not None
+        contacts = db.scalars(
+            select(Contact).where(Contact.website_id == website.id)
+        ).all()
+        assert {
+            contact.business_email for contact in contacts
+            if contact.business_email
+        } == {"hello@manual.example"}
+        assert {
+            contact.business_phone for contact in contacts
+            if contact.business_phone
+        } == {"+1 555 010 1234"}
         assert website.category == "B2B SaaS"
         assert website.site_topic == ["analytics", "automation"]
         assert website.language == "English"

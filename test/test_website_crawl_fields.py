@@ -67,7 +67,7 @@ def test_persist_crawl_stores_home_blog_and_service_pages(client):
     assert website.site_topic == ["real estate", "property management"]
 
 
-def test_persist_crawl_saves_phones_and_syncs_website_contacts(client):
+def test_persist_crawl_saves_contacts_without_copying_them_to_crawl(client):
     with TestingSessionLocal() as db:
         website = Website(
             website_url="https://example.com/",
@@ -95,8 +95,8 @@ def test_persist_crawl_saves_phones_and_syncs_website_contacts(client):
             select(Contact).where(Contact.website_id == website_id)
         ).all()
 
-    assert response.emails == ["hello@example.com", "HELLO@example.com"]
-    assert response.phones == ["+1 (555) 0100", "15550100"]
+    assert not hasattr(response, "emails")
+    assert not hasattr(response, "phones")
     assert len(contacts) == 2
     assert {contact.business_email for contact in contacts if contact.business_email} == {
         "hello@example.com",

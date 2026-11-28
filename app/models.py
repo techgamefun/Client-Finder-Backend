@@ -1033,13 +1033,6 @@ class WebsiteCrawl(TenantOwnedMixin, Base):
         default=list,
         server_default="[]",
     )
-    emails: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
-    phones: Mapped[list[str]] = mapped_column(
-        JSON,
-        nullable=False,
-        default=list,
-        server_default="[]",
-    )
     social_links: Mapped[list[str]] = mapped_column(
         JSON,
         nullable=False,

@@ -21,6 +21,7 @@ from app.schemas.website_crawl import (
     ManualWebsiteCrawlCompletionRequest,
     ManualWebsiteCrawlCompletionResponse,
 )
+from app.services.contact_import import add_crawl_contacts
 from app.services.application_settings import (
     get_hypestat_settings,
     get_user_provider_api_key,
@@ -129,16 +130,13 @@ def _complete_failed_website_crawl_manually(
             value = getattr(payload, field)
             if value is not None:
                 setattr(crawl, field, str(value) if field.endswith("_url") else value)
-        if payload.emails:
-            crawl.emails = payload.emails
-        if payload.phones:
-            crawl.phones = payload.phones
         if payload.social_links:
             crawl.social_links = [str(link) for link in payload.social_links]
         crawl.crawled_at = now
         db.flush()
 
         website.crawl_id = crawl.id
+        add_crawl_contacts(website, payload.emails, payload.phones)
         job.crawl_id = crawl.id
         job.status = "manual"
         job.completed_at = now

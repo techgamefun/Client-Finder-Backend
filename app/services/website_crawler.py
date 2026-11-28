@@ -204,8 +204,6 @@ def _persist_crawl(
                     for page in data.pages
                 ]
                 crawl.classification_signals = page_signals
-            crawl.emails = data.emails
-            crawl.phones = data.phones
             crawl.social_links = data.social_links
             crawl.crawled_at = datetime.now(timezone.utc)
             website = upsert_website(
